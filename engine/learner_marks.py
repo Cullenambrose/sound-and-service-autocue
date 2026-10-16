@@ -5,6 +5,7 @@ import json, os, re, sys, statistics as stt
 from collections import Counter
 R = "/workspace/research/dj-auto-cues/proof/real"; sys.path.insert(0, f"{R}/tools")
 ns = {}; exec(open(f"{R}/tools/gemini_v2.py").read().split("def call(")[0], ns); M, bars_of_truth = ns["M"], ns["bars_of_truth"]
+STRICT = os.environ.get("LEARNER_STRICT", "1") == "1"   # claim 8 fix: >=65% agreement, >=4 hits, LOO gain, no exact track broken (LEARNER_STRICT=0 = old 3-song/40%)
 CORR = os.environ.get("CORRECTIONS", f"{R}/corrections/corrections.json")
 def song_type(nn):
     n = json.load(open(f"{R}/cues/allin1/{nn}.json")); import csv
@@ -41,12 +42,15 @@ def learn(songs, corr):
             for gv in groups:
                 offs = [tr[L] - en[L] for nn, (tr, en, cx) in data.items() if L in tr and en[L] is not None and (cx[key] if key else "*") == gv]
                 o, k = Counter(offs).most_common(1)[0]
-                if len(offs) >= 3 and k / len(offs) >= 0.4: tab[gv] = {"offset_bars": o, "support": f"{k}/{len(offs)}"}
+                if (STRICT and o != 0 and k >= 4 and k / len(offs) >= 0.65) or (not STRICT and len(offs) >= 3 and k / len(offs) >= 0.4): tab[gv] = {"offset_bars": o, "support": f"{k}/{len(offs)}"}
             # training fit: how many exact hits with this table vs no change
             fit = sum((tr[L] - en[L]) == tab.get(cx[key] if key else "*", {"offset_bars": 0})["offset_bars"] for nn, (tr, en, cx) in data.items() if L in tr and en[L] is not None)
             base = sum(tr[L] == en[L] for nn, (tr, en, cx) in data.items() if L in tr and en[L] is not None)
             if best is None or fit > best[0]: best = (fit, key, tab, base)
         fit, key, tab, base = best
+        if STRICT and fit > base:   # never break a track the engine already had exactly right
+            broke = [nn for nn, (tr, en, cx) in data.items() if L in tr and en[L] is not None and tr[L] == en[L] and tab.get(cx[key] if key else "*", {"offset_bars": 0})["offset_bars"] != 0]
+            if broke: fit = base
         out[L] = {"key": key, "table": tab, "train_hits": fit, "train_hits_no_rule": base} if fit > base else {"key": None, "table": {}, "train_hits": base}
     return out
 def offset_for(rules, L, cx):
@@ -59,6 +63,13 @@ def main():
         rules = learn([x for x in songs if x != nn], [e for e in corr if e.get("track") != nn])
         loo[nn] = {L: offset_for(rules, L, ctx(nn)) for L in "BCDH"}
     full = learn(songs, corr)
+    if STRICT:   # keep a cue's rule only if leave-one-out hits beat no-rule hits
+        for L in "BCDH":
+            hit = sum(truth(nn, corr).get(L) is not None and engine(nn)[L] is not None and truth(nn, corr)[L] - engine(nn)[L] == loo[nn][L] for nn in songs)
+            base = sum(truth(nn, corr).get(L) is not None and truth(nn, corr)[L] == engine(nn)[L] for nn in songs)
+            if hit <= base:
+                full[L] = {"key": None, "table": {}, "train_hits": base, "dropped": f"LOO {hit} <= no-rule {base}"}
+                for nn in songs: loo[nn][L] = 0
     prof = {"built_from": {"truth_songs": len(songs), "corrections": len(corr), "corrections_file": CORR}, "rules": full,
             "song_context": {nn: ctx(nn) for nn in songs}}
     json.dump(prof, open(f"{R}/learned_profile_marks.json", "w"), indent=1); json.dump(loo, open(f"{R}/learn_loo_marks.json", "w"), indent=1)

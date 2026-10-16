@@ -5,7 +5,10 @@ Changes (FLAGS): loops_phrase, exit_phrase, chorus_verify, drop_robust, tempo_ch
 Usage: rules_v5.py [--root R] [--out DIR] [--off flag,flag] [--only flag]   (default: all on; writes R/cues_v2/allin1/v5_go32)"""
 import json, os, sys, math, ast, re, argparse, numpy as np
 TOOLS = os.path.dirname(os.path.abspath(__file__))
-FLAGS = ["loops_phrase", "exit_phrase", "chorus_verify", "drop_robust", "tempo_check", "cold_start", "consensus", "genre_params"]
+FLAGS = ["loops_phrase", "exit_phrase", "chorus_verify", "drop_robust", "tempo_check", "cold_start", "consensus", "genre_params",
+         "fix_start", "fix_lead", "fix_chorus", "fix_exit_lead"]   # fix_* = verified Gemini code-review bugs (claims 1, 2, 4, 5)
+FIXES = [f for f in FLAGS if f.startswith("fix_")]
+DEFAULT_OFF = set(FIXES) if os.environ.get("V5_FIXES", "1") == "0" else {"fix_start"}   # fix_start: real bug, but fixing it scored worse vs MIK (35->34) and moved 18/19/20 START earlier; opt in with --off ""
 GL = 8  # GO = EXIT - 32 beats = 8 bars
 
 def load(p, default=None):
@@ -26,6 +29,11 @@ class Song:
             if raw: s.sf = {"segments": [{"j0": round((x["start"] - s.g["t1"]) / s.g["bar_s"]), "j1": round((x["end"] - s.g["t1"]) / s.g["bar_s"]), "cls": x.get("label", "")} for x in raw]}
         s.raw = load(f"{R}/out/allin1/{nn}.json"); s.bt = load(f"{R}/out/beat_this/{nn}.json")
         s.tags = load(f"{R}/serato_tags.json", {}).get(nn, {}); s.genre = load(os.environ.get("V5_GENRE_TAGS", f"{R}/genre_tags.json"), {}).get(nn, "")
+        p = f"{R}/out/lead/{nn}.npz"; s.lead = dict(np.load(p)) if os.path.exists(p) else None
+    def lead_frac(s, j, n=1):
+        if s.lead is None or j < 0: return None
+        x = s.lead["lead"]; h = float(s.lead["hop_s"]); x = x / (np.percentile(x, 95) + 1e-9)
+        a, b = int(max(0, s.t(j)) / h), int(max(0, s.t(j + n)) / h); y = x[a:b]; return float((y > 0.2).mean()) if len(y) else 0.0
     def t(s, j): return s.g["t1"] + j * s.g["bar_s"]
     def first(s): return max(0, math.ceil(-s.g["t1"] / s.g["bar_s"] - 1e-6))
     def frames(s, j, n=1):
@@ -137,6 +145,21 @@ def build(S, on, cfg):
     P, buck, perc = params(S, on, cfg); c = json.loads(json.dumps(S.plan["cues"])); notes = {"bucket": buck, "percussion_density": perc, "params": P}
     B = c["B"].get("bar"); H = c["H"].get("bar"); fl = lambda L, m: c[L].setdefault("flags", []).append(m)
     why = lambda L, m: c[L].__setitem__("reason", (c[L].get("reason") or "") + "; v5: " + m)
+    # fix_start (claim 1): v2 pick_start forced any engine START <= bar 4 to bar 8. Keep a real 4-7 bar intro, and keep
+    # j < 4 when the lead vocal runs across bars 0-3 (true short/cold start).
+    v1B = (S.d1["cues"].get("B") or {}).get("bar")
+    if on("fix_start") and B is not None and v1B is not None and "missed intro" in (c["B"].get("reason") or "") and v1B != B:
+        lf = S.lead_frac(0, 4); dr = np.mean([S.bar_frac("drums", j, 0.15) or 0 for j in range(4)]) if S.st is not None else 0
+        # j < 4 only when lead vocal AND drums run over bars 0-3 (a cappella intros, e.g. 15 Cupid Shuffle 'Aca In', keep v4's START)
+        if v1B >= 4 or (lf is not None and lf > 0.35 and dr > 0.5):
+            why("B", f"fix_start: kept engine START {v1B} ({'real 4+ bar intro' if v1B >= 4 else 'lead vocal runs over bars 0-3'}) instead of forced bar {B}"); B = v1B; c["B"]["bar"] = B
+    # fix_lead (claim 2): v_lead stopped at the first vocal run (intro tease) and only looked +-2 bars. Look at every sustained
+    # lead run that starts after a >=2-bar vocal gap, within +-4 bars of START, nearest first, phrase-aligned (4-bar) preferred.
+    if on("fix_lead") and B is not None and S.lead is not None:
+        on_ = [(S.lead_frac(j) or 0) > 0.35 for j in range(S.nb)]
+        runs = [j for j in range(S.nb - 3) if on_[j] and sum(on_[j:j + 3]) >= 2 and (j < 2 or not any(on_[j - 2:j]))]
+        near = sorted((j for j in runs if abs(j - B) <= 4), key=lambda j: (abs(j - B) > 1 and j % 4 != 0, abs(j - B)))
+        if near and near[0] != B: why("B", f"fix_lead: lead vocal run starts at bar {near[0]} (after a vocal gap); moved {B}->{near[0]}"); B = near[0]; c["B"]["bar"] = B
     # 6 cold start
     if on("cold_start") and S.st is not None:
         v0 = max(S.bar_frac("vocals", S.first(), 0.2) or 0, S.bar_frac("vocals", S.first() + 1, 0.2) or 0)
@@ -156,6 +179,14 @@ def build(S, on, cfg):
             cand = sorted((j for j in range(H - 2, H + 3) if drop_ok(S, j, P)), key=lambda j: (abs(j - H), j))
             if cand: why("H", f"drums+bass not down for a full bar at {H}; moved to {cand[0]}"); H = cand[0]
             else: why("H", "no bar nearby where drums+bass stay down a full bar (beat keeps running; kept)")
+        # fix_exit_lead (claim 5): on drum outros the beat continues but the lead vocal stops for >= 4 bars. Accept that bar.
+        if on("fix_exit_lead") and S.lead is not None and S.st is not None:
+            def vdrop(j): 
+                pre = S.lead_frac(j - 2, 2) or 0; post = S.lead_frac(j, 4) or 0; dr = S.bar_frac("drums", j, 0.15) or 0
+                return pre > 0.35 and post < 0.12 and dr > 0.4
+            if not vdrop(H) and chk(S, H, P) is not True:
+                cand = sorted((j for j in range(H - 2, H + 3) if vdrop(j)), key=lambda j: (abs(j - H), j))
+                if cand: why("H", f"fix_exit_lead: lead vocal stops for 4+ bars at {cand[0]} while drums continue; moved {H}->{cand[0]}"); H = cand[0]
         if on("exit_phrase") and B is not None:
             pb = P["exit_phrase_bars"]; r = P["exit_snap_radius"]
             if (H - B) % 4 == 0: c["H"]["confidence"] += 0.05; why("H", "on the phrase grid from START")
@@ -170,6 +201,25 @@ def build(S, on, cfg):
         n = next((k for k in (8, 4, 2, 1) if B - k >= S.first()), None)
         if n: c["A"].update(bar=B - n, bars_before=n, name=f"{n}BS", confidence=c["B"]["confidence"] - 0.02)
         else: c["A"].update(bar=None, name="BS", flags=["needs review: no room for A"])
+    # fix_chorus (claim 4): v2 used lyrics/similarity only when allin1 had zero chorus labels after START. When labels give <2
+    # distinct choruses after START, score every section start in [START+4, EXIT-4]: label 1.0 + recurrence 0.8 + lyric hook 0.5
+    # + drums/bass jump 0.5; C = first, D = last with score >= 1.3. (Adjacent chorus merging already exists in rules.py.)
+    if on("fix_chorus") and B is not None:
+        lab = sorted({s_["j0"] for s_ in S.segs if s_["cls"] == "chorus" and B + 4 <= s_["j0"] and (H is None or s_["j0"] < H - 4)})
+        if len(lab) < 2:
+            big = [s_ for s_ in S.segs if s_["cls"] == "chorus" and s_["j1"] - s_["j0"] > 24]
+            cands = sorted({s_["j0"] for s_ in S.segs} | {s_["j0"] + k for s_ in big for k in range(8, s_["j1"] - s_["j0"], 8)})
+            cands = [j for j in cands if B + 4 <= j and (H is None or j <= H - 4)]
+            def jump(j):
+                if S.st is None or j < 2: return False
+                a = S.db_level(j - 2, 2); b = S.db_level(j, 2); return len(a) and len(b) and float(b.mean() - a.mean()) >= 0.15
+            sc = {j: (j in lab) * 1.0 + ((recurrence(S, j) or 0) >= P["chorus_sim_thr"]) * 0.8 + (lyric_repeat(S, j) is True) * 0.5 + bool(jump(j)) * 0.5 for j in cands}
+            good = [j for j in cands if sc[j] >= 1.3]; notes["chorus_scores"] = sc
+            if good:
+                for L, j in (("C", good[0]), ("D", good[-1])):
+                    if c[L].get("bar") != j: why(L, f"fix_chorus: section at bar {j} scores {sc[j]:.1f} (label/recurrence/lyrics/energy)")
+                    c[L].update(bar=j, confidence=0.55)
+                if good[0] == good[-1]: c["D"].setdefault("flags", []).append("single chorus")
     # 3 chorus verification
     if on("chorus_verify") and B is not None:
         cs = [s["j0"] for s in S.segs if s["cls"] == "chorus" and s["j0"] >= B + 4 and (H is None or s["j0"] < H)]
@@ -254,5 +304,6 @@ if __name__ == "__main__":
     import warnings; warnings.filterwarnings("ignore")
     ap = argparse.ArgumentParser(); ap.add_argument("--root", default="/workspace/research/dj-auto-cues/proof/real"); ap.add_argument("--out"); ap.add_argument("--off", default=""); ap.add_argument("--only"); ap.add_argument("--config")
     a = ap.parse_args(); off = set(filter(None, a.off.split(",")))
+    off |= DEFAULT_OFF if a.off == "" and "--off" not in sys.argv else set()
     on = (lambda f: f == a.only) if a.only else (lambda f: f not in off)
     r = run(a.root, a.out or f"{a.root}/cues_v2/allin1/v5_go32", on, a.config); print("built", len(r))
