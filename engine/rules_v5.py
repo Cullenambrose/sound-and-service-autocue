@@ -7,8 +7,11 @@ import json, os, sys, math, ast, re, argparse, numpy as np
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 FLAGS = ["loops_phrase", "exit_phrase", "chorus_verify", "drop_robust", "tempo_check", "cold_start", "consensus", "genre_params",
          "fix_start", "fix_lead", "fix_chorus", "fix_exit_lead"]   # fix_* = verified Gemini code-review bugs (claims 1, 2, 4, 5)
+FLAGS += ["r2_start_vocal", "r2_exit_ok", "r2_exit_from_D", "r2_consensus", "r2_flags", "r2_snap_ver", "r2_pickup"]   # Gemini round-2 fixes
 FIXES = [f for f in FLAGS if f.startswith("fix_")]
-DEFAULT_OFF = set(FIXES) if os.environ.get("V5_FIXES", "1") == "0" else {"fix_start"}   # fix_start: real bug, but fixing it scored worse vs MIK (35->34) and moved 18/19/20 START earlier; opt in with --off ""
+R2 = [f for f in FLAGS if f.startswith("r2_")]
+HARD = ("before track start", "falls before START", "needs review")   # r2_flags: only these block auto-set; others are informational
+DEFAULT_OFF = set(FIXES) if os.environ.get("V5_FIXES", "1") == "0" else {"fix_start", "r2_pickup"}   # r2_pickup: no marks affected, -1 vs MIK (13);  fix_start: real bug, but fixing it scored worse vs MIK (35->34) and moved 18/19/20 START earlier; opt in with --off ""
 GL = 8  # GO = EXIT - 32 beats = 8 bars
 
 def load(p, default=None):
@@ -151,7 +154,8 @@ def build(S, on, cfg):
     if on("fix_start") and B is not None and v1B is not None and "missed intro" in (c["B"].get("reason") or "") and v1B != B:
         lf = S.lead_frac(0, 4); dr = np.mean([S.bar_frac("drums", j, 0.15) or 0 for j in range(4)]) if S.st is not None else 0
         # j < 4 only when lead vocal AND drums run over bars 0-3 (a cappella intros, e.g. 15 Cupid Shuffle 'Aca In', keep v4's START)
-        if v1B >= 4 or (lf is not None and lf > 0.35 and dr > 0.5):
+        voc4 = (S.lead_frac(v1B) or 0) > 0.25 if S.lead is not None else True   # r2_start_vocal: a bar-4 instrument entry is not START
+        if (v1B >= 4 and (voc4 or not on("r2_start_vocal"))) or (v1B < 4 and lf is not None and lf > 0.35 and dr > 0.5):
             why("B", f"fix_start: kept engine START {v1B} ({'real 4+ bar intro' if v1B >= 4 else 'lead vocal runs over bars 0-3'}) instead of forced bar {B}"); B = v1B; c["B"]["bar"] = B
     # fix_lead (claim 2): v_lead stopped at the first vocal run (intro tease) and only looked +-2 bars. Look at every sustained
     # lead run that starts after a >=2-bar vocal gap, within +-4 bars of START, nearest first, phrase-aligned (4-bar) preferred.
@@ -159,6 +163,9 @@ def build(S, on, cfg):
         on_ = [(S.lead_frac(j) or 0) > 0.35 for j in range(S.nb)]
         runs = [j for j in range(S.nb - 3) if on_[j] and sum(on_[j:j + 3]) >= 2 and (j < 2 or not any(on_[j - 2:j]))]
         near = sorted((j for j in runs if abs(j - B) <= 4), key=lambda j: (abs(j - B) > 1 and j % 4 != 0, abs(j - B)))
+        if near and on("r2_pickup") and near[0] % 4 == 3:   # pickup bar: prefer the next downbeat if vocals continue and drums/bass jump there
+            j = near[0] + 1; a = S.db_level(j - 2, 2); b = S.db_level(j, 1)
+            if (S.lead_frac(j) or 0) > 0.35 and len(a) and len(b) and float(b.mean() - a.mean()) >= 0.1: near[0] = j
         if near and near[0] != B: why("B", f"fix_lead: lead vocal run starts at bar {near[0]} (after a vocal gap); moved {B}->{near[0]}"); B = near[0]; c["B"]["bar"] = B
     # 6 cold start
     if on("cold_start") and S.st is not None:
@@ -179,21 +186,26 @@ def build(S, on, cfg):
             cand = sorted((j for j in range(H - 2, H + 3) if drop_ok(S, j, P)), key=lambda j: (abs(j - H), j))
             if cand: why("H", f"drums+bass not down for a full bar at {H}; moved to {cand[0]}"); H = cand[0]
             else: why("H", "no bar nearby where drums+bass stay down a full bar (beat keeps running; kept)")
+        def vdrop(j):
+            if S.lead is None or S.st is None: return False
+            pre = S.lead_frac(j - 2, 2) or 0; post = S.lead_frac(j, 4) or 0; dr = S.bar_frac("drums", j, 0.15) or 0
+            return pre > 0.35 and post < 0.12 and dr > 0.4
+        # r2_exit_ok: a bar is an acceptable EXIT if the drum/bass drop holds OR the lead vocal drops out over a running beat
+        ok_exit = (lambda j: True if (chk(S, j, P) is True or vdrop(j)) else chk(S, j, P)) if on("r2_exit_ok") else (lambda j: chk(S, j, P))
         # fix_exit_lead (claim 5): on drum outros the beat continues but the lead vocal stops for >= 4 bars. Accept that bar.
         if on("fix_exit_lead") and S.lead is not None and S.st is not None:
-            def vdrop(j): 
-                pre = S.lead_frac(j - 2, 2) or 0; post = S.lead_frac(j, 4) or 0; dr = S.bar_frac("drums", j, 0.15) or 0
-                return pre > 0.35 and post < 0.12 and dr > 0.4
             if not vdrop(H) and chk(S, H, P) is not True:
                 cand = sorted((j for j in range(H - 2, H + 3) if vdrop(j)), key=lambda j: (abs(j - H), j))
                 if cand: why("H", f"fix_exit_lead: lead vocal stops for 4+ bars at {cand[0]} while drums continue; moved {H}->{cand[0]}"); H = cand[0]
         if on("exit_phrase") and B is not None:
-            pb = P["exit_phrase_bars"]; r = P["exit_snap_radius"]
-            if (H - B) % 4 == 0: c["H"]["confidence"] += 0.05; why("H", "on the phrase grid from START")
+            pb = P["exit_phrase_bars"]; r = P["exit_snap_radius"]; D = c.get("D", {}).get("bar")
+            anchors = [B] + ([D] if on("r2_exit_from_D") and D is not None else [])   # SPEC 3.1: phrase counted from START or Last Chorus
+            onp = lambda j, n: any((j - a) % n == 0 for a in anchors)
+            if onp(H, 4): c["H"]["confidence"] += 0.05; why("H", "on the phrase grid from " + ("START" if (H - B) % 4 == 0 else "Last Chorus"))
             else:
-                cand = sorted((j for j in range(H - r, H + r + 1) if (j - B) % pb == 0 or (j - B) % 4 == 0), key=lambda j: ((j - B) % pb != 0, chk(S, j, P) is not True, abs(j - H)))
-                good = [j for j in cand if chk(S, j, P) is not False]
-                if good: why("H", f"snapped {H}->{good[0]} onto the {4 if (good[0]-B)%pb else pb}-bar phrase grid from START"); H = good[0]
+                cand = sorted((j for j in range(H - r, H + r + 1) if onp(j, 4)), key=lambda j: (not onp(j, pb), ok_exit(j) is not True, abs(j - H)))
+                good = [j for j in cand if ok_exit(j) is not False]
+                if good: why("H", f"snapped {H}->{good[0]} onto the phrase grid"); H = good[0]
                 else: c["H"]["confidence"] -= 0.15; fl("H", "no phrase boundary near EXIT")
         c["H"]["bar"] = H; c.setdefault("G", {"slot": "G", "flags": [], "name": "GO", "color": "#CC00CC"}).update(bar=H - GL); c["G"]["confidence"] = c["H"]["confidence"] - 0.02
     # A ladder (re-done in case B moved)
@@ -230,6 +242,9 @@ def build(S, on, cfg):
             for L in "CD":
                 j = c[L].get("bar")
                 if j is None: continue
+                if on("r2_snap_ver") and j not in ver and L == "C":   # C only: snapping D cost a correct mark on 20 (last chorus is often a variant)   # snap to the first/last labelled chorus that actually recurs
+                    nj = ver[0] if L == "C" else ver[-1]
+                    if nj != j: why(L, f"r2_snap_ver: moved {j}->{nj} (recurring labelled chorus)"); c[L]["bar"] = j = nj
                 ok = j in ver or score(j) >= 1 or (recurrence(S, j) or 0) >= P["chorus_sim_thr"] - 0.15
                 c[L]["confidence"] = 0.65 if ok else 0.4; why(L, "section recurs (chroma/MFCC/lyrics)" if ok else "this section does not clearly recur; review")
         elif S.sim is not None:
@@ -244,7 +259,8 @@ def build(S, on, cfg):
         for L in "BH":
             a, hit = agreement(src, c[L].get("bar"))
             if a is None: continue
-            c[L]["confidence"] = round(c[L]["confidence"] + (0.05 if a >= 0.99 else -0.3 * (1 - a)), 3); why(L, f"{len(hit)}/{len(src)} boundary sources agree ({','.join(hit)})")
+            d_ = (0.05 if a >= 0.75 else 0 if a >= 0.5 else -0.3 * (1 - a)) if on("r2_consensus") else (0.05 if a >= 0.99 else -0.3 * (1 - a))
+            c[L]["confidence"] = round(c[L]["confidence"] + d_, 3); why(L, f"{len(hit)}/{len(src)} boundary sources agree ({','.join(hit)})")
         if c["A"].get("bar") is not None: c["A"]["confidence"] = c["B"]["confidence"] - 0.02
         if c.get("G", {}).get("bar") is not None: c["G"]["confidence"] = c["H"]["confidence"] - 0.02
     # 5 tempo
@@ -263,7 +279,7 @@ def build(S, on, cfg):
         x["confidence"] = round(max(0, min(1, x.get("confidence") or 0)), 2)
         if x.get("bar") is None: x["status"] = "empty"
         elif L in "CD": x["status"] = "suggest"
-        elif x["confidence"] >= P["auto_set_min_conf"] and not [f for f in x.get("flags", []) if f != "on downbeat"]: x["status"] = "set"
+        elif x["confidence"] >= P["auto_set_min_conf"] and not [f for f in x.get("flags", []) if f != "on downbeat" and (not on("r2_flags") or any(h in f for h in HARD))]: x["status"] = "set"
         else: x["status"] = "review"
     loops = plan_loops(S, c, on)
     return {**S.plan, "version": "v5", "flags_on": [f for f in FLAGS if on(f)], "v5": notes, "cues": c, "loops": loops}

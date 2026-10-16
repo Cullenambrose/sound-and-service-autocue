@@ -26,10 +26,6 @@ def bars_of_truth(nn):
     for s, cat in M[nn].items():
         if cat in ("START", "FC", "LC", "EXIT"): out[{"START": "B", "FC": "C", "LC": "D", "EXIT": "H"}[cat]] = round((tc["ABCDEFGH".index(s)]["ms"] / 1000 + off - g["t1"]) / g["bar_s"])
     return out
-def example(nn):
-    d = json.load(open(f"{R}/cues/allin1/{nn}.json")); tr = bars_of_truth(nn)
-    segs = ", ".join(f"{s['lab']}@{s['j0']}" for s in d["segments"])
-    return f"Example song {nn}: analyzer sections (label@bar): {segs}. Analyzer last-chorus end bar: {d['cues']['D'].get('bar')}. Cullen's cues (bars): " + ", ".join(f"{k}={v}" for k, v in sorted(tr.items()))
 def call(parts):
     body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
     for k in range(5):
@@ -73,17 +69,17 @@ def one(nn):
         a, b = tb(anc) - 9, tb(anc) + 11   # 20 s window centred on the engine's pick
         if any(abs(a - x[1]) < 4 for x in clipinfo): continue
         data, t0, t1 = clip(nn, a, b); clipinfo.append((L, t0, t1)); parts.append({"inline_data": {"mime_type": "audio/mpeg", "data": data}})
-    import learner as LN
-    me = LN.ctx(nn); corr = json.load(open(LN.CORR)) if os.path.exists(LN.CORR) else []
+    import learner as LN, marks as MK   # round-2 claim 1: few-shot ONLY from songs Cullen actually marked, never Mixed In Key cues
+    me = LN.ctx(nn); ev = [e for e in MK.events() if e.get("track") != nn]
     def dist(x):
-        c = LN.ctx(x); return (c["type"] != me["type"]) * 2 + (c["tempo"] != me["tempo"]) - 0.5 * any(e.get("track") == x for e in corr)
-    close = sorted((x for x in M if x != nn), key=dist)[:8]   # leave-one-out: never its own cues/corrections
+        c = LN.ctx(x); return (c["type"] != me["type"]) * 2 + (c["tempo"] != me["tempo"])
+    close = sorted((x for x in MK.marked_songs(ev) if x != nn and MK.truth_bars(x, ev)), key=dist)[:8]
     def example2(x):
-        tr = LN.truth(x, [e for e in corr if e.get("track") != nn]); d = json.load(open(f"{R}/cues/allin1/{x}.json"))
-        return f"Example song {x} ({LN.ctx(x)['type']}, {LN.ctx(x)['tempo']} BPM): sections " + ", ".join(f"{s['lab']}@{s['j0']}" for s in d["segments"]) + f"; analyzer last-chorus end bar {d['cues']['D'].get('bar')}; Cullen's cues: " + ", ".join(f"{k}={v}" for k, v in sorted(tr.items()))
+        tr = MK.truth_bars(x, ev); d = json.load(open(f"{R}/cues/allin1/{x}.json"))
+        return f"Example song {x} ({LN.ctx(x)['type']}, {LN.ctx(x)['tempo']} BPM): sections " + ", ".join(f"{s['lab']}@{s['j0']}" for s in d["segments"]) + f"; analyzer last-chorus end bar {d['cues']['D'].get('bar')}; Cullen's review-page marks (bars): " + ", ".join(f"{k}={v}" for k, v in sorted(tr.items()))
     ex = "\n".join(example2(x) for x in close)
     lyr_txt = "; ".join(f"{w['start']:.1f}s {w['word']}" for w in words[:120])
-    prompt = (GUIDE + "\n\nFEW-SHOT (other songs, Cullen's real cues vs the analyzer):\n" + ex +
+    prompt = (GUIDE + "\n\nFEW-SHOT (other songs, Cullen's review-page marks vs the analyzer):\n" + ex +
               f"\n\nTHIS SONG {nn}: BPM {240/g['bar_s']:.2f}, bar_seconds {g['bar_s']:.4f}, t1 {g['t1']:.3f}s (bar 0). Sections (label@bar): " +
               ", ".join(f"{s['lab']}@{s['j0']}-{s['j1']}" for s in segs) +
               f". Analyzer last-chorus end: bar {v1D}. Engine plan: START bar {B} (conf {pc['B'].get('confidence')}), EXIT bar {H} (conf {pc['H'].get('confidence')})." +

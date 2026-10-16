@@ -1,5 +1,5 @@
-ALL-IN-ONE v5 (plain text) — Sound & Service AutoCue engine, Oct 15 2026
-Contents: rules_v5.py, simfeat_v5.py, genre_tags_v5.py, fixed files (learner_marks.py, gemini_v5.py, gemini_apply_v5.py, score_v5b.py), SCORE-v5.
+ALL-IN-ONE v5 (plain text) — Sound & Service AutoCue engine, updated Oct 15 2026 ~10:35 PM PT (round-2 fixes)
+Contents: rules_v5.py, simfeat_v5.py, genre_tags_v5.py, marks.py, learner_marks.py, gemini_v5.py, gemini_apply_v5.py, score_v5c.py, SCORE-v5.
 
 =================== engine/rules_v5.py ===================
 """Auto-cue rules v5 = v4 plan (cues_v2/allin1/v4_go32) + 8 switchable changes. v4 files are untouched.
@@ -11,8 +11,11 @@ import json, os, sys, math, ast, re, argparse, numpy as np
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 FLAGS = ["loops_phrase", "exit_phrase", "chorus_verify", "drop_robust", "tempo_check", "cold_start", "consensus", "genre_params",
          "fix_start", "fix_lead", "fix_chorus", "fix_exit_lead"]   # fix_* = verified Gemini code-review bugs (claims 1, 2, 4, 5)
+FLAGS += ["r2_start_vocal", "r2_exit_ok", "r2_exit_from_D", "r2_consensus", "r2_flags", "r2_snap_ver", "r2_pickup"]   # Gemini round-2 fixes
 FIXES = [f for f in FLAGS if f.startswith("fix_")]
-DEFAULT_OFF = set(FIXES) if os.environ.get("V5_FIXES", "1") == "0" else {"fix_start"}   # fix_start: real bug, but fixing it scored worse vs MIK (35->34) and moved 18/19/20 START earlier; opt in with --off ""
+R2 = [f for f in FLAGS if f.startswith("r2_")]
+HARD = ("before track start", "falls before START", "needs review")   # r2_flags: only these block auto-set; others are informational
+DEFAULT_OFF = set(FIXES) if os.environ.get("V5_FIXES", "1") == "0" else {"fix_start", "r2_pickup"}   # r2_pickup: no marks affected, -1 vs MIK (13);  fix_start: real bug, but fixing it scored worse vs MIK (35->34) and moved 18/19/20 START earlier; opt in with --off ""
 GL = 8  # GO = EXIT - 32 beats = 8 bars
 
 def load(p, default=None):
@@ -155,7 +158,8 @@ def build(S, on, cfg):
     if on("fix_start") and B is not None and v1B is not None and "missed intro" in (c["B"].get("reason") or "") and v1B != B:
         lf = S.lead_frac(0, 4); dr = np.mean([S.bar_frac("drums", j, 0.15) or 0 for j in range(4)]) if S.st is not None else 0
         # j < 4 only when lead vocal AND drums run over bars 0-3 (a cappella intros, e.g. 15 Cupid Shuffle 'Aca In', keep v4's START)
-        if v1B >= 4 or (lf is not None and lf > 0.35 and dr > 0.5):
+        voc4 = (S.lead_frac(v1B) or 0) > 0.25 if S.lead is not None else True   # r2_start_vocal: a bar-4 instrument entry is not START
+        if (v1B >= 4 and (voc4 or not on("r2_start_vocal"))) or (v1B < 4 and lf is not None and lf > 0.35 and dr > 0.5):
             why("B", f"fix_start: kept engine START {v1B} ({'real 4+ bar intro' if v1B >= 4 else 'lead vocal runs over bars 0-3'}) instead of forced bar {B}"); B = v1B; c["B"]["bar"] = B
     # fix_lead (claim 2): v_lead stopped at the first vocal run (intro tease) and only looked +-2 bars. Look at every sustained
     # lead run that starts after a >=2-bar vocal gap, within +-4 bars of START, nearest first, phrase-aligned (4-bar) preferred.
@@ -163,6 +167,9 @@ def build(S, on, cfg):
         on_ = [(S.lead_frac(j) or 0) > 0.35 for j in range(S.nb)]
         runs = [j for j in range(S.nb - 3) if on_[j] and sum(on_[j:j + 3]) >= 2 and (j < 2 or not any(on_[j - 2:j]))]
         near = sorted((j for j in runs if abs(j - B) <= 4), key=lambda j: (abs(j - B) > 1 and j % 4 != 0, abs(j - B)))
+        if near and on("r2_pickup") and near[0] % 4 == 3:   # pickup bar: prefer the next downbeat if vocals continue and drums/bass jump there
+            j = near[0] + 1; a = S.db_level(j - 2, 2); b = S.db_level(j, 1)
+            if (S.lead_frac(j) or 0) > 0.35 and len(a) and len(b) and float(b.mean() - a.mean()) >= 0.1: near[0] = j
         if near and near[0] != B: why("B", f"fix_lead: lead vocal run starts at bar {near[0]} (after a vocal gap); moved {B}->{near[0]}"); B = near[0]; c["B"]["bar"] = B
     # 6 cold start
     if on("cold_start") and S.st is not None:
@@ -183,21 +190,26 @@ def build(S, on, cfg):
             cand = sorted((j for j in range(H - 2, H + 3) if drop_ok(S, j, P)), key=lambda j: (abs(j - H), j))
             if cand: why("H", f"drums+bass not down for a full bar at {H}; moved to {cand[0]}"); H = cand[0]
             else: why("H", "no bar nearby where drums+bass stay down a full bar (beat keeps running; kept)")
+        def vdrop(j):
+            if S.lead is None or S.st is None: return False
+            pre = S.lead_frac(j - 2, 2) or 0; post = S.lead_frac(j, 4) or 0; dr = S.bar_frac("drums", j, 0.15) or 0
+            return pre > 0.35 and post < 0.12 and dr > 0.4
+        # r2_exit_ok: a bar is an acceptable EXIT if the drum/bass drop holds OR the lead vocal drops out over a running beat
+        ok_exit = (lambda j: True if (chk(S, j, P) is True or vdrop(j)) else chk(S, j, P)) if on("r2_exit_ok") else (lambda j: chk(S, j, P))
         # fix_exit_lead (claim 5): on drum outros the beat continues but the lead vocal stops for >= 4 bars. Accept that bar.
         if on("fix_exit_lead") and S.lead is not None and S.st is not None:
-            def vdrop(j): 
-                pre = S.lead_frac(j - 2, 2) or 0; post = S.lead_frac(j, 4) or 0; dr = S.bar_frac("drums", j, 0.15) or 0
-                return pre > 0.35 and post < 0.12 and dr > 0.4
             if not vdrop(H) and chk(S, H, P) is not True:
                 cand = sorted((j for j in range(H - 2, H + 3) if vdrop(j)), key=lambda j: (abs(j - H), j))
                 if cand: why("H", f"fix_exit_lead: lead vocal stops for 4+ bars at {cand[0]} while drums continue; moved {H}->{cand[0]}"); H = cand[0]
         if on("exit_phrase") and B is not None:
-            pb = P["exit_phrase_bars"]; r = P["exit_snap_radius"]
-            if (H - B) % 4 == 0: c["H"]["confidence"] += 0.05; why("H", "on the phrase grid from START")
+            pb = P["exit_phrase_bars"]; r = P["exit_snap_radius"]; D = c.get("D", {}).get("bar")
+            anchors = [B] + ([D] if on("r2_exit_from_D") and D is not None else [])   # SPEC 3.1: phrase counted from START or Last Chorus
+            onp = lambda j, n: any((j - a) % n == 0 for a in anchors)
+            if onp(H, 4): c["H"]["confidence"] += 0.05; why("H", "on the phrase grid from " + ("START" if (H - B) % 4 == 0 else "Last Chorus"))
             else:
-                cand = sorted((j for j in range(H - r, H + r + 1) if (j - B) % pb == 0 or (j - B) % 4 == 0), key=lambda j: ((j - B) % pb != 0, chk(S, j, P) is not True, abs(j - H)))
-                good = [j for j in cand if chk(S, j, P) is not False]
-                if good: why("H", f"snapped {H}->{good[0]} onto the {4 if (good[0]-B)%pb else pb}-bar phrase grid from START"); H = good[0]
+                cand = sorted((j for j in range(H - r, H + r + 1) if onp(j, 4)), key=lambda j: (not onp(j, pb), ok_exit(j) is not True, abs(j - H)))
+                good = [j for j in cand if ok_exit(j) is not False]
+                if good: why("H", f"snapped {H}->{good[0]} onto the phrase grid"); H = good[0]
                 else: c["H"]["confidence"] -= 0.15; fl("H", "no phrase boundary near EXIT")
         c["H"]["bar"] = H; c.setdefault("G", {"slot": "G", "flags": [], "name": "GO", "color": "#CC00CC"}).update(bar=H - GL); c["G"]["confidence"] = c["H"]["confidence"] - 0.02
     # A ladder (re-done in case B moved)
@@ -234,6 +246,9 @@ def build(S, on, cfg):
             for L in "CD":
                 j = c[L].get("bar")
                 if j is None: continue
+                if on("r2_snap_ver") and j not in ver and L == "C":   # C only: snapping D cost a correct mark on 20 (last chorus is often a variant)   # snap to the first/last labelled chorus that actually recurs
+                    nj = ver[0] if L == "C" else ver[-1]
+                    if nj != j: why(L, f"r2_snap_ver: moved {j}->{nj} (recurring labelled chorus)"); c[L]["bar"] = j = nj
                 ok = j in ver or score(j) >= 1 or (recurrence(S, j) or 0) >= P["chorus_sim_thr"] - 0.15
                 c[L]["confidence"] = 0.65 if ok else 0.4; why(L, "section recurs (chroma/MFCC/lyrics)" if ok else "this section does not clearly recur; review")
         elif S.sim is not None:
@@ -248,7 +263,8 @@ def build(S, on, cfg):
         for L in "BH":
             a, hit = agreement(src, c[L].get("bar"))
             if a is None: continue
-            c[L]["confidence"] = round(c[L]["confidence"] + (0.05 if a >= 0.99 else -0.3 * (1 - a)), 3); why(L, f"{len(hit)}/{len(src)} boundary sources agree ({','.join(hit)})")
+            d_ = (0.05 if a >= 0.75 else 0 if a >= 0.5 else -0.3 * (1 - a)) if on("r2_consensus") else (0.05 if a >= 0.99 else -0.3 * (1 - a))
+            c[L]["confidence"] = round(c[L]["confidence"] + d_, 3); why(L, f"{len(hit)}/{len(src)} boundary sources agree ({','.join(hit)})")
         if c["A"].get("bar") is not None: c["A"]["confidence"] = c["B"]["confidence"] - 0.02
         if c.get("G", {}).get("bar") is not None: c["G"]["confidence"] = c["H"]["confidence"] - 0.02
     # 5 tempo
@@ -267,7 +283,7 @@ def build(S, on, cfg):
         x["confidence"] = round(max(0, min(1, x.get("confidence") or 0)), 2)
         if x.get("bar") is None: x["status"] = "empty"
         elif L in "CD": x["status"] = "suggest"
-        elif x["confidence"] >= P["auto_set_min_conf"] and not [f for f in x.get("flags", []) if f != "on downbeat"]: x["status"] = "set"
+        elif x["confidence"] >= P["auto_set_min_conf"] and not [f for f in x.get("flags", []) if f != "on downbeat" and (not on("r2_flags") or any(h in f for h in HARD))]: x["status"] = "set"
         else: x["status"] = "review"
     loops = plan_loops(S, c, on)
     return {**S.plan, "version": "v5", "flags_on": [f for f in FLAGS if on(f)], "v5": notes, "cues": c, "loops": loops}
@@ -340,6 +356,28 @@ for f in sorted(glob.glob(f"{R}/in/*")):
     except Exception: out[nn] = ""
 json.dump(out, open(sys.argv[2] if len(sys.argv) > 2 else f"{R}/genre_tags.json", "w"), indent=1); print(len(out), "tags")
 
+=================== engine/marks.py ===================
+"""Single shared parser for Cullen's review marks (Gemini round-2 claim 1). Reads every corrections/corrections*.json
+(both cue-review folders), keeps per track+cue the LAST event that is 'correct' or 'set_here' with a to_beat; a later 'clear' removes it.
+truth_beats() -> {(nn, cue): beat}; truth_bars(nn) -> {cue: bar} (beat/4 rounded), {} only when that song has no marks."""
+import json, glob
+R = "/workspace/research/dj-auto-cues/proof/real"
+def events(paths=None):
+    ev = []
+    for f in sorted(paths or glob.glob(f"{R}/corrections/corrections*.json")): ev += json.load(open(f))
+    return sorted(ev, key=lambda e: e.get("saved_at", ""))
+def truth_beats(ev=None):
+    last = {}
+    for e in (events() if ev is None else ev):
+        k = (e.get("track"), e.get("cue"))
+        if k[1] not in list("ABCDGH"): continue
+        if e.get("action") in ("correct", "set_here") and e.get("to_beat") is not None: last[k] = e["to_beat"]
+        elif e.get("action") == "clear": last.pop(k, None)
+    return last
+def truth_bars(nn, ev=None, cues="ABCDGH"):
+    return {L: round(b / 4) for (t, L), b in truth_beats(ev).items() if t == nn and L in cues}
+def marked_songs(ev=None): return sorted({t for t, _ in truth_beats(ev)})
+
 =================== engine/learner_marks.py ===================
 """Correction learner. Truth = Cullen's Serato cues, overridden per cue by review-page corrections (corrections.json) when present.
 Learns per cue and per song group the bar offset (truth - engine) and keeps a rule only when leave-one-out scoring says it helps.
@@ -359,11 +397,8 @@ def song_type(nn):
     bpm = 240 / n["grid"]["bar_s"]; band = "slow<100" if bpm < 100 else "mid100-125" if bpm <= 125 else "fast>125"
     return {"type": t, "tempo": band}
 def truth(nn, corr):
-    tr = {}; g = json.load(open(f"{R}/cues/allin1/{nn}.json"))["grid"]
-    for ev in corr:   # last decision per cue wins; to_time is Serato seconds
-        if ev.get("track") == nn and ev.get("cue") in "BCDH" and ev.get("to_time") is not None:
-            tr[ev["cue"]] = round((ev["to_time"] + g["offset_ms"] / 1000 - g["t1"]) / g["bar_s"])
-    return tr
+    """shared marks parser (marks.py): last correct/set_here with to_beat per cue, 'clear' removes; B/C/D/H bars"""
+    import marks as MK; return MK.truth_bars(nn, corr, "BCDH")
 def engine(nn, base="go16"):
     return {L: json.load(open(f"{R}/cues_v2/allin1/{base}/{nn}.json"))["cues"][L].get("bar") for L in "BCDH"}
 def ctx(nn):
@@ -483,10 +518,6 @@ def bars_of_truth(nn):
     for s, cat in M[nn].items():
         if cat in ("START", "FC", "LC", "EXIT"): out[{"START": "B", "FC": "C", "LC": "D", "EXIT": "H"}[cat]] = round((tc["ABCDEFGH".index(s)]["ms"] / 1000 + off - g["t1"]) / g["bar_s"])
     return out
-def example(nn):
-    d = json.load(open(f"{R}/cues/allin1/{nn}.json")); tr = bars_of_truth(nn)
-    segs = ", ".join(f"{s['lab']}@{s['j0']}" for s in d["segments"])
-    return f"Example song {nn}: analyzer sections (label@bar): {segs}. Analyzer last-chorus end bar: {d['cues']['D'].get('bar')}. Cullen's cues (bars): " + ", ".join(f"{k}={v}" for k, v in sorted(tr.items()))
 def call(parts):
     body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
     for k in range(5):
@@ -530,17 +561,17 @@ def one(nn):
         a, b = tb(anc) - 9, tb(anc) + 11   # 20 s window centred on the engine's pick
         if any(abs(a - x[1]) < 4 for x in clipinfo): continue
         data, t0, t1 = clip(nn, a, b); clipinfo.append((L, t0, t1)); parts.append({"inline_data": {"mime_type": "audio/mpeg", "data": data}})
-    import learner as LN
-    me = LN.ctx(nn); corr = json.load(open(LN.CORR)) if os.path.exists(LN.CORR) else []
+    import learner as LN, marks as MK   # round-2 claim 1: few-shot ONLY from songs Cullen actually marked, never Mixed In Key cues
+    me = LN.ctx(nn); ev = [e for e in MK.events() if e.get("track") != nn]
     def dist(x):
-        c = LN.ctx(x); return (c["type"] != me["type"]) * 2 + (c["tempo"] != me["tempo"]) - 0.5 * any(e.get("track") == x for e in corr)
-    close = sorted((x for x in M if x != nn), key=dist)[:8]   # leave-one-out: never its own cues/corrections
+        c = LN.ctx(x); return (c["type"] != me["type"]) * 2 + (c["tempo"] != me["tempo"])
+    close = sorted((x for x in MK.marked_songs(ev) if x != nn and MK.truth_bars(x, ev)), key=dist)[:8]
     def example2(x):
-        tr = LN.truth(x, [e for e in corr if e.get("track") != nn]); d = json.load(open(f"{R}/cues/allin1/{x}.json"))
-        return f"Example song {x} ({LN.ctx(x)['type']}, {LN.ctx(x)['tempo']} BPM): sections " + ", ".join(f"{s['lab']}@{s['j0']}" for s in d["segments"]) + f"; analyzer last-chorus end bar {d['cues']['D'].get('bar')}; Cullen's cues: " + ", ".join(f"{k}={v}" for k, v in sorted(tr.items()))
+        tr = MK.truth_bars(x, ev); d = json.load(open(f"{R}/cues/allin1/{x}.json"))
+        return f"Example song {x} ({LN.ctx(x)['type']}, {LN.ctx(x)['tempo']} BPM): sections " + ", ".join(f"{s['lab']}@{s['j0']}" for s in d["segments"]) + f"; analyzer last-chorus end bar {d['cues']['D'].get('bar')}; Cullen's review-page marks (bars): " + ", ".join(f"{k}={v}" for k, v in sorted(tr.items()))
     ex = "\n".join(example2(x) for x in close)
     lyr_txt = "; ".join(f"{w['start']:.1f}s {w['word']}" for w in words[:120])
-    prompt = (GUIDE + "\n\nFEW-SHOT (other songs, Cullen's real cues vs the analyzer):\n" + ex +
+    prompt = (GUIDE + "\n\nFEW-SHOT (other songs, Cullen's review-page marks vs the analyzer):\n" + ex +
               f"\n\nTHIS SONG {nn}: BPM {240/g['bar_s']:.2f}, bar_seconds {g['bar_s']:.4f}, t1 {g['t1']:.3f}s (bar 0). Sections (label@bar): " +
               ", ".join(f"{s['lab']}@{s['j0']}-{s['j1']}" for s in segs) +
               f". Analyzer last-chorus end: bar {v1D}. Engine plan: START bar {B} (conf {pc['B'].get('confidence')}), EXIT bar {H} (conf {pc['H'].get('confidence')})." +
@@ -591,53 +622,52 @@ def apply(plan, nn, src="gemini_v3", keep_confident=True):
     if H is not None and c.get("H", {}).get("gemini"): c.setdefault("G", {}).update(bar=H - 8, time=tb(H - 8), status="suggest")
     return new
 
-=================== engine/score_v5b.py ===================
-"""Re-score v4, v5 (8 changes), v5-fixed (+ claims 1,2,4,5 fixes), each with/without CACHED Gemini (gemini_v2 = review page picks,
-gemini_v3), plus per-fix ablation. Truth = Cullen's review marks only (both cue-review folders if present); MIK = 'vs Mixed In Key'."""
-import json, os, sys, glob, collections, tempfile, shutil
-R = "/workspace/research/dj-auto-cues/proof/real"; sys.path.insert(0, f"{R}/tools"); import rules_v5 as V, gemini_apply_v5 as GA
+=================== engine/score_v5c.py ===================
+"""Round-2 re-score: v4, v5 (8 changes), v5_fixed (round-1 fixes), v5_r2 (+ round-2 fixes), fix_start on/off, per-r2 ablation,
+cached Gemini (gemini_v2 = review-page picks, $0). Truth = Cullen's marks via marks.py; Mixed In Key reported separately.
+Also: auto-set count and auto-set precision on marked cues."""
+import json, os, sys, collections, tempfile, shutil
+R = "/workspace/research/dj-auto-cues/proof/real"; sys.path.insert(0, f"{R}/tools"); import rules_v5 as V, gemini_apply_v5 as GA, marks as MK
 import warnings; warnings.filterwarnings("ignore")
-ev = []
-for f in sorted(glob.glob(f"{R}/corrections/corrections*.json")): ev += json.load(open(f))
-last = {}
-for e in ev:
-    if e.get("cue") in list("ABCDGH") and e["action"] in ("correct", "set_here") and e.get("to_beat") is not None: last[(e["track"], e["cue"])] = e["to_beat"]
-    if e["action"] == "clear": last.pop((e["track"], e.get("cue")), None)
+last = MK.truth_beats()
 ns = {}; exec(open(f"{R}/tools/gemini_v2.py").read().split("def call(")[0], ns); BT = ns["bars_of_truth"]
 def sc(plans):
-    m = collections.defaultdict(lambda: [0, 0]); t = collections.defaultdict(lambda: [0, 0])
+    m = collections.defaultdict(lambda: [0, 0]); t = [0, 0]; ap = [0, 0]
     for (nn, L), tb in last.items():
-        if nn in plans: v = plans[nn]["cues"].get(L, {}).get("bar"); m[L][1] += 1; m[L][0] += v is not None and abs(v * 4 - tb) <= 1
+        if nn not in plans: continue
+        x = plans[nn]["cues"].get(L, {}); v = x.get("bar"); ok = v is not None and abs(v * 4 - tb) <= 1; m[L][1] += 1; m[L][0] += ok
+        if x.get("status") == "set": ap[1] += 1; ap[0] += ok
     for nn, p in plans.items():
         try: tr = BT(nn)
         except Exception: continue
-        for L, x in tr.items(): v = p["cues"].get(L, {}).get("bar"); t[L][1] += 1; t[L][0] += v is not None and v == x
-    tot = lambda D: [sum(v[0] for v in D.values()), sum(v[1] for v in D.values())]
-    nset = sum(x.get("status") == "set" for p in plans.values() for L, x in p["cues"].items() if L in "ABGH")
-    return {"marks": dict(m), "marks_total": tot(m), "mik_total": tot(t), "mik": dict(t), "auto_set": nset}
+        for L, x in tr.items(): t[1] += 1; t[0] += p["cues"].get(L, {}).get("bar") == x
+    return {"marks": dict(m), "marks_total": [sum(v[0] for v in m.values()), sum(v[1] for v in m.values())], "mik_total": t,
+            "auto_set": sum(x.get("status") == "set" for p in plans.values() for L, x in p["cues"].items() if L in "ABGH"), "auto_set_on_marks": ap}
 load = lambda d: {f[:-5]: json.load(open(f"{d}/{f}")) for f in os.listdir(d) if f.endswith(".json")}
-tmp = tempfile.mkdtemp(); runs = {"v4": load(f"{R}/cues_v2/allin1/v4_go32")}
-runs["v5"] = V.run(R, f"{tmp}/v5", lambda f: f not in V.FIXES)
-runs["v5_fixed"] = V.run(R, f"{tmp}/v5f", lambda f: f not in V.DEFAULT_OFF)
-runs["v5_fixed + fix_start"] = V.run(R, f"{tmp}/v5fs", lambda f: True)
-for fx in V.FIXES:
-    runs[f"v5 + only {fx}"] = V.run(R, f"{tmp}/o{fx}", lambda f, fx=fx: f not in V.FIXES or f == fx)
-    runs[f"v5_fixed(all 4 fixes) - {fx}"] = V.run(R, f"{tmp}/m{fx}", lambda f, fx=fx: f != fx)
+tmp = tempfile.mkdtemp(); base_off = set(V.DEFAULT_OFF)
+r1 = lambda f: f not in V.R2 and f not in base_off
+r2 = lambda f: f not in base_off
+runs = {"v4": load(f"{R}/cues_v2/allin1/v4_go32"),
+        "v5 (8 changes)": V.run(R, f"{tmp}/a", lambda f: f not in V.FIXES and f not in V.R2),
+        "v5_fixed (round 1)": V.run(R, f"{tmp}/b", r1),
+        "v5_r2 (round 1+2)": V.run(R, f"{tmp}/c", r2),
+        "v5_r2 + fix_start + r2_pickup (all on)": V.run(R, f"{tmp}/d", lambda f: True),
+        "v5_fixed + fix_start (no r2_start_vocal)": V.run(R, f"{tmp}/e", lambda f: f not in V.R2)}
+for fx in V.R2:
+    runs[f"v5_fixed + only {fx}"] = V.run(R, f"{tmp}/o{fx}", lambda f, fx=fx: r1(f) or f == fx)
+    runs[f"v5_r2 - {fx}"] = V.run(R, f"{tmp}/m{fx}", lambda f, fx=fx: r2(f) and f != fx)
 res = {k: sc(v) for k, v in runs.items()}
-for k in ("v4", "v5", "v5_fixed"):
-    for src in ("gemini_v2", "gemini_v3"):
-        res[f"{k} + {src} (cached, fixed apply)"] = sc({nn: GA.apply(p, nn, src) for nn, p in runs[k].items()})
-    res[f"{k} + gemini_v3 (old apply: overrides B/H)"] = sc({nn: GA.apply(p, nn, "gemini_v3", keep_confident=False) for nn, p in runs[k].items()})
-shutil.rmtree(tmp); json.dump(res, open(f"{R}/score_v5b.json", "w"), indent=1)
+for k in ("v4", "v5_fixed (round 1)", "v5_r2 (round 1+2)"):
+    res[f"{k} + Gemini v2 picks (cached)"] = sc({nn: GA.apply(p, nn, "gemini_v2") for nn, p in runs[k].items()})
+shutil.rmtree(tmp); json.dump(res, open(f"{R}/score_v5c.json", "w"), indent=1)
 f = lambda x: f"{x[0]}/{x[1]}"
-print("| run | vs Cullen's marks | A | B | C | D | G | H | vs Mixed In Key (B/C/D/H bars) | auto-set A/B/G/H |\n|---|---|---|---|---|---|---|---|---|---|")
-for k, r in res.items(): print(f"| {k} | {f(r['marks_total'])} | " + " | ".join(f(r["marks"].get(L, [0, 0])) for L in "ABCDGH") + f" | {f(r['mik_total'])} | {r['auto_set']} |")
-print(f"\nmarks: {len(last)} cues on {len({k[0] for k in last})} songs ({sorted({k[0] for k in last})}); Gemini new spend $0 (all cached)")
-# changed positions v5 -> v5_fixed
-for nn in sorted(runs["v5_fixed"]):
+print("| run | vs Cullen's marks | A | B | C | D | G | H | vs Mixed In Key | auto-set A/B/G/H | auto-set right on marks |\n|---|---|---|---|---|---|---|---|---|---|---|")
+for k, r in res.items(): print(f"| {k} | {f(r['marks_total'])} | " + " | ".join(f(r["marks"].get(L, [0, 0])) for L in "ABCDGH") + f" | {f(r['mik_total'])} | {r['auto_set']} | {f(r['auto_set_on_marks'])} |")
+print(f"\nmarks: {len(last)} cues on {len(MK.marked_songs())} songs {MK.marked_songs()}; Gemini new spend $0")
+for nn in sorted(runs["v5_r2 (round 1+2)"]):
     for L in "ABCDGH":
-        a, b = runs["v5"][nn]["cues"].get(L, {}).get("bar"), runs["v5_fixed"][nn]["cues"].get(L, {}).get("bar")
-        if a != b: print(f"moved {nn} {L}: {a} -> {b}" + (f"  (mark {last[(nn, L)]/4:g})" if (nn, L) in last else ""))
+        a, b = runs["v5_fixed (round 1)"][nn]["cues"].get(L, {}).get("bar"), runs["v5_r2 (round 1+2)"][nn]["cues"].get(L, {}).get("bar")
+        if a != b: print(f"moved r1->r2 {nn} {L}: {a} -> {b}" + (f" (mark bar {last[(nn, L)]/4:g})" if (nn, L) in last else ""))
 
 =================== docs/SCORE-v5-2026-10-15.md ===================
 # Auto-cue engine v5 — score + ablation (Oct 15, 2026, ~9:45 PM PT)
@@ -734,3 +764,48 @@ marks: 18 cues on 4 songs (['02', '14', '15', '20']); Gemini new spend $0 (all c
 Takeaways: engine-only v4 = v5 = v5_fixed on marks (9/18); v5_fixed best vs Mixed In Key (35/66). Cached gemini_v2 picks on top of
 any engine version → **14/18** on marks (A 4/4, G 2/2, H 2/2) but worse vs MIK (28-29/66) — consistent with Cullen marking Gemini
 right on the page, and with MIK not being his truth. Keep Gemini as suggestions; it is the strongest signal on his marks so far.
+
+---
+# v5_r2: Gemini round-2 claims verified (Oct 15, 2026, ~10:35 PM PT)
+Marks refreshed from the Pro (cue-review 33 events → 18 marked cues on 02/14/15/20; cue-review-stress5 still has no corrections.json).
+**Bias:** 28/33 mark events were on Google-sourced cues, so marks favor Gemini v2. Gemini = cached picks only, $0 new spend.
+Defaults now: all 8 changes + fix_lead/fix_chorus/fix_exit_lead + r2_start_vocal/r2_exit_ok/r2_exit_from_D/r2_consensus/r2_flags/r2_snap_ver(C only); OFF: fix_start, r2_pickup.
+
+| # | claim | real? | fixed (switch) | effect |
+|---|---|---|---|---|
+| 1 | few-shot uses MIK truth labelled "Cullen's real cues"; learner_marks.truth unfiltered | yes: gemini_v3/v5 used learner.truth = Mixed In Key + corrections; learner_marks.truth ignored action/clear | new tools/marks.py (one parser: last correct/set_here with to_beat, clear removes, both folders); learner_marks.truth and gemini_v5 few-shot use it; few-shot = marked songs only, labelled "review-page marks"; unused MIK example() removed | no score effect (gemini_v5 not run) |
+| 2 | fix_start keeps bar-4 instrumental entry | yes | r2_start_vocal (on): 4≤v1B<8 needs lead_frac>0.25 | with fix_start on: MIK 34→33 vs off 35; marks 9/18 either way → fix_start stays OFF |
+| 3A | exit_phrase filter uses drop_ok only | yes | r2_exit_ok (on): drop holds OR lead vocal drops over running beat | no change on 20 or stress flags (74) |
+| 3B | phrase only from START | yes | r2_exit_from_D (on): also 4-bar multiples from Last Chorus | stress5 (now 138 songs): "no phrase boundary near EXIT" 74 → 41 (33 gone); 20-set 9 flags → fewer, marks = |
+| 4 | consensus penalizes 3/4, info flags block auto-set | yes | r2_consensus (+0.05 ≥0.75, 0 ≥0.5, penalty <0.5) + r2_flags (only before-track-start / GO-before-START / needs-review block) | auto-set 19 → 28 on the 20 (v4 had 27); stress5 36 → 92. **Precision unmeasurable: no marked cue is auto-set in any version (0/0)** |
+| 5 | chorus_verify doesn't snap to ver | yes | r2_snap_ver (on, **C only**): snapping D moved 20 D 84→52 and lost a correct mark | none with C-only |
+| 6 | pickup bar pulls START early | plausible, code allowed it | r2_pickup (**off**): j%4==3 → j+1 if vocals continue and drums/bass jump | 13 B 15→16; marks =, MIK −1 |
+
+## Scores (20-song set)
+| run | vs Cullen's marks | A | B | C | D | G | H | vs Mixed In Key | auto-set A/B/G/H | auto-set right on marks |
+|---|---|---|---|---|---|---|---|---|---|---|
+| v4 | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 33/66 | 27 | 0/0 |
+| v5 (8 changes) | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 33/66 | 19 | 0/0 |
+| v5_fixed (round 1) | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 19 | 0/0 |
+| v5_r2 (round 1+2) | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 28 | 0/0 |
+| v5_r2 + fix_start + r2_pickup (all on) | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 33/66 | 28 | 0/0 |
+| v5_fixed + fix_start (no r2_start_vocal) | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 34/66 | 19 | 0/0 |
+| v5_fixed + only r2_start_vocal | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 19 | 0/0 |
+| v5_r2 - r2_start_vocal | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 28 | 0/0 |
+| v5_fixed + only r2_exit_ok | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 19 | 0/0 |
+| v5_r2 - r2_exit_ok | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 28 | 0/0 |
+| v5_fixed + only r2_exit_from_D | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 22 | 0/0 |
+| v5_r2 - r2_exit_from_D | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 25 | 0/0 |
+| v5_fixed + only r2_consensus | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 23 | 0/0 |
+| v5_r2 - r2_consensus | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 22 | 0/0 |
+| v5_fixed + only r2_flags | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 21 | 0/0 |
+| v5_r2 - r2_flags | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 28 | 0/0 |
+| v5_fixed + only r2_snap_ver | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 19 | 0/0 |
+| v5_r2 - r2_snap_ver | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 28 | 0/0 |
+| v5_fixed + only r2_pickup | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 34/66 | 21 | 0/0 |
+| v5_r2 - r2_pickup | 9/18 | 2/4 | 1/4 | 2/3 | 2/3 | 1/2 | 1/2 | 35/66 | 28 | 0/0 |
+| v4 + Gemini v2 picks (cached) | 14/18 | 4/4 | 2/4 | 2/3 | 2/3 | 2/2 | 2/2 | 28/66 | 27 | 0/0 |
+| v5_fixed (round 1) + Gemini v2 picks (cached) | 14/18 | 4/4 | 2/4 | 2/3 | 2/3 | 2/2 | 2/2 | 29/66 | 19 | 0/0 |
+| v5_r2 (round 1+2) + Gemini v2 picks (cached) | 14/18 | 4/4 | 2/4 | 2/3 | 2/3 | 2/2 | 2/2 | 29/66 | 28 | 0/0 |
+
+marks: 18 cues on 4 songs ['02', '14', '15', '20']; Gemini new spend $0

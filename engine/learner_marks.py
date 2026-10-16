@@ -16,11 +16,8 @@ def song_type(nn):
     bpm = 240 / n["grid"]["bar_s"]; band = "slow<100" if bpm < 100 else "mid100-125" if bpm <= 125 else "fast>125"
     return {"type": t, "tempo": band}
 def truth(nn, corr):
-    tr = {}; g = json.load(open(f"{R}/cues/allin1/{nn}.json"))["grid"]
-    for ev in corr:   # last decision per cue wins; to_time is Serato seconds
-        if ev.get("track") == nn and ev.get("cue") in "BCDH" and ev.get("to_time") is not None:
-            tr[ev["cue"]] = round((ev["to_time"] + g["offset_ms"] / 1000 - g["t1"]) / g["bar_s"])
-    return tr
+    """shared marks parser (marks.py): last correct/set_here with to_beat per cue, 'clear' removes; B/C/D/H bars"""
+    import marks as MK; return MK.truth_bars(nn, corr, "BCDH")
 def engine(nn, base="go16"):
     return {L: json.load(open(f"{R}/cues_v2/allin1/{base}/{nn}.json"))["cues"][L].get("bar") for L in "BCDH"}
 def ctx(nn):
