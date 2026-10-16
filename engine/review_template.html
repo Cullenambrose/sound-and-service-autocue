@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Auto-cue review: Phase 1 proof</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--bg:#111316;--panel:#1a1d22;--line:#2a2f37;--fg:#e8eaed;--dim:#9aa0a6;--acc:#4ea1ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;height:100vh;overflow:hidden}
+#side{width:270px;border-right:1px solid var(--line);overflow:auto;flex:none}
+#side h1{font-size:15px;margin:12px}#side .tr{padding:7px 12px;cursor:pointer;border-bottom:1px solid #1f2329;display:flex;gap:8px;align-items:center}
+#side .tr:hover{background:#20242b}#side .tr.on{background:#25303d}#side .tr .n{color:var(--dim);width:20px}#side .tr .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#side .tr .p{font-size:11px;color:var(--dim)}#side .tr .p.done{color:#5ad17a}
+#main{flex:1;overflow:auto;padding:14px 18px}
+.hdr{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}.hdr h2{margin:0;font-size:18px}.dim{color:var(--dim)}
+.eng{display:flex;gap:6px;margin:10px 0}.eng button{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 10px;cursor:pointer}
+.eng button.on{border-color:var(--acc);background:#1d2b3c}.eng .badge{font-size:11px;color:#ffb74d;margin-left:4px}
+canvas{display:block;width:100%;background:#0b0c0e;border:1px solid var(--line);border-radius:4px;cursor:crosshair}
+#ov{height:110px}#zm{height:120px;margin-top:6px}.segs{height:18px;position:relative;margin-top:2px}
+.segs div{position:absolute;top:0;height:16px;font-size:10px;line-height:16px;overflow:hidden;white-space:nowrap;padding-left:3px;border-left:1px solid #000;color:#000}
+.ctl{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}.ctl button{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+table{border-collapse:collapse;width:100%;margin-top:8px}td,th{border-bottom:1px solid var(--line);padding:6px 6px;vertical-align:top;text-align:left}
+th{font-size:12px;color:var(--dim);font-weight:500}tr.sel{background:#1f2a36}tr.cue{cursor:pointer}
+.chip{display:inline-block;width:26px;height:22px;border-radius:4px;color:#fff;font-weight:700;text-align:center;line-height:22px;text-shadow:0 0 2px #000}
+.lab{font-weight:600}.withheld .lab{opacity:.6;font-style:italic}.empty .lab{color:var(--dim)}
+.reason{font-size:12px;color:#c8ccd2;max-width:520px}.flags{font-size:11px;color:#ffb74d}
+.g button{background:#22262d;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:3px 7px;margin:0 3px 3px 0;cursor:pointer;font-size:12px}
+.g button.on{background:var(--acc);border-color:var(--acc);color:#000;font-weight:600}
+.note{width:150px;background:#0f1114;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px}
+.conf{font-variant-numeric:tabular-nums}.dis{color:#ffb74d;font-size:11px}
+.help{font-size:12px;color:var(--dim);margin-top:12px;border-top:1px solid var(--line);padding-top:8px}
+kbd{background:#2a2f37;border-radius:3px;padding:0 4px;font-size:11px}
+.tflags{font-size:12px;color:#ffb74d;margin:4px 0}
+#toast{position:fixed;bottom:16px;right:16px;background:#25303d;padding:8px 12px;border-radius:6px;display:none}
+</style></head>
+<body>
+<div id="side"><h1>Auto-cue review <span class="dim" id="prog"></span></h1><div id="list"></div>
+<div style="padding:12px"><button id="exp">Export CSV</button> <button id="clr" title="Clear all grades">Reset</button>
+<p class="dim" style="font-size:11px">Grades save in this browser automatically. Export when done and send the CSV back.</p></div></div>
+<div id="main"></div>
+<audio id="au" preload="auto"></audio>
+<div id="toast"></div>
+<script>
+const DATA = /*__DATA__*/null;
+const SLOT_COLORS={A:"#006838",B:"#CCCC00",C:"#0000CC",D:"#8800CC",E:"#CC0000",F:"#CC8800",G:"#CC00CC",H:"#1FAD26"};
+const SLOT_NAMES={A:"intro",B:"start",C:"last chorus",D:"out",E:"bail-out loop",F:"scratch",G:"first hook",H:"go"};
+const ENG_NAMES={songformer:"SongFormer",allin1:"allin1"};
+const KEY="autocue-review-v1";
+let S=JSON.parse(localStorage.getItem(KEY)||'{"grades":{},"engine":{},"times":{},"tnotes":{}}');
+for(const k of ["grades","engine","times","tnotes"]) S[k]=S[k]||{};
+const save=()=>localStorage.setItem(KEY,JSON.stringify(S));
+let ti=0, sel=0, zoomT=null;
+const au=document.getElementById("au");
+const dec=b=>{const s=atob(b),a=new Uint8Array(s.length);for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a};
+DATA.tracks.forEach(t=>{t._pk=dec(t.peak);t._lo=dec(t.lo);t._mi=dec(t.mi);t._hi=dec(t.hi)});
+const T=()=>DATA.tracks[ti];
+const engOf=t=>S.engine[t.nn]||t.default;
+const draft=t=>t.drafts[engOf(t)];
+const gkey=(t,e,s)=>t.nn+"|"+e+"|"+s;
+const fmt=x=>x==null?"":(Math.floor(x/60)+":"+(x%60).toFixed(2).padStart(5,"0"));
+const GR_SET=[["correct","1 Correct"],["within_1_bar","2 Within 1 bar"],["wrong","3 Wrong"],["should_be_empty","4 Should be empty"]];
+const GR_EMPTY=[["correctly_empty","1 Empty is right"],["missing","4 Missing"]];
+const GR_HELD=[["correctly_empty","1 Empty is right"],["guess_right","2 Held-back guess is right"],["missing","4 Missing (guess wrong too)"]];
+function gradeOpts(c){return c.status==="set"?GR_SET:c.status==="withheld"?GR_HELD:GR_EMPTY}
+function keyMap(c,k){const o=gradeOpts(c);if(c.status==="set")return o[k-1]&&o[k-1][0];
+  if(k===1)return "correctly_empty"; if(k===2&&c.status==="withheld")return "guess_right"; if(k===3||k===4)return "missing"; return null}
+function graded(t){const e=engOf(t);if(!t.drafts[e])return 0;return DATA.slots.filter(s=>s!=="F"&&S.grades[gkey(t,e,s)]&&S.grades[gkey(t,e,s)].g).length}
+function list(){const L=document.getElementById("list");L.innerHTML="";let done=0;
+  DATA.tracks.forEach((t,i)=>{const n=graded(t);if(n===7)done++;const d=document.createElement("div");d.className="tr"+(i===ti?" on":"");
+    d.innerHTML=`<span class="n">${t.nn}</span><span class="t" title="${t.title}">${t.title}</span><span class="p ${n===7?"done":""}">${t.drafts&&Object.keys(t.drafts).length?n+"/7":"failed"}</span>`;
+    d.onclick=()=>{go(i)};L.appendChild(d)});
+  document.getElementById("prog").textContent=`${done}/${DATA.tracks.length}`}
+function cueTime(c){return c.time!=null?c.time:null}
+function render(){const t=T(),m=document.getElementById("main");list();
+  if(!S.times[t.nn])S.times[t.nn]={start:Date.now(),secs:0};
+  const e=engOf(t),d=t.drafts[e];
+  let h=`<div class="hdr"><h2>${t.nn}. ${t.title}</h2><span class="dim">${t.genre}</span></div>`;
+  if(!d){m.innerHTML=h+`<p>No engine finished on this track.</p>`;return}
+  const g=d.grid;
+  h+=`<div class="dim">Grid: ${g.source} ${g.bpm} BPM, offset ${g.offset_ms} ms vs detected beats, fit ${Math.round(g.fit*100)}%. Default view: <b>${ENG_NAMES[t.default]}</b> (${t.why_default})</div>`;
+  const tf=d.track_flags||[];if(tf.length)h+=`<div class="tflags">⚑ ${tf.join(" · ")}</div>`;
+  h+=`<div class="eng">`+Object.keys(t.drafts).map(k=>{const nd=t.disagree?Object.values(t.disagree).filter(v=>v==="time"||v==="one_empty"||v==="label").length:0;
+     return `<button class="${k===e?"on":""}" data-e="${k}">${ENG_NAMES[k]}${k===t.default?" ★":""}${nd&&k!==t.default?`<span class="badge">${nd} differ</span>`:""}</button>`}).join("")+
+     `<span class="dim" style="align-self:center">press <kbd>E</kbd> to flip engines</span></div>`;
+  h+=`<canvas id="ov"></canvas><div class="segs" id="segs"></div><canvas id="zm"></canvas>`;
+  h+=`<div class="ctl"><button id="pp">▶ Play / pause (Space)</button><button id="pre">Play 2 bars before (P)</button><span id="pos" class="dim"></span>
+      <span class="dim">Track note:</span><input class="note" id="tnote" style="width:260px" value="${(S.tnotes[t.nn]||"").replace(/"/g,"&quot;")}"></div>`;
+  h+=`<table><tr><th></th><th>Cue</th><th>Time</th><th>Conf</th><th>Why</th><th>Your grade</th><th>Notes</th></tr>`;
+  DATA.slots.forEach((s,i)=>{const c=d.cues[s];const gr=S.grades[gkey(t,e,s)]||{};
+    const lab=c.status==="set"?c.label:c.status==="withheld"?`(held back: ${c.label})`:"empty";
+    const dis=t.disagree&&t.disagree[s]&&!["agree","both_empty"].includes(t.disagree[s])?`<div class="dis">engines differ (${t.disagree[s].replace("_"," ")})</div>`:"";
+    h+=`<tr class="cue ${c.status} ${i===sel?"sel":""}" data-i="${i}"><td><span class="chip" style="background:${SLOT_COLORS[s]}">${s}</span></td>
+     <td><div class="lab">${lab}</div><div class="dim" style="font-size:11px">${SLOT_NAMES[s]}${c.bar_from_B!=null?` · bar ${c.bar_from_B>=0?"+":""}${c.bar_from_B} from B`:""}${c.loop_bars?` · ${c.loop_bars} bars`:""}</div>${dis}</td>
+     <td>${c.time!=null?`<a href="#" data-play="${c.time}">${fmt(c.time)} ▶</a>`:""}</td><td class="conf">${c.confidence!=null?c.confidence.toFixed(2):""}</td>
+     <td><div class="reason">${c.reason||""}</div>${c.flags&&c.flags.length?`<div class="flags">${c.flags.join(" · ")}</div>`:""}</td>
+     <td class="g">${gradeOpts(c).map(([k,l])=>`<button data-g="${k}" data-s="${s}" class="${gr.g===k?"on":""}">${l}</button>`).join("")}</td>
+     <td><input class="note" data-n="${s}" value="${(gr.n||"").replace(/"/g,"&quot;")}"></td></tr>`});
+  h+=`</table><div class="help"><kbd>↑</kbd><kbd>↓</kbd> or <kbd>J</kbd><kbd>K</kbd> pick a cue (it plays from that cue) · <kbd>1</kbd>–<kbd>4</kbd> grade and jump to the next cue · <kbd>Space</kbd> play/pause · <kbd>P</kbd> play 2 bars before the cue · <kbd>E</kbd> flip engine · <kbd>N</kbd>/<kbd>B</kbd> next/previous track · <kbd>Enter</kbd> type a note for the cue, <kbd>Esc</kbd> to leave the box. Click the waveform to play from there. F (scratch) is always empty; grading it is optional.
+   <br>Grades: <b>Correct</b> = right beat and label · <b>Within 1 bar</b> = needs a nudge · <b>Wrong</b> = more than a bar off or wrong label · <b>Should be empty</b> = this track should not have this cue. For empty slots: <b>Empty is right</b> or <b>Missing</b> (it should have one). Dashed markers are cues the tool held back because it wasn't sure. Short ticks along the bottom of the waveform are the other engine's cues.</div>`;
+  m.innerHTML=h;
+  if(au.dataset.src!==t.src){au.src=t.src;au.dataset.src=t.src}
+  m.querySelectorAll(".eng button").forEach(b=>b.onclick=()=>{S.engine[t.nn]=b.dataset.e;save();render()});
+  m.querySelectorAll("tr.cue").forEach(r=>r.onclick=ev=>{if(ev.target.closest("button,input,a"))return;select(+r.dataset.i,true)});
+  m.querySelectorAll("[data-play]").forEach(a=>a.onclick=ev=>{ev.preventDefault();play(+a.dataset.play)});
+  m.querySelectorAll(".g button").forEach(b=>b.onclick=()=>grade(b.dataset.s,b.dataset.g,true));
+  m.querySelectorAll("input[data-n]").forEach(inp=>inp.oninput=()=>{const k=gkey(t,e,inp.dataset.n);S.grades[k]=Object.assign(S.grades[k]||{},{n:inp.value});save()});
+  document.getElementById("tnote").oninput=ev=>{S.tnotes[t.nn]=ev.target.value;save()};
+  document.getElementById("pp").onclick=()=>au.paused?au.play():au.pause();
+  document.getElementById("pre").onclick=preroll;
+  segStrip();draw();
+}
+function segStrip(){const t=T(),d=draft(t),el=document.getElementById("segs"),g=d.grid;el.innerHTML="";
+  const pal={intro:"#7fb3d5",verse:"#a9cce3",prechorus:"#d2b4de",chorus:"#f5b7b1",bridge:"#f9e79f",inst:"#abebc6",outro:"#d5dbdb",edge:"#555"};
+  d.segments.forEach(s=>{const t0=g.t1+s.j0*g.bar_s,t1=g.t1+s.j1*g.bar_s;const x=document.createElement("div");
+    x.style.left=(100*Math.max(0,t0)/t.dur)+"%";x.style.width=(100*(t1-Math.max(0,t0))/t.dur)+"%";x.style.background=pal[s.cls]||"#888";
+    x.textContent=`${s.lab} ${s.j1-s.j0}`;x.title=`${s.lab}: ${s.j1-s.j0} bars`+(s.parts>1?` (${s.parts} merged)`:"");el.appendChild(x)})}
+function wave(cv,t,a,b){const W=cv.width=cv.clientWidth*devicePixelRatio,H=cv.height=cv.clientHeight*devicePixelRatio,c=cv.getContext("2d");
+  c.fillStyle="#0b0c0e";c.fillRect(0,0,W,H);const fps=t.fps,n=t._pk.length;
+  for(let x=0;x<W;x++){const i0=Math.floor((a+(b-a)*x/W)*fps),i1=Math.max(i0+1,Math.floor((a+(b-a)*(x+1)/W)*fps));let p=0,lo=0,mi=0,hi=0,k=0;
+    for(let i=Math.max(0,i0);i<Math.min(n,i1);i++){if(t._pk[i]>p)p=t._pk[i];lo+=t._lo[i];mi+=t._mi[i];hi+=t._hi[i];k++}
+    if(!k)continue;const s=lo+mi+hi||1;c.fillStyle=`rgb(${Math.round(60+195*lo/s)},${Math.round(60+195*mi/s)},${Math.round(80+175*hi/s)})`;
+    const h=p/255*H*0.48;c.fillRect(x,H/2-h,1,2*h)}
+  return {W,H,c,X:tt=>(tt-a)/(b-a)*W}}
+function markers(o,t,d,a,b,big){const {c,H,X}=o;DATA.slots.forEach((s,i)=>{const q=d.cues[s];if(q.time==null)return;if(q.time<a||q.time>b)return;
+  const x=X(q.time);c.strokeStyle=SLOT_COLORS[s];c.lineWidth=(i===sel?3:2)*devicePixelRatio;c.setLineDash(q.status==="set"?[]:[5*devicePixelRatio,4*devicePixelRatio]);
+  c.beginPath();c.moveTo(x,0);c.lineTo(x,H);c.stroke();c.setLineDash([]);
+  if(q.loop_bars&&q.status==="set"){const x2=X(q.time+q.loop_bars*d.grid.bar_s);c.fillStyle=SLOT_COLORS[s]+"33";c.fillRect(x,0,x2-x,H)}
+  const y=(i%4)*17*devicePixelRatio;
+  c.fillStyle=SLOT_COLORS[s];c.fillRect(x,y,(big?62:16)*devicePixelRatio,16*devicePixelRatio);c.fillStyle="#fff";c.font=`bold ${11*devicePixelRatio}px sans-serif`;
+  c.fillText(big?`${s} ${q.label||""}`:s,x+3*devicePixelRatio,y+12*devicePixelRatio)})}
+function draw(){const t=T(),d=draft(t);if(!d)return;const ov=document.getElementById("ov"),zm=document.getElementById("zm");if(!ov)return;
+  const o=wave(ov,t,0,t.dur);
+  Object.keys(t.drafts).filter(k=>k!==engOf(t)).forEach(k=>{const od=t.drafts[k];DATA.slots.forEach(s=>{const q=od.cues[s];if(q.status!=="set"||q.time==null)return;
+    const x=o.X(q.time);o.c.fillStyle=SLOT_COLORS[s];o.c.fillRect(x-1*devicePixelRatio,o.H-12*devicePixelRatio,3*devicePixelRatio,12*devicePixelRatio)})});
+  markers(o,t,d,0,t.dur,false);
+  const pc=au.dataset.src===t.src?au.currentTime:0;o.c.fillStyle="#fff";o.c.fillRect(o.X(pc),0,1.5*devicePixelRatio,o.H);
+  const cq=d.cues[DATA.slots[sel]];const g=d.grid;let center=zoomT!=null?zoomT:(cq.time!=null?cq.time:pc);
+  const a=center-4*g.bar_s,b=center+4*g.bar_s;const z=wave(zm,t,a,b);
+  for(let k=Math.ceil((a-g.t1)/(g.bar_s/4));g.t1+k*g.bar_s/4<b;k++){const tt=g.t1+k*g.bar_s/4,x=z.X(tt);const bar=k%4===0;
+    z.c.fillStyle=bar?"rgba(255,255,255,.55)":"rgba(255,255,255,.15)";z.c.fillRect(x,bar?0:z.H-10*devicePixelRatio,1,bar?z.H:10*devicePixelRatio)}
+  markers(z,t,d,a,b,true);z.c.fillStyle="#fff";if(pc>=a&&pc<=b)z.c.fillRect(z.X(pc),0,1.5*devicePixelRatio,z.H);
+  const pos=document.getElementById("pos");if(pos)pos.textContent=fmt(pc)+" / "+fmt(t.dur)+(g?` · bar ${Math.floor((pc-g.t1)/g.bar_s)+1}`:"");
+  ov.onclick=ev=>{const r=ov.getBoundingClientRect();zoomT=null;play((ev.clientX-r.left)/r.width*t.dur)};
+  zm.onclick=ev=>{const r=zm.getBoundingClientRect();const tt=a+(ev.clientX-r.left)/r.width*(b-a);zoomT=center;play(tt)}}
+function play(x){au.currentTime=Math.max(0,x);au.play().catch(()=>{})}
+function preroll(){const d=draft(T()),c=d.cues[DATA.slots[sel]];if(c.time!=null)play(c.time-2*d.grid.bar_s)}
+function select(i,doPlay){sel=(i+DATA.slots.length)%DATA.slots.length;zoomT=null;const t=T(),c=draft(t).cues[DATA.slots[sel]];
+  document.querySelectorAll("tr.cue").forEach(r=>r.classList.toggle("sel",+r.dataset.i===sel));
+  const r=document.querySelector(`tr.cue[data-i="${sel}"]`);if(r)r.scrollIntoView({block:"nearest"});
+  if(doPlay&&c.time!=null)play(c.time);else if(doPlay)au.pause();draw()}
+function stamp(t){const tm=S.times[t.nn];if(tm){tm.secs=Math.round((Date.now()-tm.start)/1000)}}
+function grade(s,g,fromClick){const t=T(),e=engOf(t),k=gkey(t,e,s);S.grades[k]=Object.assign(S.grades[k]||{},{g,at:new Date().toISOString()});stamp(t);save();
+  const i=DATA.slots.indexOf(s);render();
+  let nx=i+1;while(nx<DATA.slots.length&&DATA.slots[nx]==="F")nx++;
+  if(nx>=DATA.slots.length){if(graded(t)>=7){toast("Track done → next");setTimeout(()=>go(ti+1),350)}else{const miss=DATA.slots.findIndex(q=>q!=="F"&&!(S.grades[gkey(t,e,q)]||{}).g);select(miss<0?0:miss,true)}}
+  else select(nx,true)}
+function go(i){if(i>=DATA.tracks.length){toast("Last track. Export CSV when you're done.");i=DATA.tracks.length-1}ti=Math.max(0,i);sel=0;zoomT=null;au.pause();render();
+  const d=draft(T());if(d){const c=d.cues.A;if(c.time!=null)setTimeout(()=>play(c.time),50)}}
+function toast(s){const x=document.getElementById("toast");x.textContent=s;x.style.display="block";clearTimeout(x._t);x._t=setTimeout(()=>x.style.display="none",1600)}
+document.addEventListener("keydown",ev=>{if(ev.target.tagName==="INPUT"){if(ev.key==="Escape"||ev.key==="Enter")ev.target.blur();return}
+  const t=T(),d=draft(t);const k=ev.key.toLowerCase();
+  if(k===" "){ev.preventDefault();au.paused?au.play():au.pause()}
+  else if(!d){if(k==="n")go(ti+1);if(k==="b")go(ti-1);return}
+  else if(k==="arrowdown"||k==="j"){ev.preventDefault();select(sel+1,true)}else if(k==="arrowup"||k==="k"){ev.preventDefault();select(sel-1,true)}
+  else if(["1","2","3","4"].includes(k)){const s=DATA.slots[sel],g=keyMap(d.cues[s],+k);if(g)grade(s,g)}
+  else if(k==="p")preroll();else if(k==="n")go(ti+1);else if(k==="b")go(ti-1);
+  else if(k==="e"){const es=Object.keys(t.drafts),c=es.indexOf(engOf(t));S.engine[t.nn]=es[(c+1)%es.length];save();render();toast("Showing "+ENG_NAMES[engOf(t)])}
+  else if(k==="enter"){const inp=document.querySelector(`input[data-n="${DATA.slots[sel]}"]`);if(inp){ev.preventDefault();inp.focus()}}});
+function csvq(v){v=v==null?"":String(v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}
+function csvRows(){const rows=[["track","title","cue_slot","engine_shown","default_engine","status","time_sec","time_serato_sec","bar_from_B","label","confidence","grade","notes","reason","flags","engines_differ","track_note","review_seconds","graded_at"]];
+  DATA.tracks.forEach(t=>{Object.keys(t.drafts).forEach(e=>{DATA.slots.forEach(s=>{const gr=S.grades[gkey(t,e,s)];if(!gr||(!gr.g&&!gr.n))return;const c=t.drafts[e].cues[s];
+    rows.push([t.nn,t.title,s,e,t.default,c.status,c.time,c.time_serato,c.bar_from_B,c.label,c.confidence,gr.g||"",gr.n||"",c.reason,(c.flags||[]).join("; "),t.disagree?t.disagree[s]:"",S.tnotes[t.nn]||"",(S.times[t.nn]||{}).secs||"",gr.at||""])})})});
+  return rows}
+function exportCSV(){const rows=csvRows();
+  const blob=new Blob([rows.map(r=>r.map(csvq).join(",")).join("\n")+"\n"],{type:"text/csv"});const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download="autocue-grades-"+new Date().toISOString().slice(0,10)+".csv";a.click();toast(`Exported ${rows.length-1} graded cues`)}
+document.getElementById("exp").onclick=exportCSV;
+document.getElementById("clr").onclick=()=>{if(confirm("Clear ALL grades and notes in this browser?")){S={grades:{},engine:{},times:{},tnotes:{}};save();render()}};
+let raf=()=>{if(!au.paused)draw();requestAnimationFrame(raf)};requestAnimationFrame(raf);
+window.addEventListener("resize",draw);
+window.__reviewReady=true;
+if(location.hash==="#selftest"){localStorage.removeItem(KEY);S={grades:{},engine:{},times:{},tnotes:{}};}
+render();
+if(location.hash==="#selftest"){const out=[];const kd=k=>document.dispatchEvent(new KeyboardEvent("keydown",{key:k}));
+  const t0=T();out.push("tracks="+DATA.tracks.length+" withDrafts="+DATA.tracks.filter(t=>Object.keys(t.drafts).length).length);
+  for(let i=0;i<7;i++)kd(["1","2","3","4","1","2","1"][i]);
+  out.push("graded_t0="+graded(t0)+" now_on_track="+T().nn);
+  kd("b");kd("e");out.push("engine_after_flip="+engOf(T()));
+  const rows=csvRows();out.push("csv_rows="+(rows.length-1)+" header="+rows[0].join("|"));out.push("row1="+JSON.stringify(rows[1]));
+  const pre=document.createElement("pre");pre.id="selftest";pre.textContent=out.join("\n");document.body.appendChild(pre);localStorage.removeItem(KEY)}
+</script></body></html>

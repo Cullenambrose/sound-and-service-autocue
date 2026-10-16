@@ -1,0 +1,171 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cue Review</title>
+<style>
+:root{--auto:#22c55e;--google:#3b82f6;--empty:#6b7280;--user:#f59e0b;--bg:#0f1115;--card:#1a1d24;--fg:#e8eaed}
+*{box-sizing:border-box}body{margin:0;font:16px -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #2a2e37}
+h1{font-size:20px;margin:0;flex:1}.btn{border:0;border-radius:12px;padding:14px 18px;font-size:16px;font-weight:600;background:#2a2f3a;color:var(--fg);cursor:pointer;min-width:64px}
+.btn:hover{background:#363c4a}.btn.primary{background:#2563eb}.btn.ok{background:#15803d}.btn.warn{background:#7f1d1d}.btn.on{outline:3px solid var(--user)}
+.btn.big{font-size:26px;padding:10px 22px;min-width:70px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;padding:20px}
+.tile{background:var(--card);border-radius:16px;padding:18px;min-height:120px;cursor:pointer;border:2px solid transparent;display:flex;flex-direction:column;gap:10px}
+.tile:hover{border-color:#3b82f6}.tile .n{font-size:13px;opacity:.6}.tile .t{font-weight:600;line-height:1.25}
+.dots{display:flex;gap:5px;flex-wrap:wrap}.dot{width:11px;height:11px;border-radius:50%;background:#3a3f4b}.dot.d{background:var(--auto)}
+.legend{display:flex;gap:14px;font-size:13px;opacity:.85}.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+#view{display:none;padding:16px 20px}
+#wrap{position:sticky;top:0;z-index:5;background:var(--bg);padding-bottom:6px}
+#wave{width:100%;height:220px;background:#11141a;border-radius:12px;display:block;cursor:crosshair;touch-action:none}
+#ov{width:100%;height:34px;background:#11141a;border-radius:8px;display:block;margin-top:6px;cursor:pointer}
+.zbar{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}.zlab{font-variant-numeric:tabular-nums;opacity:.8;min-width:130px}
+.cues{display:grid;gap:10px;margin-top:10px}.row{background:var(--card);border-radius:14px;padding:12px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;border:2px solid transparent;cursor:pointer}
+.row.sel{border-color:var(--user)}
+.tag{font-weight:800;font-size:18px;width:120px}.src{font-size:12px;padding:3px 8px;border-radius:99px;font-weight:700}
+.why{flex-basis:100%;font-size:13px;opacity:.7}.pos{width:150px;font-variant-numeric:tabular-nums}
+.db{font-size:14px;font-weight:700;padding:4px 10px;border-radius:8px;font-variant-numeric:tabular-nums}.db.on{background:#14532d;color:#86efac}.db.off{background:#78350f;color:#fcd34d}
+.foot{display:flex;gap:12px;justify-content:flex-end;margin:18px 0;flex-wrap:wrap}.hint{font-size:13px;opacity:.7;margin-top:6px}
+kbd{background:#2a2f3a;border-radius:4px;padding:1px 5px;font-size:12px}
+</style></head><body>
+<header><h1 id="title">Cue Review</h1><div class="legend"><span><i style="background:var(--auto)"></i>Auto (engine)</span><span><i style="background:var(--google)"></i>Google suggestion</span><span><i style="background:var(--user)"></i>You</span><span><i style="background:var(--empty)"></i>Empty</span></div>
+<button class="btn" id="home" style="display:none">All tracks</button></header>
+<div class="grid" id="grid"></div>
+<div id="view">
+ <div id="wrap">
+ <canvas id="wave" width="2400" height="440"></canvas>
+ <canvas id="ov" width="2400" height="68"></canvas>
+ <div class="zbar">
+  <button class="btn big" id="zout" title="Zoom out (−)">−</button><button class="btn big" id="zin" title="Zoom in (+)">+</button>
+  <button class="btn" id="zall">Whole song</button><button class="btn" id="pp">▶ Play</button>
+  <span class="zlab" id="zlab"></span><span class="hint" id="wavestat"></span>
+ </div>
+ <div class="hint" id="hint">Pick a cue row, then: <kbd>←</kbd>/<kbd>→</kbd> 1 beat · <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 1 bar · <kbd>Enter</kbd> Correct · <kbd>Space</kbd> play/pause · <kbd>+</kbd>/<kbd>−</kbd> zoom. Pinch or Ctrl+scroll to zoom, drag or scroll sideways to move. Tap the waveform to play from there.</div>
+ </div>
+ <div class="cues" id="cues"></div>
+ <div class="foot"><button class="btn" disabled title="coming after test write">Write to copies (coming after test write)</button>
+ <button class="btn" id="stop">Stop audio</button><button class="btn primary" id="next">Continue / Next track →</button></div>
+</div>
+<audio id="au" preload="none"></audio>
+<script>
+const SLOTS=["A","B","C","D","E","F","G","H","intro","outro"];
+const LABEL={B:"START",C:"1st Chorus",D:"Last Chorus",E:"E (empty)",F:"F (empty)",G:"GO",H:"EXIT",intro:"Intro loop",outro:"Outro loop"};
+const COL={auto:"#22c55e",google:"#3b82f6",empty:"#6b7280",user:"#f59e0b",suggest:"#3b82f6"};
+let D,cur=null,armed=null,sel=null,state=JSON.parse(localStorage.getItem("cueReview")||"{}");
+let vS=0,vL=1,HI=null,hiFor=null; // view start/length (s); hi-res envelope
+const $=id=>document.getElementById(id),au=$("au");
+const save=()=>localStorage.setItem("cueReview",JSON.stringify(state));
+function items(t){const o={};for(const s of "ABCDEFGH")o[s]={...t.cues[s]};for(const l of t.loops)o[l.loop]={beat:l.bar==null?null:l.bar*4,source:l.source,why:l.why,loop:true};return o}
+function st(t){return state[t.id]||(state[t.id]={})}
+function eff(t,s){const o=items(t)[s],u=st(t)[s];return u?{...o,beat:u.beat,source:u.beat==null?"empty":(u.changed?"user":o.source),decided:true}:o}
+// Beat grid: uses t.beats / t.downbeats (seconds) if data.json ever has them, else the constant grid t1 + n*bar_s/4.
+const bs=t=>t.bar_s/4;
+const tOf=(t,b)=>t.t1+b*bs(t), bOf=(t,x)=>(x-t.t1)/bs(t);
+function gridBeats(t){if(Array.isArray(t.beats)&&t.beats.length){const db=new Set((t.downbeats||[]).map(x=>Math.round(x*1000)));return t.beats.map(x=>({t:x,down:db.size?db.has(Math.round(x*1000)):null}))}return null}
+function downInfo(t,beat){ // how far a cue is from the nearest downbeat
+ const x=tOf(t,beat);let near,nb;
+ if(Array.isArray(t.downbeats)&&t.downbeats.length){near=t.downbeats.reduce((a,b)=>Math.abs(b-x)<Math.abs(a-x)?b:a);nb=bOf(t,near)}else{nb=Math.round(beat/4)*4;near=tOf(t,nb)}
+ const ds=x-near,dbeats=ds/bs(t);return {ok:Math.abs(ds)<0.005,ds,dbeats,nb:Math.round(nb)}}
+function fracTxt(b){b=Math.abs(b);const r=Math.round(b*4)/4,w=Math.floor(r),f=r-w,F={0:"",0.25:"¼",0.5:"½",0.75:"¾"}[f];if(r===0)return (b).toFixed(2)+" beat";return (w?w:"")+(F||"")+(r===1?" beat":" beats")}
+function dbTxt(t,beat){const i=downInfo(t,beat);if(i.ok)return `<span class="db on">✓ on downbeat</span>`;return `<span class="db off">${i.ds>0?"+":"−"}${Math.abs(i.ds).toFixed(2)} s / ${fracTxt(i.dbeats)} ${i.ds>0?"late":"early"}</span>`}
+function nameOf(t,s){if(s!=="A")return LABEL[s];const b=eff(t,"B").beat,a=eff(t,"A").beat;return a==null||b==null?"A "+(t.cues.A.name||""):"A "+((b-a)/4)+"BS"}
+async function log(ev){try{await fetch("/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(ev)})}catch(e){ev.unsent=1;(state._unsent=state._unsent||[]).push(ev)}save()}
+function grid(){$("grid").style.display="grid";$("view").style.display="none";$("home").style.display="none";$("title").textContent="Cue Review · "+D.tracks.length+" tracks";
+ $("grid").innerHTML=D.tracks.map(t=>`<div class="tile" onclick="openT('${t.id}')"><div class="n">${t.id} · ${t.bpm} BPM</div><div class="t">${t.name}</div><div class="dots">${SLOTS.filter(s=>!"EF".includes(s)).map(s=>`<span class="dot ${st(t)[s]?"d":""}"></span>`).join("")}</div></div>`).join("")}
+function openT(id){cur=D.tracks.find(t=>t.id===id);armed=null;sel=null;au.src="/audio/"+id;vS=0;vL=cur.dur;HI=null;hiFor=null;loadHi(cur);
+ $("grid").style.display="none";$("view").style.display="block";$("home").style.display="";$("title").textContent=cur.id+" · "+cur.name;location.hash=id;render()}
+// ---- high-res waveform: decode the track in the browser (WebAudio), build a min/max envelope at 2000 bins/s
+async function loadHi(t){$("wavestat").textContent="Loading detailed waveform…";
+ try{const buf=await (await fetch("/audio/"+t.id)).arrayBuffer();const ac=new (window.AudioContext||window.webkitAudioContext)();const ab=await ac.decodeAudioData(buf);ac.close&&ac.close();
+  const R=2000,sr=ab.sampleRate,step=sr/R,n=Math.floor(ab.length/step),mn=new Float32Array(n),mx=new Float32Array(n),chs=[];for(let c=0;c<ab.numberOfChannels;c++)chs.push(ab.getChannelData(c));
+  let peak=1e-6;for(let i=0;i<n;i++){let lo=1,hi=-1;const a=Math.floor(i*step),b=Math.floor((i+1)*step);for(let j=a;j<b;j++){let v=0;for(const ch of chs)v+=ch[j];v/=chs.length;if(v<lo)lo=v;if(v>hi)hi=v}mn[i]=lo;mx[i]=hi;peak=Math.max(peak,hi,-lo)}
+  if(cur!==t)return;HI={R,mn,mx,peak,n};hiFor=t.id;$("wavestat").textContent="";draw()}
+ catch(e){$("wavestat").textContent="Detailed waveform unavailable (showing overview)";}}
+function render(){draw();const t=cur;$("cues").innerHTML=SLOTS.map(s=>{const c=eff(t,s),fixed="EF".includes(s);
+ const pos=c.beat==null?"—":`bar ${Math.floor(c.beat/4)}${c.beat%4?"."+(c.beat%4+1):""} · ${fmt(tOf(t,c.beat))}`;
+ const srcName={auto:"Auto",google:"Google suggestion",empty:"Empty",user:"You",suggest:"Suggestion"}[c.source];
+ return `<div class="row ${sel===s?"sel":""}" onclick="pick('${s}',event)"><span class="tag" style="color:${COL[c.source]}">${nameOf(t,s)}</span><span class="src" style="background:${COL[c.source]}33;color:${COL[c.source]}">${srcName}${c.decided?" ✓":""}</span><span class="pos">${pos}</span>${c.beat==null||fixed?"":dbTxt(t,c.beat)}
+ ${fixed?"":`<button class="btn" ${c.beat==null?"disabled":""} onclick="play('${s}')">▶ Play</button>
+ <button class="btn" ${c.beat==null?"disabled":""} onclick="zoomCue('${s}')">🔍 Zoom to cue</button>
+ <button class="btn ok" onclick="act('${s}','correct')">Correct</button>
+ <button class="btn" onclick="act('${s}','bar',-1)">−1 bar</button><button class="btn" onclick="act('${s}','bar',1)">+1 bar</button>
+ <button class="btn" onclick="act('${s}','beat',-1)">−1 beat</button><button class="btn" onclick="act('${s}','beat',1)">+1 beat</button>
+ <button class="btn" ${c.beat==null||downInfo(t,c.beat).ok?"disabled":""} onclick="act('${s}','snap')">Snap to downbeat</button>
+ <button class="btn warn" onclick="act('${s}','clear')">Clear</button><button class="btn ${armed===s?"on":""}" onclick="arm('${s}')">${armed===s?"Tap waveform…":"Set here"}</button>`}
+ <div class="why">${c.why||""}</div></div>`}).join("")}
+function pick(s,e){if("EF".includes(s))return;if(sel!==s){sel=s;if(e&&e.target.tagName!=="BUTTON")render();else{document.querySelectorAll(".row").forEach((r,i)=>r.classList.toggle("sel",SLOTS[i]===s));draw()}}}
+function fmt(x){return Math.floor(x/60)+":"+(x%60).toFixed(2).padStart(5,"0")}
+function act(s,a,d){const t=cur,c=eff(t,s),from=c.beat;let to=from;sel=s;
+ if(a==="bar"||a==="beat"){if(from==null)return;to=from+(a==="bar"?4*d:d)}else if(a==="snap"){if(from==null)return;to=downInfo(t,from).nb}else if(a==="clear")to=null;
+ const changed=a!=="correct"||(st(t)[s]&&st(t)[s].changed);
+ st(t)[s]={beat:to,changed:changed&&!(a==="correct"&&!st(t)[s])};
+ log({track:t.id,file:t.file,cue:s,name:nameOf(t,s),action:a+(d?(d>0?"+":"")+d:""),from_beat:from,to_beat:to,from_time:from==null?null:+tOf(t,from).toFixed(3),to_time:to==null?null:+tOf(t,to).toFixed(3),
+  original_source:items(t)[s].source,original_beat:items(t)[s].beat,bar_s:t.bar_s,t1:t.t1});
+ if(to!=null&&vL<t.dur*0.9){const x=tOf(t,to);if(x<vS||x>vS+vL)setView(x-vL/2,vL)}
+ render();if(to!=null&&a!=="clear"&&a!=="correct")play(s)}
+function arm(s){armed=armed===s?null:s;sel=s;render()}
+function play(s){const c=eff(cur,s);if(c.beat==null)return;au.currentTime=Math.max(0,tOf(cur,c.beat));au.play()}
+// ---- zoom / pan
+const minL=()=>cur.bar_s*1.05;
+function setView(s,L){L=Math.min(cur.dur,Math.max(minL(),L));s=Math.min(cur.dur-L,Math.max(0,s));vS=s;vL=L;draw()}
+function zoomAt(f,x){x=x??(vS+vL/2);const r=(x-vS)/vL,L=Math.min(cur.dur,Math.max(minL(),vL*f));setView(x-r*L,L)}
+function zoomCue(s){const c=eff(cur,s);if(c.beat==null)return;sel=s;const L=cur.bar_s*4;setView(tOf(cur,c.beat)-L/2,L);render()}
+$("zin").onclick=()=>zoomAt(0.5,au.paused?null:au.currentTime);$("zout").onclick=()=>zoomAt(2);$("zall").onclick=()=>setView(0,cur.dur);
+$("pp").onclick=()=>au.paused?au.play():au.pause();
+const cv=$("wave");const xT=e=>{const r=cv.getBoundingClientRect();return vS+(e.clientX-r.left)/r.width*vL};
+cv.addEventListener("wheel",e=>{if(!cur)return;e.preventDefault();
+ if(e.ctrlKey||e.metaKey)zoomAt(Math.exp(e.deltaY*0.01),xT(e));
+ else{const d=Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY;setView(vS+d/cv.clientWidth*vL,vL)}},{passive:false});
+const ptrs=new Map();let drag=null,pinch=null;
+cv.addEventListener("pointerdown",e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,e.clientX);
+ if(ptrs.size===2){const [a,b]=[...ptrs.values()];pinch={d:Math.abs(a-b)||1,L:vL,c:xT({clientX:(a+b)/2})};drag=null}else drag={x:e.clientX,s:vS,moved:false}});
+cv.addEventListener("pointermove",e=>{if(!ptrs.has(e.pointerId))return;ptrs.set(e.pointerId,e.clientX);
+ if(pinch&&ptrs.size===2){const [a,b]=[...ptrs.values()],L=pinch.L*pinch.d/(Math.abs(a-b)||1),r=cv.getBoundingClientRect(),fr=((a+b)/2-r.left)/r.width;setView(pinch.c-fr*Math.min(cur.dur,Math.max(minL(),L)),L)}
+ else if(drag){const dx=e.clientX-drag.x;if(Math.abs(dx)>5)drag.moved=true;if(drag.moved)setView(drag.s-dx/cv.clientWidth*vL,vL)}});
+const up=e=>{ptrs.delete(e.pointerId);if(ptrs.size<2)pinch=null;if(drag&&!drag.moved&&ptrs.size===0)tap(xT(e));if(ptrs.size===0)drag=null};
+cv.addEventListener("pointerup",up);cv.addEventListener("pointercancel",e=>{ptrs.delete(e.pointerId);drag=null;pinch=null});
+function tap(x){if(armed){const s=armed,from=eff(cur,s).beat,to=Math.round(bOf(cur,x));armed=null;st(cur)[s]={beat:to,changed:true};
+  log({track:cur.id,file:cur.file,cue:s,name:nameOf(cur,s),action:"set_here",from_beat:from,to_beat:to,to_time:+tOf(cur,to).toFixed(3),tap_time:+x.toFixed(3),original_source:items(cur)[s].source,original_beat:items(cur)[s].beat,bar_s:cur.bar_s,t1:cur.t1});render();play(s)}
+ else{au.currentTime=Math.max(0,x);au.play()}}
+$("ov").onclick=e=>{const r=e.target.getBoundingClientRect();setView((e.clientX-r.left)/r.width*cur.dur-vL/2,vL)};
+document.addEventListener("keydown",e=>{if(!cur||$("view").style.display==="none"||e.target.tagName==="INPUT")return;
+ if(e.key===" "){e.preventDefault();au.paused?au.play():au.pause();return}
+ if(e.key==="+"||e.key==="="){zoomAt(0.5);return}if(e.key==="-"||e.key==="_"){zoomAt(2);return}
+ if(!sel)return;
+ if(e.key==="ArrowLeft"||e.key==="ArrowRight"){e.preventDefault();act(sel,e.shiftKey?"bar":"beat",e.key==="ArrowLeft"?-1:1)}
+ else if(e.key==="Enter"){e.preventDefault();act(sel,"correct")}});
+// ---- drawing
+function draw(){if(!cur)return;const g=cv.getContext("2d"),W=cv.width,Hh=cv.height,t=cur,X=x=>(x-vS)/vL*W,mid=Hh/2+20,amp=Hh*0.34;g.clearRect(0,0,W,Hh);
+ for(const s of["intro","outro"]){const c=eff(t,s);if(c.beat==null)continue;const a=X(tOf(t,c.beat)),b=X(tOf(t,c.beat+16));g.fillStyle=COL[c.source]+"30";g.fillRect(a,0,b-a,Hh);g.fillStyle=COL[c.source];g.font="bold 32px system-ui";g.fillText(s==="intro"?"LOOP IN":"LOOP OUT",Math.max(a,0)+8,Hh-60)}
+ // beat grid
+ const pxBeat=bs(t)/vL*W,ext=gridBeats(t);
+ const line=(x,w,c)=>{g.fillStyle=c;g.fillRect(x-w/2,0,w,Hh)};
+ let bars=[];
+ if(ext){for(const b of ext){if(b.t<vS-1||b.t>vS+vL+1)continue;const n=bOf(t,b.t),isD=b.down??(Math.round(n)%4===0);if(isD)bars.push([b.t,Math.round(n/4)]);else if(pxBeat>6)line(X(b.t),3,"#ffffff40")}}
+ else{const b0=Math.floor(bOf(t,vS)),b1=Math.ceil(bOf(t,vS+vL));for(let n=b0;n<=b1;n++){const x=tOf(t,n);if(x<0)continue;if(((n%4)+4)%4===0)bars.push([x,n/4]);else if(pxBeat>6)line(X(x),3,"#ffffff40")}}
+ const pxBar=pxBeat*4,lblEvery=pxBar>60?1:pxBar>15?8:32;
+ for(const [x,n] of bars){const big=n%8===0;if(!big&&pxBar<4)continue;line(X(x),big?10:5,big?"#facc15cc":"#ffffff99");
+  if(n%lblEvery===0){g.fillStyle=big?"#facc15":"#cbd5e1";g.font="bold "+(big?"40px":"34px")+" system-ui";g.fillText((pxBar>200?"bar ":"")+n,X(x)+8,Hh-14)}}
+ // waveform
+ g.fillStyle="#9aa4b2";
+ if(HI&&hiFor===t.id&&vL/W*HI.R<40){for(let px=0;px<W;px++){const a=Math.floor((vS+px/W*vL)*HI.R),b=Math.max(a+1,Math.floor((vS+(px+1)/W*vL)*HI.R));let lo=0,hi=0;for(let i=a;i<b&&i<HI.n;i++){if(i<0)continue;if(HI.mn[i]<lo)lo=HI.mn[i];if(HI.mx[i]>hi)hi=HI.mx[i]}g.fillRect(px,mid-hi/HI.peak*amp,1,Math.max(1,(hi-lo)/HI.peak*amp))}}
+ else{const p=t.peaks,mx=Math.max(...p)||1,n=p.length;for(let px=0;px<W;px+=2){const a=Math.floor((vS+px/W*vL)/t.dur*n),b=Math.max(a+1,Math.floor((vS+(px+2)/W*vL)/t.dur*n));let m=0;for(let i=a;i<b&&i<n;i++)if(i>=0)m=Math.max(m,p[i]);const h=m/mx*amp;g.fillRect(px,mid-h,2,2*h)}}
+ // cues
+ for(const s of"ABCDGH"){const c=eff(t,s);if(c.beat==null)continue;const x=X(tOf(t,c.beat));if(x<-200||x>W+50)continue;const on=downInfo(t,c.beat).ok,w=sel===s?6:4;
+  g.fillStyle=COL[c.source];g.fillRect(x-w/2,0,w,Hh);g.font="bold 48px system-ui";g.fillText(s,x+10,48);
+  if(vL<t.dur*0.5){g.font="bold 36px system-ui";g.fillStyle=on?"#86efac":"#fcd34d";const i=downInfo(t,c.beat);g.fillText(on?"✓ downbeat":`${i.ds>0?"+":"−"}${Math.abs(i.ds).toFixed(2)}s off`,x+10,92)}}
+ // playhead
+ const pt=au.currentTime;if(!au.paused||pt){g.fillStyle="#fff";g.fillRect(X(pt)-1.5,0,3,Hh)}
+ $("zlab").textContent=vL>=t.dur*0.999?"Whole song":`${(vL/t.bar_s).toFixed(1)} bars on screen`;
+ drawOv()}
+function drawOv(){const o=$("ov"),g=o.getContext("2d"),W=o.width,H=o.height,t=cur,p=t.peaks,mx=Math.max(...p)||1;g.clearRect(0,0,W,H);g.fillStyle="#4b5563";
+ for(let i=0;i<p.length;i++){const h=p[i]/mx*H*0.45;g.fillRect(i/p.length*W,H/2-h,Math.max(1,W/p.length),2*h)}
+ for(const s of"ABCDGH"){const c=eff(t,s);if(c.beat==null)continue;g.fillStyle=COL[c.source];g.fillRect(tOf(t,c.beat)/t.dur*W-2,0,4,H)}
+ g.fillStyle="#fff";g.fillRect(au.currentTime/t.dur*W-1,0,2,H);
+ g.strokeStyle="#f59e0b";g.lineWidth=4;g.strokeRect(vS/t.dur*W+2,2,Math.max(6,vL/t.dur*W-4),H-4)}
+// playhead follows while playing
+function tick(){if(cur&&!au.paused){const x=au.currentTime;if(vL<cur.dur*0.999&&(x>vS+vL*0.85||x<vS))setView(x-vL*0.15,vL);else draw()}requestAnimationFrame(tick)}
+requestAnimationFrame(tick);
+au.onplay=au.onpause=()=>{$("pp").textContent=au.paused?"▶ Play":"⏸ Pause";draw()};
+$("stop").onclick=()=>au.pause();$("home").onclick=()=>{au.pause();cur=null;history.replaceState(null,"",location.pathname);grid()};
+$("next").onclick=()=>{const i=D.tracks.indexOf(cur);au.pause();i<D.tracks.length-1?openT(D.tracks[i+1].id):grid()};
+fetch("data.json").then(r=>r.json()).then(async d=>{D=d;const H0=location.hash.slice(1);try{const L=await (await fetch("/corrections")).json();for(const ev of L){const t=D.tracks.find(x=>x.id===ev.track);if(t)st(t)[ev.cue]={beat:ev.to_beat,changed:!ev.action.startsWith("correct")||!!(st(t)[ev.cue]||{}).changed}}}catch(e){}grid();if(H0&&D.tracks.find(t=>t.id===H0))openT(H0)});
+</script></body></html>

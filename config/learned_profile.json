@@ -1,0 +1,141 @@
+{
+ "built_from": {
+  "truth_songs": 20,
+  "corrections": 0,
+  "corrections_file": "/workspace/research/dj-auto-cues/proof/real/corrections/corrections.json"
+ },
+ "rules": {
+  "B": {
+   "key": null,
+   "table": {},
+   "train_hits": 12
+  },
+  "C": {
+   "key": null,
+   "table": {},
+   "train_hits": 6
+  },
+  "D": {
+   "key": "type",
+   "table": {
+    "edit": {
+     "offset_bars": 0,
+     "support": "2/3"
+    },
+    "original": {
+     "offset_bars": -8,
+     "support": "2/5"
+    }
+   },
+   "train_hits": 5,
+   "train_hits_no_rule": 4
+  },
+  "H": {
+   "key": null,
+   "table": {},
+   "train_hits": 9
+  }
+ },
+ "song_context": {
+  "01": {
+   "type": "edit",
+   "tempo": "fast>125",
+   "after_exit": "outro"
+  },
+  "02": {
+   "type": "remix",
+   "tempo": "mid100-125",
+   "after_exit": "outro"
+  },
+  "03": {
+   "type": "edit",
+   "tempo": "fast>125",
+   "after_exit": "outro"
+  },
+  "04": {
+   "type": "remix",
+   "tempo": "mid100-125",
+   "after_exit": "outro"
+  },
+  "05": {
+   "type": "remix",
+   "tempo": "fast>125",
+   "after_exit": "outro"
+  },
+  "06": {
+   "type": "original",
+   "tempo": "slow<100",
+   "after_exit": "outro"
+  },
+  "07": {
+   "type": "edit",
+   "tempo": "mid100-125",
+   "after_exit": "inst"
+  },
+  "08": {
+   "type": "edit",
+   "tempo": "fast>125",
+   "after_exit": "outro"
+  },
+  "09": {
+   "type": "original",
+   "tempo": "slow<100",
+   "after_exit": "outro"
+  },
+  "10": {
+   "type": "edit",
+   "tempo": "slow<100",
+   "after_exit": "outro"
+  },
+  "11": {
+   "type": "edit",
+   "tempo": "mid100-125",
+   "after_exit": "outro"
+  },
+  "12": {
+   "type": "edit",
+   "tempo": "mid100-125",
+   "after_exit": "outro"
+  },
+  "13": {
+   "type": "original",
+   "tempo": "fast>125",
+   "after_exit": "inst"
+  },
+  "14": {
+   "type": "edit",
+   "tempo": "mid100-125",
+   "after_exit": "outro"
+  },
+  "15": {
+   "type": "original",
+   "tempo": "slow<100",
+   "after_exit": "verse"
+  },
+  "16": {
+   "type": "remix",
+   "tempo": "slow<100",
+   "after_exit": "outro"
+  },
+  "17": {
+   "type": "original",
+   "tempo": "mid100-125",
+   "after_exit": "other"
+  },
+  "18": {
+   "type": "remix",
+   "tempo": "slow<100",
+   "after_exit": "outro"
+  },
+  "19": {
+   "type": "original",
+   "tempo": "slow<100",
+   "after_exit": "outro"
+  },
+  "20": {
+   "type": "original",
+   "tempo": "fast>125",
+   "after_exit": "other"
+  }
+ }
+}

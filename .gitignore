@@ -1,0 +1,101 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+**/box-secrets.json
+
+# API keys / credential dumps (belt and suspenders)
+*credentials*
+*api_key*
+*apikey*
+
+# Personal music library paths
+paths.json
+**/paths.json
+
+# Reviewer corrections (may contain local paths / personal notes)
+corrections.json
+**/corrections.json
+
+# Audio and derived media
+*.wav
+*.mp3
+*.flac
+*.aiff
+*.aif
+*.m4a
+*.ogg
+*.aac
+*.stem.mp4
+stems/
+**/stems/
+
+# Analysis working dirs (large, machine-local)
+out/
+in/
+wav/
+features/
+features_v5/
+cues/
+cues_v2/
+gemini/
+gemini_v2/
+gemini_v3/
+cache/
+logs/
+truth/
+review/data.json
+**/data.json
+
+# Third-party model source (cloned into proof/src)
+src/
+proof/src/
+third_party/
+vendor/
+
+# Python / venvs
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+venv-*/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Archives and large dumps
+*.tgz
+*.tar.gz
+*.zip
+!docs/**/*.md
+cue_scan_raw.json
+serato_tags.json
+**/serato_tags.json
+MANIFEST.csv
+**/hashes_before.sha256
+**/laptop_hashes.tsv
+score_rows.json
+score_v2_rows.json
+variants_score.json
+learn_loo.json
+learn_loo_marks.json
+genre_tags.json
+
+# Local run state
+stats.json
+*.log
