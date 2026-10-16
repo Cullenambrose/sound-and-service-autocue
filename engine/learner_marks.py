@@ -63,4 +63,39 @@ def main():
             "song_context": {nn: ctx(nn) for nn in songs}}
     json.dump(prof, open(f"{R}/learned_profile_marks.json", "w"), indent=1); json.dump(loo, open(f"{R}/learn_loo_marks.json", "w"), indent=1)
     print(json.dumps(full, indent=0)[:1500]); print("corrections used:", len(corr))
-if __name__ == "__main__": main()
+if __name__ == "__main__" and "--buckets" not in sys.argv: main()
+
+# ---- v5 change 8: per-genre-bucket parameter tuning (python learner_marks.py --buckets [--min-marks N]) ----
+def tune_buckets(min_marks=8):
+    """Grid-search a few v5 parameters per bucket against Cullen's review marks (corrections/*.json, last correct/set_here
+    per track+cue, within 1 beat). A bucket's value changes only when it has >= min_marks marks AND strictly beats the default.
+    Writes ../genre_params_v5.tuned.json (use with rules_v5.py --config). The default file is never overwritten."""
+    import glob, itertools, rules_v5 as V5
+    ev = []
+    for f in sorted(glob.glob(f"{R}/corrections/corrections*.json")): ev += json.load(open(f))
+    last = {}
+    for e in ev:
+        if e.get("cue") in list("ABCDGH") and e.get("action") in ("correct", "set_here") and e.get("to_beat") is not None: last[(e["track"], e["cue"])] = e["to_beat"]
+    cfg = json.load(open(f"{R}/genre_params_v5.json")); grid = {"exit_phrase_bars": [4, 8], "exit_snap_radius": [1, 2], "chorus_sim_thr": [0.7, 0.8, 0.9], "drop_frac": [0.15, 0.25, 0.35]}
+    songs = sorted({k[0] for k in last}); on = lambda f: True; byb = {}
+    for nn in songs: byb.setdefault(V5.bucket(V5.Song(R, nn))[0], []).append(nn)
+    report = {}
+    def hits(nns, over):
+        c = json.loads(json.dumps(cfg)); [c["buckets"].setdefault(b, {}).update(over) for b in c["buckets"]]; h = 0
+        for nn in nns:
+            p = V5.build(V5.Song(R, nn), on, c)["cues"]
+            for L in "ABCDGH":
+                t = last.get((nn, L)); b = p.get(L, {}).get("bar")
+                if t is not None and b is not None and abs(b * 4 - t) <= 1: h += 1
+        return h
+    for b, nns in byb.items():
+        n = sum(1 for k in last if k[0] in nns); base = hits(nns, {}); best = (base, {})
+        if n >= min_marks:
+            for vals in itertools.product(*grid.values()):
+                over = dict(zip(grid, vals)); h = hits(nns, over)
+                if h > best[0]: best = (h, over)
+            cfg["buckets"][b] = best[1]
+        report[b] = {"songs": nns, "marks": n, "hits_default": base, "hits_tuned": best[0], "changed": best[1] if n >= min_marks else "too few marks"}
+    cfg["_tuned"] = report; json.dump(cfg, open(f"{R}/genre_params_v5.tuned.json", "w"), indent=1); print(json.dumps(report, indent=1))
+if __name__ == "__main__" and "--buckets" in sys.argv:
+    tune_buckets(int(sys.argv[sys.argv.index("--min-marks") + 1]) if "--min-marks" in sys.argv else 8)

@@ -1,5 +1,5 @@
 {
  "_doc": "v5 change 8: per-bucket parameters. Defaults = current v4 values. learner_marks.py --buckets tunes these from Cullen's review marks (only buckets with enough marks are changed).",
- "default": {"auto_set_min_conf": 0.85, "drop_frac": 0.25, "drop_hold_frac": 0.8, "exit_phrase_bars": 8, "exit_snap_radius": 2, "chorus_sim_thr": 0.8, "tempo_drift_tol": 0.02, "cold_vocal_frac": 0.4},
+ "default": {"auto_set_min_conf": 0.85, "drop_frac": 0.25, "drop_hold_frac": 0.8, "exit_phrase_bars": 8, "exit_snap_radius": 2, "chorus_sim_thr": 0.8, "tempo_drift_tol": 0.04, "cold_vocal_frac": 0.4},
  "buckets": {"pop": {}, "hiphop_rnb": {}, "house_edm": {}, "latin": {}, "other": {}}
 }

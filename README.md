@@ -49,6 +49,24 @@ Corrections stay local (`corrections.json` is gitignored). Feed them back throug
 
 **Do not** treat the old Serato Markers2 on the 20-song test set as Cullen’s hand cues — those lined up with Mixed In Key energy cues. Scoring and learning use **Cullen’s review-page marks** (`corrections.json` → `learner_marks.py` → `config/learned_profile_marks.json`). See `docs/STATUS.md`.
 
+
+## v5 (switchable improvements)
+
+`engine/rules_v5.py` post-processes v4 (`v4_go32`); each change can be turned off with `--off a,b` or tested alone with `--only a`. Details and ablation: `docs/SCORE-v5-2026-10-15.md`.
+
+| # | Change | What it does |
+|---|--------|----------------|
+| 1 | `loops_phrase` | Intro/outro loops only on phrase-aligned bars (4k from START/EXIT) + clean-beat stem check |
+| 2 | `exit_phrase` | EXIT snaps to 8- then 4-bar grid from START; G = EXIT − 8 bars; flag if no nearby boundary |
+| 3 | `chorus_verify` | Keep C/D only if section recurs (chroma/MFCC or lyric line); else low-conf suggestion |
+| 4 | `drop_robust` | EXIT drop needs drums+bass down for a whole bar (not a one-frame dip) |
+| 5 | `tempo_check` | Flag tempo drift / multi-BPM grids; rebuild bar times from detected beats when unstable |
+| 6 | `cold_start` | Vocals+drums in bar 1 → deliberate cold start (A empty + flag); vocals-only → a cappella intro |
+| 7 | `consensus` | Bump or cut START/EXIT confidence when allin1 / SongFormer / stems / energy agree or disagree |
+| 8 | `genre_params` | Bucket (pop / hiphop_rnb / house_edm / latin / other); params in `config/genre_params_v5.json`; tune with `learner_marks.py --buckets` |
+
+**Score vs Cullen’s marks (18 cues / 4 songs):** v4 and v5 are tied at **9/18**. v5 auto-sets fewer cues and adds review flags. **v4 stays the default** until there are ~50+ stress-crate marks, then re-score and decide. Roadmap: `docs/ROADMAP.md`.
+
 ## Status
 
-See `docs/STATUS.md` for current scores and what is in flight (v5 Gemini-review fixes, 5-crate stress run).
+See `docs/STATUS.md` for current scores, the v5 ablation, and the 5-crate stress run.

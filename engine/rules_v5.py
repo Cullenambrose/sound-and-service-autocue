@@ -20,8 +20,12 @@ class Song:
         p = f"{R}/out/allin1/{nn}.stems_env.npz"; s.st = dict(np.load(p)) if os.path.exists(p) else None
         p = f"{R}/features_v5/{nn}.sim.npz"; s.sim = dict(np.load(p)) if os.path.exists(p) else None
         s.words = load(f"{R}/out/words/{nn}.json"); s.sf = load(f"{R}/cues/songformer/{nn}.json")
+        if s.sf is None:   # change 7: raw SongFormer output (seconds) from the box or copied back from the Mac (out/songformer/<nn>.json)
+            raw = load(f"{R}/out/songformer/{nn}.json")
+            if isinstance(raw, dict): raw = raw.get("segments")
+            if raw: s.sf = {"segments": [{"j0": round((x["start"] - s.g["t1"]) / s.g["bar_s"]), "j1": round((x["end"] - s.g["t1"]) / s.g["bar_s"]), "cls": x.get("label", "")} for x in raw]}
         s.raw = load(f"{R}/out/allin1/{nn}.json"); s.bt = load(f"{R}/out/beat_this/{nn}.json")
-        s.tags = load(f"{R}/serato_tags.json", {}).get(nn, {}); s.genre = load(f"{R}/genre_tags.json", {}).get(nn, "")
+        s.tags = load(f"{R}/serato_tags.json", {}).get(nn, {}); s.genre = load(os.environ.get("V5_GENRE_TAGS", f"{R}/genre_tags.json"), {}).get(nn, "")
     def t(s, j): return s.g["t1"] + j * s.g["bar_s"]
     def first(s): return max(0, math.ceil(-s.g["t1"] / s.g["bar_s"] - 1e-6))
     def frames(s, j, n=1):
@@ -72,7 +76,7 @@ def tempo(S, P):
     beats = (S.raw or {}).get("beats") or (S.bt or {}).get("beats"); out = {"drift": False, "source": None}
     if beats and len(beats) > 16:
         ibi = np.diff(np.array(beats)); ibi = ibi[(ibi > 0.2) & (ibi < 1.5)]
-        w = max(8, len(ibi) // 16); loc = np.array([np.median(ibi[i:i + w]) for i in range(0, len(ibi) - w, w)])
+        w = max(8, len(ibi) // 16); loc = np.array([np.mean(ibi[i:i + w]) for i in range(0, len(ibi) - w, w)])
         spread = float((loc.max() - loc.min()) / np.median(ibi)) if len(loc) > 1 else 0.0
         out.update(source="detected beats", spread=round(spread, 4), drift=spread > P["tempo_drift_tol"], beats=beats)
     try: grid = ast.literal_eval(S.tags.get("serato_beatgrid", "[]"))
@@ -179,12 +183,11 @@ def build(S, on, cfg):
                 ok = j in ver or score(j) >= 1 or (recurrence(S, j) or 0) >= P["chorus_sim_thr"] - 0.15
                 c[L]["confidence"] = 0.65 if ok else 0.4; why(L, "section recurs (chroma/MFCC/lyrics)" if ok else "this section does not clearly recur; review")
         elif S.sim is not None:
-            rec = [j for j in starts if score(j) >= 1]
-            if len(rec) >= 2:
-                for L, j in (("C", rec[0]), ("D", rec[-1])): why(L, f"labelled chorus did not recur; picked best recurring section at {j}"); c[L].update(bar=j, confidence=0.4)
-            else:
-                for L in "CD":
-                    if c[L].get("bar") is not None: c[L]["confidence"] = 0.3; why(L, "chorus not confirmed by repetition")
+            rec = [j for j in starts if score(j) >= 1 and (H is None or j <= H - 8)]
+            # labelled choruses do not recur: keep them (moving to recurring verses was wrong on 06), lower confidence, name the alternative
+            for L, alt in (("C", rec[0] if rec else None), ("D", rec[-1] if rec else None)):
+                if c[L].get("bar") is not None:
+                    c[L]["confidence"] = 0.3; why(L, "chorus not confirmed by repetition" + (f"; best recurring section is bar {alt}" if alt is not None and alt != c[L]["bar"] else ""))
     # 7 consensus confidence for B and H (G follows H, A follows B)
     if on("consensus"):
         src = sources(S); notes["sources"] = sorted(src)

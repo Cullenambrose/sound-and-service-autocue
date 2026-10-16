@@ -44,3 +44,15 @@ score them; nothing is written back to his library.
 
 ## Undo
 `rm -rf ~/AutoCue` (and `brew uninstall uv` if wanted).
+
+## v5 integration (Oct 15, 2026) — what happens with the output
+- Nothing is installed yet. Disk need unchanged: **~4.5 GB in `~/AutoCue`, plus ~1 GB headroom for pip/HF caches during install
+  → have at least 6 GB free first** (Pro had ~20 GB free, 98% full). Peak RAM 5–6 GB while running; close Serato/Chrome.
+- Engine v5 (`proof/real/tools/rules_v5.py`, change 7 "consensus") already reads SongFormer when present, from either:
+  1. `proof/<run>/cues/songformer/<nn>.json` (bar segments made by rules.py), or
+  2. `proof/<run>/out/songformer/<nn>.json` — the **raw** `infer.py` output (list of `{start, end, label}` in seconds).
+  So after the Mac run: copy `~/AutoCue/songformer_out/<name>.json` to the box (CopyToBox), rename each to the track
+  number (`01.json` … for the 20-song set, `001.json` … for stress5) under `out/songformer/`, then rerun
+  `venv-tools/bin/python real/tools/rules_v5.py [--root …]`. SongFormer then becomes a 4th/5th boundary source next to
+  allin1, stems and energy; START/EXIT confidence = base +0.05 when every source agrees, −0.3×(share disagreeing) otherwise.
+- For stress5 (326 songs) the .scp list is `stress5/paths.json` values; ~1–2 min/song on M1 Pro → ~6–10 h; run overnight.
