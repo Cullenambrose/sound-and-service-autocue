@@ -50,7 +50,7 @@ function renderTracks() {
     <td><div class="cue-dots">${"ABCDEFGH".split("").map(slot => `<span class="cue-dot cue-${slot.toLowerCase()} ${track.cues?.[slot]?.bar == null ? "empty" : ""}" title="${slot}: ${escapeHtml(track.cues?.[slot]?.name || "")}">${slot}</span>`).join("")}</div></td>
     <td>${track.confidence == null ? "—" : Math.round(track.confidence * 100) + "%"}</td>
     <td><span class="tag ${statusClass(track.status)}">${escapeHtml(track.status)}</span>${track.error ? `<span class="track-sub" title="${escapeHtml(track.error)}">Processing unavailable</span>` : ""}</td>
-    <td><button class="link-button review-button" data-hash="${track.hash}">Review</button></td></tr>`).join("");
+    <td><button class="link-button review-button" data-hash="${track.hash}">Review</button>${track.cues && !track.write_supported ? `<span class="track-sub">Write not supported yet</span>` : ""}</td></tr>`).join("");
   $$(".track-check").forEach(box => box.addEventListener("change", () => {
     box.checked ? selected.add(box.dataset.hash) : selected.delete(box.dataset.hash);
     updateWriteButton();
@@ -99,6 +99,38 @@ function paintJob(job) {
   }
   if (job.status !== "completed") $("#victory").hidden = true;
 }
+const STEP_LABELS={beats:"Beats",sections:"Sections",vocals:"Vocals",lyrics:"Lyrics",drops:"Drops",cues:"Cues"};
+let liveWave={hash:null,peaks:[],duration:0,loading:false},liveKey="";
+async function paintLive(live){
+  const panel=$("#live");
+  if(!live||!live.hash||!Object.keys(live.steps||{}).length){panel.hidden=true;return}
+  panel.hidden=false;
+  $("#live-name").textContent=live.name;
+  const steps=live.steps||{};
+  $("#live-chips").innerHTML=Object.keys(STEP_LABELS).map(step=>`<span class="chip ${steps[step]||"waiting"}">${STEP_LABELS[step]}${steps[step]==="skipped"?" (skipped)":""}</span>`).join('<i>›</i>');
+  const found=(live.cues_found||[]).length;
+  $("#live-detail").textContent=live.detail?live.detail:(steps.cues==="done"?`${found} cues found`:"Analyzing locally");
+  if(liveWave.hash!==live.hash){liveWave={hash:live.hash,peaks:[],duration:0,loading:false}}
+  if(!liveWave.peaks.length&&!liveWave.loading&&steps.beats){
+    liveWave.loading=true;
+    try{const data=await api(`/api/waveform/${live.hash}`);liveWave.peaks=data.peaks;liveWave.duration=data.duration}catch(_){}
+    liveWave.loading=false;
+  }
+  const key=JSON.stringify([live.hash,live.cues_found,liveWave.peaks.length]);
+  if(key!==liveKey){liveKey=key;drawLiveWave(live)}
+}
+function drawLiveWave(live){
+  const canvas=$("#live-wave"),context=canvas.getContext("2d"),scale=devicePixelRatio||1,width=canvas.clientWidth,height=90;
+  canvas.width=width*scale;canvas.height=height*scale;context.scale(scale,scale);context.clearRect(0,0,width,height);
+  const peaks=liveWave.peaks;if(!peaks.length)return;
+  context.fillStyle="#59666b";
+  peaks.forEach((peak,i)=>{const x=i*width/peaks.length,h=Math.max(1,peak*height*.9);context.fillRect(x,(height-h)/2,Math.max(1,width/peaks.length-.5),h)});
+  const track=tracks.find(item=>item.hash===live.hash);
+  if(track&&track.t1!=null&&track.bar_s&&liveWave.duration){
+    "ABCDEFGH".split("").forEach((slot,i)=>{const bar=track.cues?.[slot]?.bar;if(bar==null)return;
+      const x=(track.t1+bar*track.bar_s)/liveWave.duration*width;context.fillStyle=SLOT_COLORS[i];context.fillRect(x,0,2,height);context.fillText(slot,x+3,10)});
+  }
+}
 function formatDuration(seconds){return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,"0")}`}
 function showVictory(job){
   const hashes=JSON.parse(job.track_hashes), batch=tracks.filter(track=>hashes.includes(track.hash));
@@ -130,7 +162,7 @@ function startPolling() {
   if ("EventSource" in window) {
     if (!eventSource) {
       eventSource=new EventSource("/api/events");
-      eventSource.onmessage=()=>reload();
+      eventSource.onmessage=event=>{try{paintLive(JSON.parse(event.data).live)}catch(_){}reload()};
       eventSource.onerror=()=>{if(!refreshTimer)refreshTimer=setInterval(reload,2000)};
       eventSource.onopen=()=>{if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}};
     }
@@ -169,10 +201,19 @@ async function queueTracks(hashes, force = false) {
 function renderBackups(backups) {
   const target = $("#backup-list");
   if (!backups.length) { target.innerHTML = '<div class="empty-state">A verified backup is created automatically before each Serato write.</div>'; return; }
-  target.innerHTML = backups.map(item => `<div class="backup-row"><div><strong>${escapeHtml(new Date(item.created_at * 1000).toLocaleString())} · ${item.track_hashes.length} TRACKS</strong><small>${escapeHtml(item.status)} · ${escapeHtml(item.backup_path)}</small></div>${item.status === "written" ? `<button class="button secondary undo-button" data-id="${escapeHtml(item.id)}">Undo this batch</button>` : ""}</div>`).join("");
+  target.innerHTML = backups.map(item => `<div class="backup-row"><div><strong>${escapeHtml(new Date(item.created_at * 1000).toLocaleString())} · ${item.track_hashes.length} TRACKS</strong><small>${escapeHtml(item.status)} · ${escapeHtml(item.backup_path)}</small></div>${item.status === "written" ? `<button class="button secondary undo-button" data-id="${escapeHtml(item.id)}">Undo this batch</button>` : ""}${["written","undone","verified"].includes(item.status) ? `<button class="button secondary restore-button" data-id="${escapeHtml(item.id)}">Restore everything</button>` : ""}</div>`).join("");
   $$(".undo-button").forEach(button => button.onclick = async () => {
     if (!confirm("Restore the exact original MP3 files from this verified backup? Undo stops if any song has changed since the write.")) return;
     try { await api(`/api/backups/${button.dataset.id}/undo`, {method:"POST"}); toast("Original files restored and hash-verified."); await reload(); }
+    catch(error) { toast(error.message); }
+  });
+  bindRestore();
+}
+function bindRestore() {
+  $$(".restore-button").forEach(button => button.onclick = async () => {
+    const typed = prompt("This restores every song file and the whole _Serato_ folder from this backup, replacing anything newer. Serato must be closed.\n\nType RESTORE to continue.");
+    if (typed !== "RESTORE") { if (typed !== null) toast("Restore cancelled: confirmation did not match."); return; }
+    try { await api(`/api/backups/${button.dataset.id}/restore`, {method:"POST", body:JSON.stringify({confirmation:typed})}); toast("Everything restored from backup."); await reload(); }
     catch(error) { toast(error.message); }
   });
 }

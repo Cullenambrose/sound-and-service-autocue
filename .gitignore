@@ -100,3 +100,4 @@ genre_tags.json
 stats.json
 *.log
 web-data/
+tests/fixtures/crates/

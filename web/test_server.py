@@ -9,7 +9,7 @@ from unittest.mock import patch
 import urllib.request
 from pathlib import Path
 
-from web import server
+from web import fixtures, server
 
 
 class WebServerTests(unittest.TestCase):
@@ -127,65 +127,144 @@ class WebServerTests(unittest.TestCase):
             urllib.request.urlopen(request)
         self.assertEqual(raised.exception.code, 403)
 
-    def test_verified_serato_write_and_undo_restore_exact_mp3_bytes(self):
-        try:
-            import mutagen.mp3
-        except ImportError:
-            self.skipTest("Mutagen is required for Serato tag write tests.")
-
-        home = Path(self.temporary.name) / "home"
-        music = home / "Music"
-        serato = music / "_Serato_"
-        serato.mkdir(parents=True)
-        (serato / "Subcrates").mkdir()
-        (serato / "database V2").write_bytes(b"read-only Serato database")
-        song_path = music / "source.mp3"
-        frame = b"\xff\xfb\x90\x64" + b"\x00" * 413
-        song_path.write_bytes(frame * 3)
-        original_bytes = song_path.read_bytes()
-        file_hash, _ = server.copy_import(song_path, song_path.name, source_path=str(song_path))
-        with server.connect() as db:
-            db.execute(
-                "UPDATE tracks SET plan_json=?,reviewed=1,status='Cues ready' WHERE hash=?",
-                (json.dumps({
-                    "grid": {"t1": 0, "bar_s": 2},
-                    "cues": {"A": {"name": "INTRO", "bar": 2, "confidence": 0.9}},
-                }), file_hash),
-            )
-
-        with patch.object(server.Path, "home", return_value=home), patch.object(server, "_serato_open", return_value=False):
-            result = server.write_to_serato([file_hash])
-            self.assertNotEqual(song_path.read_bytes(), original_bytes)
-            self.assertEqual(server._mp3_audio_hash(song_path), hashlib.sha256(frame * 3).hexdigest())
-            backup = Path(result["backup_path"])
-            with server.connect() as db:
-                backup_row = db.execute("SELECT status FROM backups WHERE id=?", (result["backup_id"],)).fetchone()
-                written_row = db.execute("SELECT hash,status FROM tracks WHERE source_path=?", (str(song_path),)).fetchone()
-            self.assertEqual(backup_row["status"], "written")
-            self.assertEqual(written_row["hash"], hashlib.sha256(song_path.read_bytes()).hexdigest())
-            self.assertEqual(written_row["status"], "In Serato")
-            with server.zipfile.ZipFile(backup) as archive:
-                self.assertIsNone(archive.testzip())
-                self.assertIn("serato/0-Music/_Serato_/database V2", archive.namelist())
-            server.undo_backup(result["backup_id"])
-
-        self.assertEqual(song_path.read_bytes(), original_bytes)
-        self.assertEqual(hashlib.sha256(song_path.read_bytes()).hexdigest(), file_hash)
-        with server.connect() as db:
-            restored_row = db.execute("SELECT hash,status FROM tracks WHERE source_path=?", (str(song_path),)).fetchone()
-        self.assertEqual(restored_row["hash"], file_hash)
-        self.assertEqual(restored_row["status"], "Cues ready")
-
-    def test_processor_gap_fails_explicitly_without_changing_staged_audio(self):
+    def test_missing_analyzer_is_named_and_staged_audio_is_untouched(self):
         source = Path(self.temporary.name) / "song.wav"
         source.write_bytes(b"audio remains read-only")
         file_hash, _ = server.copy_import(source, source.name)
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), patch("shutil.which", return_value=None):
             os.environ.pop("AUTOCUE_PROCESSOR", None)
-            with self.assertRaisesRegex(RuntimeError, "No raw-audio processor is configured"):
+            with self.assertRaisesRegex(RuntimeError, "ffmpeg is not installed.*brew install ffmpeg"):
                 server.process_track(file_hash)
         staged = server.UPLOADS / (file_hash + ".wav")
         self.assertEqual(staged.read_bytes(), b"audio remains read-only")
+
+    def _serato_home(self):
+        home = Path(self.temporary.name) / "home"
+        serato = home / "Music" / "_Serato_"
+        (serato / "Subcrates").mkdir(parents=True)
+        (serato / "database V2").write_bytes(b"read-only Serato database")
+        return home
+
+    def _import_reviewed(self, home, name, data):
+        song = home / "Music" / name
+        song.write_bytes(data)
+        file_hash, _ = server.copy_import(song, song.name, source_path=str(song))
+        plan = {"grid": {"t1": 0, "bar_s": 2},
+                "cues": {"A": {"name": "INTRO", "bar": 2, "confidence": 0.9},
+                         "H": {"name": "EXIT", "bar": 8, "confidence": 0.9}}}
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=?,reviewed=1,status='Cues ready' WHERE hash=?",
+                       (json.dumps(plan), file_hash))
+        return song, file_hash
+
+    def test_write_undo_and_full_restore_for_every_supported_format(self):
+        try:
+            import mutagen  # noqa: F401
+        except ImportError:
+            self.skipTest("Mutagen is required for Serato tag write tests.")
+        formats = {"mp3": fixtures.mp3(), "aiff": fixtures.aiff(), "flac": fixtures.flac(), "m4a": fixtures.m4a()}
+        for kind, data in formats.items():
+            with self.subTest(format=kind):
+                home = self._serato_home()
+                song, file_hash = self._import_reviewed(home, "song." + kind, data)
+                before_audio = server._audio_hash(song)
+                with patch.object(server.Path, "home", return_value=home), \
+                        patch.object(server, "_serato_open", return_value=False):
+                    result = server.write_to_serato([file_hash])
+                    self.assertNotEqual(song.read_bytes(), data)
+                    self.assertEqual(server._audio_hash(song), before_audio)
+                    existing = server._existing_markers(song, kind)
+                    self.assertEqual(len(server._marker2_entries(existing)), 2)
+                    server.undo_backup(result["backup_id"])
+                    self.assertEqual(song.read_bytes(), data)
+                    # Write again, then change the library and the Serato folder, then restore everything.
+                    again = server.write_to_serato([file_hash])
+                    (home / "Music" / "_Serato_" / "database V2").write_bytes(b"damaged later")
+                    (home / "Music" / "_Serato_" / "extra").write_bytes(b"new file")
+                    with self.assertRaisesRegex(ValueError, "Type RESTORE"):
+                        server.restore_backup(again["backup_id"], "restore")
+                    server.restore_backup(again["backup_id"], "RESTORE")
+                self.assertEqual(song.read_bytes(), data)
+                self.assertEqual((home / "Music" / "_Serato_" / "database V2").read_bytes(), b"read-only Serato database")
+                self.assertFalse((home / "Music" / "_Serato_" / "extra").exists())
+                with server.connect() as db:
+                    row = db.execute("SELECT hash,status FROM tracks WHERE source_path=?", (str(song),)).fetchone()
+                    status = db.execute("SELECT status FROM backups WHERE id=?", (again["backup_id"],)).fetchone()
+                self.assertEqual(row["hash"], file_hash)
+                self.assertEqual(row["status"], "Cues ready")
+                self.assertEqual(status["status"], "restored")
+                with server.connect() as db:
+                    db.execute("DELETE FROM tracks")
+                    db.execute("DELETE FROM backups")
+
+    def test_unsupported_format_is_reported_instead_of_failing_mid_write(self):
+        home = self._serato_home()
+        song, file_hash = self._import_reviewed(home, "song.ogg", b"OggS" + b"\x00" * 40)
+        with patch.object(server.Path, "home", return_value=home), patch.object(server, "_serato_open", return_value=False):
+            with self.assertRaisesRegex(ValueError, "Write not supported yet"):
+                server.write_to_serato([file_hash])
+        self.assertEqual(song.read_bytes(), b"OggS" + b"\x00" * 40)
+        with server.connect() as db:
+            row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+        self.assertFalse(server.track_record(row)["write_supported"])
+
+    def test_flac_write_preserves_other_vorbis_fields_and_foreign_markers(self):
+        try:
+            import mutagen.flac
+        except ImportError:
+            self.skipTest("Mutagen is required.")
+        home = self._serato_home()
+        path = home / "Music" / "tagged.flac"
+        path.write_bytes(fixtures.flac())
+        audio = mutagen.flac.FLAC(path)
+        audio["ARTIST"] = ["Keep Me"]
+        loop = ("Loop", b"\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02" + b"\x00" * 8)
+        raw = bytearray(b"\x01\x01")
+        raw += b"LOOP\x00" + len(loop[1]).to_bytes(4, "big") + loop[1]
+        audio[server.FLAC_KEY] = [server._vorbis_encode(b"\x01\x01" + base64.b64encode(bytes(raw)) + b"\x00")]
+        audio.save()
+        server._write_markers2(path, {"A": {"bar": 1, "name": "INTRO"}}, {"grid": {"t1": 0, "bar_s": 2}})
+        saved = mutagen.flac.FLAC(path)
+        self.assertEqual(saved["ARTIST"], ["Keep Me"])
+        names = [name for name, _ in server._marker2_entries(server._existing_markers(path, "flac"))]
+        self.assertEqual(sorted(names), ["CUE", "LOOP"])
+
+    def test_nested_crates_unicode_names_and_external_drive_paths(self):
+        root = Path(self.temporary.name)
+        song = root / "Música ñandú – Ünï.mp3"
+        song.write_bytes(b"x")
+
+        def chunk(tag, value):
+            return tag + len(value).to_bytes(4, "big") + value
+        entry = chunk(b"otrk", chunk(b"ptrk", str(song).lstrip("/").encode("utf-16-be")))
+        crate = root / "Parent%%Child.crate"
+        crate.write_bytes(chunk(b"vrsn", "1.0/Serato ScratchLive Crate".encode("utf-16-be")) + entry)
+        songs = server.crate_songs(crate)
+        self.assertEqual([item["name"] for item in songs], [song.name])
+        self.assertFalse(songs[0]["missing"])
+
+        drive = root / "Volumes" / "DJ Drive"
+        (drive / "_Serato_" / "Subcrates").mkdir(parents=True)
+        self.assertEqual(server._resolve_crate_path("Music/a.mp3", Path("/Volumes/DJ Drive/_Serato_/Subcrates/x.crate")),
+                         Path("/Volumes/DJ Drive/Music/a.mp3"))
+        with patch.object(server, "crate_roots", return_value=[root]):
+            crates = server.list_crates()
+        self.assertEqual(crates[0]["name"], "Parent › Child")
+        self.assertEqual(crates[0]["depth"], 1)
+
+    def test_real_crate_fixtures_parse_when_supplied(self):
+        folder = server.ROOT / "tests" / "fixtures" / "crates"
+        crates = sorted(folder.glob("**/*.crate")) if folder.is_dir() else []
+        if not crates:
+            self.skipTest("Put copies of real .crate files in tests/fixtures/crates/ (gitignored).")
+        for crate in crates:
+            with self.subTest(crate=crate.name):
+                before = hashlib.sha256(crate.read_bytes()).hexdigest()
+                songs = server.crate_songs(crate)
+                self.assertEqual(hashlib.sha256(crate.read_bytes()).hexdigest(), before)
+                for song in songs:
+                    self.assertTrue(song["path"].startswith("/"), song)
+                    self.assertNotIn("\x00", song["path"])
 
     def test_running_job_is_requeued_with_completed_progress_after_restart(self):
         with server.connect() as db:

@@ -26,6 +26,11 @@
     <section class="stage">
       <div class="stage-head"><div><span class="eyebrow">BATCH PROGRESS</span><h2 id="batch-title">Ready when you are</h2></div><span id="batch-count">0 / 0</span></div>
       <canvas id="runner" height="72" aria-label="Batch progress animation"></canvas>
+      <div id="live" class="live" hidden>
+        <div class="live-head"><strong id="live-name"></strong><span id="live-detail"></span></div>
+        <canvas id="live-wave" height="90" aria-label="Live waveform"></canvas>
+        <div id="live-chips" class="chips"></div>
+      </div>
       <div class="progress-track"><div id="progress-fill"></div></div>
       <div class="stage-foot"><span id="batch-message">Sound off · reduced motion respected</span><div class="stage-controls"><button id="job-pause" class="quiet" hidden>Pause</button><button id="job-resume" class="quiet" hidden>Resume</button><button id="job-cancel" class="quiet" hidden>Cancel</button><button id="sound-toggle" class="quiet">Sound: Off</button></div></div>
       <div id="victory" class="victory" hidden><div class="victory-star">✦</div><div><strong id="victory-title">Batch complete</strong><span id="victory-summary"></span></div><button id="start-review" class="button primary">Start review</button></div>

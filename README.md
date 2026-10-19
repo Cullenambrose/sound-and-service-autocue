@@ -86,3 +86,22 @@ See `docs/STATUS.md` for current scores, the v5 ablation, and the 5-crate stress
 ## v6 (separate, switchable plan)
 
 `engine/rules_v6.py` reads cached v5 analysis and writes a separate eight-cue DROP or VOCAL plan. The switch defaults and genre phrase lengths are in `config/genre_params_v6.json`. It does not change v5 defaults or write to Serato/audio. Synced LRCLIB lookups and WhisperX word timings are cacheable from a manifest; Gemini is an explicit opt-in (`engine/gemini_v6.py --enable`) and is disabled by default. Review data can be built beside v5 with `engine/build_v6_review.py`; usage and scoring are in `docs/ANALYSIS-FORMAT.md`.
+
+
+## Fresh-audio pipeline (new songs, no cached analysis)
+
+`engine/analyze.py` takes one audio file and produces a v6 plan with no manual steps. The web app calls it for every imported song, so a dropped MP3 goes straight to **Cues ready** or **Needs a look**.
+
+Steps (the chips on the page): Beats (Beat This) › Sections (all-in-one) › Vocals (Demucs stems) › Lyrics (WhisperX word timing + LRCLIB synced lyrics) › Drops (kick/bass energy) › Cues. Results are cached by content hash in `~/Library/Application Support/AutoCue/cache/<hash>/` using the v5 cache layout, so nothing is analyzed twice (override with `AUTOCUE_CACHE_DIR`).
+
+- **Install:** `./setup.sh` (Apple Silicon; creates `.venv`, uses MPS where supported). Check what is present with `.venv/bin/python engine/analyze.py --check`. It needs Python 3.10+ (macOS's built-in 3.9 is too old for Beat This) and ffmpeg.
+- **Disk / downloads:** about 3.5 GB of packages, plus first-run models: Beat This ~80 MB, Demucs ~80 MB, WhisperX ~0.6 GB, all-in-one ~0.2 GB. Roughly 5-6 GB total without SongFormer.
+- **Missing analyzers:** the page and CLI name the analyzer and the install command. Without the beat model there is no bar grid, so the song fails with that message. Without Demucs, all-in-one, or WhisperX the step is skipped, the plan is flagged, and cue confidence is capped (0.55 without sections or stems, so the song lands in "Needs a look"; 0.9 without word timings). Cues are never invented.
+- **Speed:** a 3-minute track measured on this Apple Silicon Mac (MPS) took about 9 s for beats and about 73 s for Demucs, roughly 87 s in total before the all-in-one and WhisperX steps, which could not be timed (the machine was heavily loaded). Batches run one song at a time. Demucs on MPS is given a time limit (`AUTOCUE_DEMUCS_TIMEOUT`, default 600 s) and then retried on the CPU.
+- **SongFormer license:** SongFormer's MuQ weights are licensed for non-commercial use only. They are optional and not installed by `setup.sh`; the pipeline runs fully without them, and a sellable version must keep them off.
+
+## Serato writes
+
+Writes need a saved review, Serato closed, and a verified backup of the `_Serato_` folder and each song's original file. Supported formats: MP3, AIFF (ID3 `Serato Markers2`), FLAC (`SERATO_MARKERS_V2`) and M4A (`----:com.serato.dj:markersv2`). Other formats show "Write not supported yet". Foreign marker entries (loops, cues 9+) are preserved and the audio data is hash-checked before and after. **Undo this batch** restores one write; **Restore everything** (typed `RESTORE`) restores the song files and the `_Serato_` folder from a backup. FLAC and M4A writing follows the published Serato tag layout and is verified by read-back and audio-hash checks, but has not been opened in Serato itself.
+
+Real `.crate` copies can be placed in `tests/fixtures/crates/` (gitignored); the tests parse them read-only when present.

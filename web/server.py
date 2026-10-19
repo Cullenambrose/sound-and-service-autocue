@@ -119,6 +119,7 @@ def track_record(row):
         "name": row["name"],
         "relative_path": row["relative_path"],
         "source_available": bool(row["source_path"] and Path(row["source_path"]).is_file()),
+        "write_supported": bool(write_format(row["name"])),
         "status": row["status"],
         "edited": bool(row["edited"]),
         "reviewed": bool(row["reviewed"]),
@@ -161,6 +162,39 @@ def _is_known_crate(path):
                for root in crate_roots())
 
 
+def _decode_crate_text(raw):
+    # Serato stores text as UTF-16BE; a NUL in every other byte is the tell, and it must win over UTF-8
+    # (which would silently accept the NULs and garble non-ASCII names).
+    if len(raw) % 2 == 0 and raw and sum(raw[index] == 0 for index in range(0, len(raw), 2)) >= len(raw) // 4:
+        try:
+            return raw.decode("utf-16-be").replace("\x00", "").strip()
+        except UnicodeDecodeError:
+            pass
+    for encoding in ("utf-8", "mac_roman"):
+        try:
+            return raw.decode(encoding).replace("\x00", "").strip()
+        except UnicodeDecodeError:
+            continue
+    return ""
+
+
+def _resolve_crate_path(value, crate_path):
+    """Serato stores paths relative to the drive root: boot drive "Users/..", external drive "Music/..".
+    Normalize to NFC/NFD whichever exists on disk, since macOS file systems vary."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        parts = Path(crate_path).resolve().parts
+        drive = Path("/Volumes") / parts[2] if len(parts) > 2 and parts[1] == "Volumes" else Path("/")
+        path = drive / value
+    if not path.exists():
+        import unicodedata
+        for form in ("NFC", "NFD"):
+            alternate = Path(unicodedata.normalize(form, str(path)))
+            if alternate.exists():
+                return alternate
+    return path
+
+
 def crate_songs(crate_path):
     data = Path(crate_path).read_bytes()
     paths, seen = [], set()
@@ -179,22 +213,14 @@ def crate_songs(crate_path):
         start, end = offset + 4, offset + 4 + size
         if size <= 0 or end > len(data):
             continue
-        raw = data[start:end].strip(b"\x00\r\n\t ")
-        value = ""
-        for encoding in (("utf-8", "utf-16-le", "utf-16-be", "mac_roman")
-                         if b"\x00" in raw else ("utf-8", "mac_roman")):
-            try:
-                value = raw.decode(encoding).replace("\x00", "").strip()
-            except UnicodeDecodeError:
-                continue
-            if value:
-                break
+        raw = data[start:end].strip(b"\r\n\t ")
+        value = _decode_crate_text(raw)
         if value.startswith("file://"):
             value = urllib.parse.unquote(urllib.parse.urlparse(value).path)
         value = value.rstrip("\r\n")
         if value and value not in seen and Path(value).suffix.lower() in ALLOWED:
             seen.add(value)
-            path = Path(value).expanduser()
+            path = _resolve_crate_path(value, crate_path)
             exists = path.is_file()
             paths.append({"path": str(path), "name": path.name, "missing": not exists})
         offset = max(offset, end)
@@ -225,8 +251,10 @@ def list_crates():
             label = str(crate.relative_to(root))
         except (ValueError, StopIteration):
             label = crate.name
+        parts = label.removesuffix(".crate").split("%%")
         found.append({
-            "name": label.removesuffix(".crate"),
+            "name": " › ".join(parts),
+            "depth": len(parts) - 1,
             "path": str(crate),
             "songs": len(songs),
             "done": done,
@@ -335,39 +363,196 @@ def _cue_binary(cues, plan, existing_data=None):
 SLOT_HEX = ["#38bdf8", "#22c55e", "#a78bfa", "#f472b6", "#fb7185", "#facc15", "#2dd4bf", "#f97316"]
 
 
-def _write_markers2(path, cues, plan):
+WRITABLE = {".mp3": "mp3", ".aiff": "aiff", ".aif": "aiff", ".flac": "flac", ".m4a": "m4a"}
+VORBIS_HEADER = b"application/octet-stream\x00\x00Serato Markers2\x00"
+MP4_KEY = "----:com.serato.dj:markersv2"
+FLAC_KEY = "SERATO_MARKERS_V2"
+
+
+def write_format(path):
+    return WRITABLE.get(Path(path).suffix.lower())
+
+
+def _require_mutagen():
     try:
-        from mutagen.id3 import ID3, GEOB, ID3NoHeaderError
+        import mutagen
+        return mutagen
     except ImportError as error:
         raise RuntimeError("Serato writing needs the Mutagen package. Install the repo's documented audio dependencies.") from error
-    original_hash = _sha256(path)
-    audio_hash = _mp3_audio_hash(path)
-    temporary = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.autocue.mp3")
-    try:
-        shutil.copy2(path, temporary)
+
+
+def _hash_ranges(path, ranges):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for start, end in ranges:
+            source.seek(start)
+            remaining = max(0, end - start)
+            while remaining:
+                block = source.read(min(1024 * 1024, remaining))
+                if not block:
+                    break
+                digest.update(block)
+                remaining -= len(block)
+    return digest.hexdigest()
+
+
+def _iff_ranges(path):
+    """AIFF: every chunk except the ID3 tag chunk, so tag edits never change the audio hash."""
+    ranges = []
+    with open(path, "rb") as source:
+        header = source.read(12)
+        if header[:4] != b"FORM" or header[8:12] not in (b"AIFF", b"AIFC"):
+            raise ValueError("Not an AIFF file.")
+        size = Path(path).stat().st_size
+        while source.tell() + 8 <= size:
+            start = source.tell()
+            ident, length = source.read(4), int.from_bytes(source.read(4), "big")
+            end = start + 8 + length + (length & 1)
+            if ident.lower() != b"id3 ":
+                ranges.append((start, min(end, size)))
+            source.seek(min(end, size))
+    return ranges
+
+
+def _flac_ranges(path):
+    """FLAC: the frames after the metadata blocks."""
+    with open(path, "rb") as source:
+        if source.read(4) != b"fLaC":
+            raise ValueError("Not a FLAC file.")
+        while True:
+            header = source.read(4)
+            if len(header) < 4:
+                raise ValueError("Truncated FLAC metadata.")
+            source.seek(int.from_bytes(header[1:], "big"), os.SEEK_CUR)
+            if header[0] & 0x80:
+                return [(source.tell(), Path(path).stat().st_size)]
+
+
+def _mp4_ranges(path):
+    """M4A: the payload of every top-level mdat atom (offsets inside moov may move, audio bytes do not)."""
+    ranges, size = [], Path(path).stat().st_size
+    with open(path, "rb") as source:
+        offset = 0
+        while offset + 8 <= size:
+            source.seek(offset)
+            length, kind = int.from_bytes(source.read(4), "big"), source.read(4)
+            header = 8
+            if length == 1:
+                length, header = int.from_bytes(source.read(8), "big"), 16
+            elif length == 0:
+                length = size - offset
+            if length < header:
+                raise ValueError("Malformed MP4 atom.")
+            if kind == b"mdat":
+                ranges.append((offset + header, min(offset + length, size)))
+            offset += length
+    if not ranges:
+        raise ValueError("No audio data (mdat) found in this M4A.")
+    return ranges
+
+
+def _audio_hash(path):
+    kind = write_format(path)
+    if kind == "mp3":
+        return _mp3_audio_hash(path)
+    if kind == "aiff":
+        return _hash_ranges(path, _iff_ranges(path))
+    if kind == "flac":
+        return _hash_ranges(path, _flac_ranges(path))
+    if kind == "m4a":
+        return _hash_ranges(path, _mp4_ranges(path))
+    raise ValueError(f"{Path(path).name}: Write not supported yet for {Path(path).suffix or 'this'} files.")
+
+
+def _vorbis_encode(data):
+    raw = base64.b64encode(VORBIS_HEADER + data).rstrip(b"=")
+    return b"\n".join(raw[index:index + 72] for index in range(0, len(raw), 72)).decode("ascii")
+
+
+def _vorbis_decode(text):
+    raw = "".join(text.split()).encode("ascii")
+    raw += b"=" * (-len(raw) % 4)
+    decoded = base64.b64decode(raw)
+    if not decoded.startswith(VORBIS_HEADER):
+        raise ValueError("Existing Serato Markers2 tag has an unsupported header.")
+    return decoded[len(VORBIS_HEADER):]
+
+
+def _existing_markers(path, kind):
+    """Return (existing Markers2 GEOB-style bytes or None, error if a conflicting tag exists)."""
+    mutagen = _require_mutagen()
+    if kind in ("mp3", "aiff"):
+        from mutagen.id3 import ID3, ID3NoHeaderError
         try:
-            tags = ID3(temporary)
+            tags = ID3(path) if kind == "mp3" else (mutagen.File(path).tags or ID3())
         except ID3NoHeaderError:
-            tags = ID3()
-        legacy = tags.getall("GEOB:Serato Markers_")
-        if legacy:
+            return None
+        if tags.getall("GEOB:Serato Markers_"):
             raise RuntimeError(f"{Path(path).name} uses legacy Serato Markers_ cues; writing is blocked to avoid a conflicting cue set.")
         frames = tags.getall("GEOB:Serato Markers2")
         if len(frames) > 1:
             raise RuntimeError(f"{Path(path).name} has multiple Serato Markers2 frames; writing is blocked.")
-        existing_data = frames[0].data if frames else None
-        marker_data = _cue_binary(cues, plan, existing_data)
-        tags.delall("GEOB:Serato Markers2")
-        tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato Markers2",
-                      data=marker_data))
-        tags.save(temporary, v2_version=3)
-        saved = ID3(temporary).getall("GEOB:Serato Markers2")
-        if len(saved) != 1 or saved[0].data != marker_data:
-            raise RuntimeError(f"Could not verify the written Serato cue tag in {Path(path).name}.")
-        if _mp3_audio_hash(temporary) != audio_hash:
-            raise RuntimeError(f"Audio frames changed while writing Serato cues to {Path(path).name}.")
+        return frames[0].data if frames else None
+    if kind == "flac":
+        values = (mutagen.File(path).tags or {}).get(FLAC_KEY, [])
+        if len(values) > 1:
+            raise RuntimeError(f"{Path(path).name} has multiple Serato Markers2 fields; writing is blocked.")
+        return _vorbis_decode(values[0]) if values else None
+    from mutagen.mp4 import MP4
+    values = (MP4(path).tags or {}).get(MP4_KEY, [])
+    if len(values) > 1:
+        raise RuntimeError(f"{Path(path).name} has multiple Serato Markers2 atoms; writing is blocked.")
+    return _vorbis_decode(bytes(values[0]).decode("ascii")) if values else None
+
+
+def _store_markers(path, kind, data):
+    mutagen = _require_mutagen()
+    if kind in ("mp3", "aiff"):
+        from mutagen.id3 import ID3, GEOB, ID3NoHeaderError
+        if kind == "mp3":
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tags.delall("GEOB:Serato Markers2")
+            tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato Markers2", data=data))
+            tags.save(path, v2_version=3)
+        else:
+            audio = mutagen.File(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio.tags.delall("GEOB:Serato Markers2")
+            audio.tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato Markers2", data=data))
+            audio.save(v2_version=3)
+    elif kind == "flac":
+        audio = mutagen.File(path)
+        audio[FLAC_KEY] = [_vorbis_encode(data)]
+        audio.save()
+    else:
+        from mutagen.mp4 import MP4, MP4FreeForm
+        audio = MP4(path)
+        audio[MP4_KEY] = [MP4FreeForm(_vorbis_encode(data).encode("ascii"))]
+        audio.save()
+
+
+def _write_markers2(path, cues, plan):
+    path = Path(path)
+    kind = write_format(path)
+    if not kind:
+        raise ValueError(f"{path.name}: Write not supported yet for {path.suffix or 'this'} files.")
+    original_hash = _sha256(path)
+    audio_hash = _audio_hash(path)
+    temporary = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.autocue{path.suffix}")
+    try:
+        shutil.copy2(path, temporary)
+        marker_data = _cue_binary(cues, plan, _existing_markers(temporary, kind))
+        _store_markers(temporary, kind, marker_data)
+        if _existing_markers(temporary, kind) != marker_data:
+            raise RuntimeError(f"Could not verify the written Serato cue tag in {path.name}.")
+        if _audio_hash(temporary) != audio_hash:
+            raise RuntimeError(f"Audio data changed while writing Serato cues to {path.name}.")
         if _sha256(path) != original_hash:
-            raise RuntimeError(f"{Path(path).name} changed during the write; no changes were applied.")
+            raise RuntimeError(f"{path.name} changed during the write; no changes were applied.")
         written_hash = _sha256(temporary)
         os.replace(temporary, path)
         return written_hash
@@ -390,41 +575,41 @@ def _mp3_audio_hash(path):
             source.seek(-128, os.SEEK_END)
             if source.read(3) == b"TAG":
                 end -= 128
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        source.seek(start)
-        remaining = max(0, end - start)
-        while remaining:
-            block = source.read(min(1024 * 1024, remaining))
-            if not block:
-                break
-            digest.update(block)
-            remaining -= len(block)
-    return digest.hexdigest()
+    return _hash_ranges(path, [(start, end)])
 
 
-def _validate_mp3(path):
+def _validate_audio(path):
+    mutagen = _require_mutagen()
     try:
-        from mutagen.mp3 import MP3
-        audio = MP3(path)
-    except ImportError as error:
-        raise RuntimeError("Serato writing needs the Mutagen package to validate MP3 audio.") from error
+        audio = mutagen.File(path)
     except Exception as error:
-        raise ValueError(f"{Path(path).name} is not a readable MP3: {error}") from error
-    if audio.info is None:
-        raise ValueError(f"{Path(path).name} has no readable MPEG audio stream.")
+        raise ValueError(f"{Path(path).name} is not a readable audio file: {error}") from error
+    if audio is None or audio.info is None:
+        raise ValueError(f"{Path(path).name} has no readable audio stream.")
 
 
 def _read_serato_geob(path):
+    """Raw Serato tag data for the backup, as base64 per format-specific field."""
+    kind = write_format(path)
+    _require_mutagen()
     try:
-        from mutagen.id3 import ID3, ID3NoHeaderError
-    except ImportError:
-        raise RuntimeError("Serato backup needs the Mutagen package to read original cue tags.")
-    try:
-        return [{"desc": frame.desc, "data_b64": base64.b64encode(frame.data).decode("ascii")}
-                for frame in ID3(path).getall("GEOB")
-                if frame.desc in ("Serato Markers2", "Serato Markers_")]
-    except ID3NoHeaderError:
+        if kind in ("mp3", "aiff"):
+            import mutagen
+            from mutagen.id3 import ID3, ID3NoHeaderError
+            try:
+                tags = ID3(path) if kind == "mp3" else (mutagen.File(path).tags or ID3())
+            except ID3NoHeaderError:
+                return []
+            return [{"desc": frame.desc, "data_b64": base64.b64encode(frame.data).decode("ascii")}
+                    for frame in tags.getall("GEOB") if frame.desc in ("Serato Markers2", "Serato Markers_")]
+        if kind == "flac":
+            import mutagen
+            return [{"desc": FLAC_KEY, "data_b64": base64.b64encode(value.encode("utf-8")).decode("ascii")}
+                    for value in (mutagen.File(path).tags or {}).get(FLAC_KEY, [])]
+        if kind == "m4a":
+            from mutagen.mp4 import MP4
+            return [{"desc": MP4_KEY, "data_b64": base64.b64encode(bytes(value)).decode("ascii")}
+                    for value in (MP4(path).tags or {}).get(MP4_KEY, [])]
         return []
     except Exception as error:
         raise RuntimeError(f"Could not safely read Serato tag data from {Path(path).name}: {error}") from error
@@ -517,11 +702,12 @@ def write_to_serato(hashes):
         path = _write_path(row)
         if path is None or not path.is_file():
             raise ValueError(f"{row['name']}: use a crate or pasted local path to link the original file before writing.")
-        if path.suffix.lower() != ".mp3":
-            raise ValueError(f"{row['name']}: cue writing currently supports MP3 only.")
+        if not write_format(path):
+            raise ValueError(f"{row['name']}: Write not supported yet for {path.suffix or 'this'} files "
+                             f"(supported: {', '.join(sorted(WRITABLE))}).")
         if path.is_symlink():
             raise ValueError(f"{row['name']}: writing through symbolic links is blocked.")
-        _validate_mp3(path)
+        _validate_audio(path)
         if _sha256(path) != row["hash"]:
             raise ValueError(f"{row['name']}: original file changed since import. Re-import it before writing.")
         if not row["reviewed"] or not row["plan_json"]:
@@ -593,6 +779,67 @@ def undo_backup(backup_id):
                        (entry["hash"], entry["previous_status"], entry["previous_reviewed"],
                         entry["previous_edited"], entry["post_write_sha256"]))
         db.execute("UPDATE backups SET status='undone' WHERE id=?", (backup_id,))
+
+
+def _restore_serato_folder(archive, index, target):
+    target = Path(target)
+    prefix = f"serato/{index}-{target.parent.name}/{target.name}/"
+    members = [info for info in archive.infolist() if info.filename.startswith(prefix) and not info.is_dir()]
+    staging = target.with_name(f".{target.name}.autocue-restore-{uuid.uuid4().hex[:8]}")
+    aside = target.with_name(f".{target.name}.autocue-before-restore-{uuid.uuid4().hex[:8]}")
+    try:
+        for info in members:
+            relative = Path(info.filename[len(prefix):])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError("Backup contains an unsafe path; restore stopped.")
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, open(destination, "wb") as output:
+                shutil.copyfileobj(source, output)
+            if destination.stat().st_size != info.file_size:
+                raise RuntimeError(f"Could not verify restored file {relative}.")
+        staging.mkdir(parents=True, exist_ok=True)
+        had_target = target.exists()
+        if had_target:
+            os.replace(target, aside)
+        try:
+            os.replace(staging, target)
+        except Exception:
+            if had_target:
+                os.replace(aside, target)
+            raise
+        shutil.rmtree(aside, ignore_errors=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def restore_backup(backup_id, confirmation):
+    """Put back every song file and the _Serato_ folder(s) exactly as they were when the backup was made."""
+    if confirmation != "RESTORE":
+        raise ValueError("Type RESTORE to confirm restoring everything from this backup.")
+    with connect() as db:
+        backup = db.execute("SELECT * FROM backups WHERE id=?", (backup_id,)).fetchone()
+    if not backup:
+        raise ValueError("Backup not found.")
+    manifest = json.loads(backup["manifest_json"])
+    with zipfile.ZipFile(backup["backup_path"], "r") as archive:
+        broken = archive.testzip()
+        if broken:
+            raise RuntimeError("Backup is damaged (" + broken + "). Nothing was restored.")
+        for entry in manifest.get("tracks", []):
+            if _archive_entry_sha256(archive, entry["archive_name"]) != entry["original_sha256"]:
+                raise RuntimeError("Backup audio failed verification. Nothing was restored.")
+        for entry in manifest.get("tracks", []):
+            _restore_backup_entry(archive, entry)
+        for index, folder in enumerate(manifest.get("serato_folders", [])):
+            _restore_serato_folder(archive, index, folder)
+    with connect() as db:
+        for entry in manifest.get("tracks", []):
+            current = entry.get("post_write_sha256") or entry["hash"]
+            db.execute("UPDATE tracks SET hash=?,status=?,reviewed=?,edited=? WHERE hash IN (?,?)",
+                       (entry["hash"], entry["previous_status"], entry["previous_reviewed"],
+                        entry["previous_edited"], current, entry["hash"]))
+        db.execute("UPDATE backups SET status='restored' WHERE id=?", (backup_id,))
 
 
 def _restore_backup_entry(archive, entry):
@@ -684,15 +931,75 @@ def create_job(hashes, force=False):
     return job_id, len(unique) - len(selected)
 
 
+LIVE = {"hash": None, "name": "", "steps": {}, "detail": "", "cues_found": []}
+
+
+def _live_reset(row):
+    LIVE.update(hash=row["hash"], name=row["name"], steps={}, detail="", cues_found=[])
+
+
+def _tags(path):
+    try:
+        from mutagen import File
+        audio = File(path, easy=True)
+        get = lambda key: (audio.get(key) or [""])[0] if audio else ""
+        return get("artist"), get("title"), get("genre")
+    except Exception:
+        return "", "", ""
+
+
+def _analysis_import():
+    sys.path.insert(0, str(ROOT / "engine"))
+    import analyze
+    return analyze
+
+
+def waveform_peaks(file_hash, points=900):
+    analyze = _analysis_import()
+    path = analyze.Paths(analyze.cache_root() / file_hash).features
+    if not path.is_file():
+        return None
+    import numpy as np
+    peak = np.load(path)["peak"]
+    size = max(1, len(peak) // points)
+    trimmed = peak[: len(peak) // size * size].reshape(-1, size).max(1)
+    top = float(trimmed.max()) or 1.0
+    return {"peaks": [round(float(value) / top, 3) for value in trimmed], "duration": len(peak) / 50}
+
+
+def process_builtin(row, settings):
+    analyze = _analysis_import()
+    _live_reset(row)
+    artist, title, genre = _tags(row["audio_path"])
+
+    def progress(step, state, detail):
+        LIVE["steps"][step] = state
+        LIVE["detail"] = detail or LIVE["detail"]
+
+    plan = analyze.analyze(row["audio_path"], artist, title, genre, progress)
+    LIVE["cues_found"] = [slot for slot, cue in plan["cues"].items() if cue.get("bar") is not None]
+    return plan
+
+
 def process_track(file_hash):
     with connect() as db:
         row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+        settings = {item["key"]: item["value"] for item in db.execute("SELECT * FROM settings")}
     command = os.environ.get("AUTOCUE_PROCESSOR")
     if not command:
-        raise RuntimeError(
-            "No raw-audio processor is configured. The v6 planner currently consumes cached analysis; "
-            "this checkout has no one-file pipeline entry point. The audio copy is safe and unchanged."
-        )
+        try:
+            plan = process_builtin(row, settings)
+        except Exception as error:
+            if type(error).__name__ == "AnalyzerMissing":
+                raise RuntimeError(str(error)) from error
+            raise
+        threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
+            settings.get("strictness", "standard"), 0.6)
+        low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
+        with connect() as db:
+            db.execute("UPDATE tracks SET plan_json=?, status=?, error=NULL WHERE hash=?",
+                       (json.dumps(plan, ensure_ascii=False), "Needs a look" if low else "Cues ready", file_hash))
+        return
     import shlex
     output = DATA / "results" / (file_hash + ".json")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -828,7 +1135,9 @@ class Handler(BaseHTTPRequestHandler):
                 while True:
                     with connect() as db:
                         job = db.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 1").fetchone()
-                    payload = json.dumps(dict(job) if job else {})
+                    body = dict(job) if job else {}
+                    body["live"] = dict(LIVE)
+                    payload = json.dumps(body)
                     if payload != last_payload:
                         self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
                         self.wfile.flush()
@@ -859,10 +1168,19 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, settings)
         if parsed.path == "/api/status":
             return json_response(self, {
-                "processor_configured": bool(os.environ.get("AUTOCUE_PROCESSOR")),
+                "processor_configured": True,
+                "external_processor": bool(os.environ.get("AUTOCUE_PROCESSOR")),
+                "analyzers": _analysis_import().environment_report(),
+                "writable_formats": sorted(WRITABLE),
                 "write_dependency_available": importlib.util.find_spec("mutagen") is not None,
                 "write_platform_supported": sys.platform == "darwin",
             })
+        if parsed.path.startswith("/api/waveform/"):
+            try:
+                found = waveform_peaks(parsed.path.removeprefix("/api/waveform/"))
+            except ImportError:
+                found = None
+            return json_response(self, found or {"peaks": [], "duration": 0})
         if parsed.path == "/api/crates":
             return json_response(self, {"crates": list_crates()})
         if parsed.path == "/api/crates/detail":
@@ -1028,6 +1346,20 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError("Another Serato write or undo is already in progress.")
                 try:
                     undo_backup(backup_id)
+                finally:
+                    write_lock.release()
+                return json_response(self, {"ok": True})
+            if parsed.path.startswith("/api/backups/") and parsed.path.endswith("/restore"):
+                backup_id = parsed.path.split("/")[-2]
+                confirmation = self._body_json().get("confirmation", "")
+                if confirmation != "RESTORE":
+                    raise ValueError("Type RESTORE to confirm restoring everything from this backup.")
+                if _serato_open():
+                    raise RuntimeError("Serato is open. Close it before restoring a backup.")
+                if not write_lock.acquire(blocking=False):
+                    raise RuntimeError("Another Serato write or undo is already in progress.")
+                try:
+                    restore_backup(backup_id, confirmation)
                 finally:
                     write_lock.release()
                 return json_response(self, {"ok": True})
