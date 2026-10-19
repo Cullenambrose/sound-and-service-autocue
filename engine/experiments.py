@@ -1,0 +1,263 @@
+"""Switchable algorithm experiments. Each one re-plans the same cached analysis and is stored beside the baseline.
+
+An experiment prepares overrides for rules_v6.build_plan. It never edits the baseline plan, so the review page
+can show every variant's cues side by side and the report can score them against the cues you grade.
+"""
+import math
+from pathlib import Path
+
+BASELINE = "baseline"
+
+CATALOG = [
+    {"id": "baseline", "label": "Baseline v6", "default": True, "heavy": False,
+     "summary": "The current engine, unchanged."},
+    {"id": "low_band_hop_fix", "label": "Low-band timing fix", "default": True, "heavy": False,
+     "summary": "Resamples the 50 fps low-band energy to the 50 ms stem step before drop detection."},
+    {"id": "fuzzy_lyrics", "label": "Fuzzy lyric matching", "default": True, "heavy": False,
+     "summary": "Matches mis-heard transcript words to lyrics by similarity, not exact spelling."},
+    {"id": "kick_grid", "label": "Kick-snapped grid", "default": True, "heavy": False,
+     "summary": "Shifts the bar grid onto the measured kick transients (20-200 Hz)."},
+    {"id": "stem_energy", "label": "Stem energy sections", "default": True, "heavy": False,
+     "summary": "Uses drums + bass + vocal stem energy for the energy-based chorus and outro fallbacks."},
+    {"id": "roformer_stems", "label": "RoFormer vocals", "default": False, "heavy": True,
+     "summary": "Separates vocals with a Mel-Band RoFormer model for cleaner vocal timing. Slow; needs audio-separator."},
+]
+IDS = [item["id"] for item in CATALOG]
+ROFORMER_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+
+
+class Unavailable(RuntimeError):
+    """The experiment cannot run on this song; its message says why and how to fix it."""
+
+
+def default_enabled():
+    return [item["id"] for item in CATALOG if item["default"]]
+
+
+def normalize_enabled(value):
+    if value is None:
+        return default_enabled()
+    if not isinstance(value, list) or any(item not in IDS for item in value):
+        raise ValueError("experiments must be a list of known experiment ids")
+    return [BASELINE] + [item for item in IDS if item in value and item != BASELINE]
+
+
+def _resample(values, source_hop, target_hop, count=None):
+    import numpy as np
+    values = np.asarray(values, dtype=float)
+    if not len(values):
+        return values
+    count = count or int(len(values) * source_hop / target_hop)
+    source_times = np.arange(len(values)) * source_hop
+    return np.interp(np.arange(count) * target_hop, source_times, values)
+
+
+def _low_band_hop_fix(context):
+    feature_fps = float(context.get("fps") or 50)
+    low = context.get("low_energy")
+    hop = float(context.get("hop_s") or 0.05)
+    if not low or abs(1 / feature_fps - hop) < 1e-6:
+        raise Unavailable("low band already uses the stem step; nothing to fix")
+    return {"low_energy": _resample(low, 1 / feature_fps, hop).tolist()}
+
+
+def _fuzzy_lyrics(context):
+    if not context.get("synced_lyrics"):
+        raise Unavailable("no synced lyrics were found for this song")
+    if not context.get("words"):
+        raise Unavailable("no WhisperX word timings; install whisperx")
+    config = {**context["config"], "fuzzy_lyrics": True}
+    return {"config": config}
+
+
+def _kick_grid(context):
+    import numpy as np
+    low, fps = context.get("low_energy_raw"), float(context.get("fps") or 50)
+    downbeats = context["analysis"].get("downbeats") or []
+    if low is None or len(downbeats) < 8:
+        raise Unavailable("needs low-band energy and at least 8 downbeats")
+    low = np.asarray(low, dtype=float)
+    flux = np.maximum(np.diff(np.log1p(low), prepend=0.0), 0.0)
+    offsets = []
+    radius = int(round(0.12 * fps))
+    for beat in downbeats:
+        centre = int(round(beat * fps))
+        if centre - radius < 0 or centre + radius >= len(flux):
+            continue
+        window = flux[centre - radius:centre + radius + 1]
+        if window.max() <= 0:
+            continue
+        offsets.append((int(window.argmax()) - radius) / fps)
+    if len(offsets) < 8:
+        raise Unavailable("too few clear kick transients near downbeats")
+    shift = float(np.median(offsets))
+    spread = float(np.median(np.abs(np.asarray(offsets) - shift)))
+    if spread > 0.04:
+        raise Unavailable(f"kick offsets are inconsistent (spread {spread * 1000:.0f} ms)")
+    analysis = dict(context["analysis"])
+    grid = dict(analysis["grid"])
+    grid["t1"] = round(grid["t1"] + shift, 4)
+    grid["kick_shift_ms"] = round(shift * 1000, 1)
+    analysis["grid"] = grid
+    return {"analysis": analysis, "note": f"grid shifted {shift * 1000:+.0f} ms"}
+
+
+def _stem_energy(context):
+    import numpy as np
+    stems, hop = context.get("stems"), float(context.get("hop_s") or 0.05)
+    fps = float(context.get("fps") or 50)
+    if not stems or not all(key in stems for key in ("drums", "bass", "vocals")):
+        raise Unavailable("Demucs stem energies are unavailable; install demucs")
+    count = len(context["energy"])
+    mixed = sum(_resample(stems[key], hop, 1 / fps, count) for key in ("drums", "bass", "vocals"))
+    return {"energy": np.asarray(mixed, dtype=float).tolist()}
+
+
+def _roformer(context):
+    import importlib.util
+    if importlib.util.find_spec("audio_separator") is None:
+        raise Unavailable("audio-separator is not installed. Install it with: pip install audio-separator")
+    paths = context.get("paths")
+    if paths is None:
+        raise Unavailable("no cache folder to hold the separated vocals")
+    import numpy as np
+    target = paths.root / "work" / "roformer_vocals.wav"
+    if not target.exists():
+        from audio_separator.separator import Separator
+        output = paths.root / "work" / "roformer"
+        output.mkdir(parents=True, exist_ok=True)
+        separator = Separator(output_dir=str(output), output_single_stem="Vocals")
+        separator.load_model(model_filename=ROFORMER_MODEL)
+        produced = separator.separate(str(context["decoded_wav"]))
+        found = next((output / name for name in produced if (output / name).exists()), None)
+        if found is None:
+            raise Unavailable("RoFormer produced no vocal file")
+        found.replace(target)
+    import analyze
+    data, rate = analyze.read_mono(target)
+    step = int(round(float(context.get("hop_s") or 0.05) * rate))
+    count = len(data) // step
+    envelope = np.sqrt((data[:count * step].reshape(count, step) ** 2).mean(1))
+    stems = dict(context.get("stems") or {})
+    stems["vocals"] = envelope.tolist()
+    return {"stems": stems}
+
+
+RUNNERS = {
+    "low_band_hop_fix": _low_band_hop_fix,
+    "fuzzy_lyrics": _fuzzy_lyrics,
+    "kick_grid": _kick_grid,
+    "stem_energy": _stem_energy,
+    "roformer_stems": _roformer,
+}
+
+
+def summarize(plan, label, detail=""):
+    grid = plan.get("grid", {})
+    return {
+        "label": label, "status": "ok", "detail": detail, "map_type": plan.get("map_type"),
+        "t1": grid.get("t1"), "bar_s": grid.get("bar_s"),
+        "flags": plan.get("flags", []),
+        "cues": {slot: {key: cue.get(key) for key in ("name", "bar", "time_s", "confidence", "reason", "meaning")}
+                 for slot, cue in plan.get("cues", {}).items()},
+    }
+
+
+def run_variants(base_kwargs, context, baseline_plan, enabled, build_plan):
+    """Return {id: summary}. `base_kwargs` are the exact build_plan arguments used for the baseline."""
+    variants = {BASELINE: summarize(baseline_plan, "Baseline v6")}
+    labels = {item["id"]: item["label"] for item in CATALOG}
+    for variant in enabled:
+        if variant == BASELINE or variant not in RUNNERS:
+            continue
+        try:
+            overrides = dict(RUNNERS[variant](context))
+            note = overrides.pop("note", "")
+            kwargs = {**base_kwargs, **overrides}
+            plan = build_plan(**kwargs)
+            variants[variant] = summarize(plan, labels[variant], note)
+        except Unavailable as reason:
+            variants[variant] = {"label": labels[variant], "status": "unavailable", "detail": str(reason), "cues": {}}
+        except Exception as error:
+            variants[variant] = {"label": labels[variant], "status": "failed", "detail": str(error), "cues": {}}
+    return variants
+
+
+def bar_energy_table(stems, low_energy_raw, rms, hop_s, fps, grid, duration_s):
+    """Per-bar energies saved with each song so later analysis does not need the audio again."""
+    if not rms or grid["bar_s"] <= 0:
+        return []
+    bar_count = max(0, int(math.ceil((duration_s - grid["t1"]) / grid["bar_s"])))
+    table = []
+
+    def mean(values, step, bar):
+        if not values:
+            return None
+        left = max(0, int((grid["t1"] + bar * grid["bar_s"]) / step))
+        right = max(left + 1, int((grid["t1"] + (bar + 1) * grid["bar_s"]) / step))
+        chunk = values[left:right]
+        return round(float(sum(chunk) / len(chunk)), 5) if chunk else None
+
+    for bar in range(max(0, int(math.ceil(-grid["t1"] / grid["bar_s"]))), bar_count):
+        table.append({
+            "bar": bar,
+            "rms": mean(rms, 1 / fps, bar),
+            "low": mean(low_energy_raw, 1 / fps, bar),
+            "drums": mean((stems or {}).get("drums"), hop_s, bar),
+            "bass": mean((stems or {}).get("bass"), hop_s, bar),
+            "vocals": mean((stems or {}).get("vocals"), hop_s, bar),
+        })
+    return table
+
+
+def _truth_time(cue, grid):
+    if cue.get("bar") is None or grid.get("t1") is None:
+        return None
+    return float(grid["t1"]) + float(cue["bar"]) * float(grid["bar_s"])
+
+
+def score_tracks(tracks):
+    """Score every variant against the cues you reviewed.
+
+    `tracks` is a list of dicts: {"name", "plan"} where plan["cues"] holds the saved (graded) cues and
+    plan["variants"] holds each experiment's cues. A variant cue is right when it is within one beat of the
+    saved cue, or when both are empty.
+    """
+    results, per_track = {}, []
+    for track in tracks:
+        plan = track["plan"]
+        grid = plan.get("grid", {})
+        variants = plan.get("variants") or {}
+        if not grid.get("bar_s") or not variants:
+            continue
+        beat = float(grid["bar_s"]) / 4
+        row = {"name": track["name"], "map_type": plan.get("map_type"), "slots": {}}
+        for slot in "ABCDEFGH":
+            truth = _truth_time(plan.get("cues", {}).get(slot, {}), grid)
+            row["slots"][slot] = {"truth": truth, "variants": {}}
+            for key, variant in variants.items():
+                if variant.get("status") != "ok":
+                    continue
+                cue = variant["cues"].get(slot, {})
+                time_s = cue.get("time_s") if cue.get("bar") is not None else None
+                right = (time_s is None and truth is None) or (
+                    time_s is not None and truth is not None and abs(time_s - truth) <= beat + 1e-6)
+                row["slots"][slot]["variants"][key] = {"time_s": time_s, "right": right}
+                entry = results.setdefault(key, {"label": variant.get("label", key), "right": 0, "total": 0,
+                                                 "by_slot": {}, "by_map": {}, "wins": 0, "losses": 0})
+                entry["total"] += 1
+                entry["right"] += int(right)
+                slot_entry = entry["by_slot"].setdefault(slot, {"right": 0, "total": 0})
+                slot_entry["total"] += 1
+                slot_entry["right"] += int(right)
+                map_entry = entry["by_map"].setdefault(str(plan.get("map_type")), {"right": 0, "total": 0})
+                map_entry["total"] += 1
+                map_entry["right"] += int(right)
+            base = row["slots"][slot]["variants"].get(BASELINE)
+            for key, value in row["slots"][slot]["variants"].items():
+                if base and key != BASELINE and value["right"] != base["right"]:
+                    results[key]["wins" if value["right"] else "losses"] += 1
+        per_track.append(row)
+    for entry in results.values():
+        entry["accuracy"] = round(entry["right"] / entry["total"], 3) if entry["total"] else None
+    return {"variants": results, "tracks": per_track, "graded_songs": len(per_track)}

@@ -42,12 +42,12 @@ class V6RulesTests(unittest.TestCase):
         self.assertEqual(result["map_type"], "VOCAL")
         self.assertEqual(result["cue_order"], list("ABCDEFGH"))
         self.assertEqual(list(result["cues"]), list("ABCDEFGH"))
-        self.assertEqual(result["cues"]["A"]["name"], "INTRO -16BS")
+        self.assertEqual(result["cues"]["A"]["name"], "INTRO -16")
         self.assertEqual(result["cues"]["C"]["name"], "EXIT -32")
         self.assertEqual(result["cues"]["D"]["name"], "EXIT -16")
         self.assertEqual(result["cues"]["E"]["bar"], 32)
         self.assertEqual(result["cues"]["D"]["bar"], 16)
-        self.assertEqual(result["cues"]["F"]["bar"], 27)
+        self.assertEqual(result["cues"]["F"]["bar"], 28)
         self.assertTrue(all(label_valid("VOCAL", slot, result["cues"][slot]["name"]) for slot in "ABCDEFGH"))
         self.assertTrue(labels_exact(result))
 
@@ -111,11 +111,99 @@ class V6RulesTests(unittest.TestCase):
         self.assertIn("single drop: last-drop slots repeat first-drop slots", result["flags"])
         self.assertTrue(labels_exact(result))
 
+    def test_house_drop_detection_uses_drop_phrase_not_genre_phrase(self):
+        config = {**self.config, "genres": {"house_edm": {"phrase_bars": 32}}}
+        grid = {"t1": 0.0, "bar_s": 2.0, "bpm": 120}
+        stems = {key: [] for key in ("drums", "bass")}
+        low_energy = []
+        for bar in range(129):
+            level = 0.1 if 112 <= bar < 120 else 1.0
+            for values in (*stems.values(), low_energy):
+                values.extend([level] * 4)
+        for values in (*stems.values(), low_energy):
+            values[120 * 4:121 * 4] = [1.0] * 4
+        result = build_plan("house-drop", {"grid": grid, "segments": []},
+                            {"cues": {"B": {"bar": 8}}}, 258, genre="House",
+                            stems=stems, low_energy=low_energy, hop_s=0.5, config=config)
+
+        self.assertEqual(result["genre_phrase_bars"], 32)
+        self.assertEqual([drop["bar"] for drop in result["drops"]], [120])
+        self.assertEqual(result["map_type"], "DROP")
+        self.assertEqual(result["cues"]["D"]["bar"], 120)
+
     def test_intro_shorter_than_16_uses_measured_count(self):
         plan = {"cues": {"B": {"bar": 8, "confidence": 0.7}}}
         result = build_plan("03", self.analysis, plan, 176, config=self.config)
-        self.assertEqual(result["cues"]["A"]["name"], "INTRO -8BS")
+        self.assertEqual(result["cues"]["A"]["name"], "INTRO -8")
         self.assertEqual(result["cues"]["A"]["bar"], 0)
+
+    def test_custom_cue_map_controls_meaning_label_and_serato_color(self):
+        import copy
+        from cue_maps import DEFAULT_CUE_MAPS, PALETTE_BY_ID
+
+        settings = copy.deepcopy(DEFAULT_CUE_MAPS)
+        settings["maps"]["VOCAL"]["F"] = {
+            "meaning": "last_chorus_start", "label": "FINAL CHORUS", "color": "red", "enabled": True,
+        }
+        result = build_plan("custom", self.analysis, self.plan, 176, config=self.config,
+                            cue_maps=settings)
+
+        self.assertEqual(result["cues"]["F"]["bar"], 28)
+        self.assertEqual(result["cues"]["F"]["name"], "FINAL CHORUS")
+        self.assertEqual(result["cues"]["F"]["meaning"], "last_chorus_start")
+        self.assertEqual(result["cues"]["F"]["color"], PALETTE_BY_ID["red"]["metadata"])
+        self.assertEqual(result["cues"]["F"]["display_color"], PALETTE_BY_ID["red"]["display"])
+
+    def test_dynamic_labels_follow_custom_meanings_after_gemini_moves_an_anchor(self):
+        import copy
+        from cue_maps import DEFAULT_CUE_MAPS
+
+        settings = copy.deepcopy(DEFAULT_CUE_MAPS)
+        settings["maps"]["VOCAL"]["A"]["label"] = "WARMUP {bars}"
+        settings["maps"]["VOCAL"]["F"]["label"] = "FINAL CHORUS"
+        result = build_plan("dynamic-custom", self.analysis, self.plan, 176,
+                            config=self.config, cue_maps=settings)
+        self.assertEqual(result["cues"]["A"]["name"], "WARMUP 16")
+        original_exit = result["cues"]["E"]["bar"]
+        original_start = result["cues"]["B"]["bar"]
+        picks = apply_gemini(result, {
+            "B": {"pick": original_start + 1, "why": "nearby"},
+            "E": {"pick": original_exit + 1, "why": "nearby"},
+        }, confidence_threshold=0.9)
+
+        self.assertEqual(picks["E"]["bar"], original_exit + 1)
+        self.assertEqual(picks["B"]["bar"], original_start + 1)
+        self.assertEqual(result["cues"]["C"]["bar"], result["cues"]["E"]["bar"] - 32)
+        self.assertEqual(result["cues"]["D"]["bar"], result["cues"]["E"]["bar"] - 16)
+        self.assertEqual(result["cues"]["F"]["name"], "FINAL CHORUS")
+        self.assertEqual(result["cues"]["A"]["name"], "WARMUP 17")
+
+    def test_cue_map_rejects_invalid_values_as_validation_errors(self):
+        import copy
+        from cue_maps import DEFAULT_CUE_MAPS, normalize_cue_maps
+
+        invalid_meaning = copy.deepcopy(DEFAULT_CUE_MAPS)
+        invalid_meaning["maps"]["VOCAL"]["A"]["meaning"] = []
+        with self.assertRaisesRegex(ValueError, "unsupported meaning"):
+            normalize_cue_maps(invalid_meaning)
+
+        invalid_color = copy.deepcopy(DEFAULT_CUE_MAPS)
+        invalid_color["maps"]["VOCAL"]["A"]["color"] = {}
+        with self.assertRaisesRegex(ValueError, "Serato palette"):
+            normalize_cue_maps(invalid_color)
+
+    def test_manual_drop_map_leaves_drop_cues_blank_without_evidence(self):
+        import copy
+        from cue_maps import DEFAULT_CUE_MAPS
+
+        settings = copy.deepcopy(DEFAULT_CUE_MAPS)
+        settings["mode"] = "DROP"
+        result = build_plan("forced-drop", self.analysis, self.plan, 176,
+                            config=self.config, cue_maps=settings)
+
+        self.assertEqual(result["map_type"], "DROP")
+        self.assertTrue(all(result["cues"][slot]["bar"] is None for slot in "CDEF"))
+        self.assertTrue(all("no evidence" in result["cues"][slot]["reason"] for slot in "CDEF"))
 
     def test_energy_fade_infers_low_confidence_outro_and_go_32(self):
         analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 128}]}

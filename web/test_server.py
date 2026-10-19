@@ -76,7 +76,7 @@ class WebServerTests(unittest.TestCase):
             + b"LOOP\x00" + len(loop).to_bytes(4, "big") + loop
         )
         original_geob = b"\x01\x01" + base64.b64encode(b"\x01\x01" + old_entries) + b"\x00"
-        updated = server._cue_binary({"A": {"bar": 4, "name": "INTRO"}}, {
+        updated = server._cue_binary({"A": {"bar": 4, "name": "INTRO", "color": "#CC0000"}}, {
             "grid": {"t1": 0, "bar_s": 2},
         }, original_geob)
 
@@ -86,7 +86,77 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(len(cue_entries), 1)
         self.assertEqual(cue_entries[0][1], 0)
         self.assertEqual(int.from_bytes(cue_entries[0][2:6], "big"), 8000)
+        self.assertEqual(cue_entries[0][7:10], bytes.fromhex("CC0000"))
         self.assertTrue(cue_entries[0][12:].startswith(b"INTRO"))
+
+    def test_cue_map_settings_are_normalized_persisted_and_returned(self):
+        maps = server._cue_maps_module()
+        settings = json.loads(json.dumps(maps.DEFAULT_CUE_MAPS))
+        settings["mode"] = "DROP"
+        settings["maps"]["DROP"]["F"]["label"] = "MAIN DROP"
+        url = f"http://127.0.0.1:{self.http.server_address[1]}/api/settings"
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{self.http.server_address[1]}",
+            "X-AutoCue-Token": server.SESSION_TOKEN,
+        }
+        request = urllib.request.Request(url, data=json.dumps({"cue_maps": settings}).encode(),
+                                         method="POST", headers=headers)
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+
+        with urllib.request.urlopen(url) as response:
+            saved = json.load(response)
+        self.assertEqual(saved["cue_maps"]["mode"], "DROP")
+        self.assertEqual(saved["cue_maps"]["maps"]["DROP"]["F"]["label"], "MAIN DROP")
+        self.assertEqual(saved["cue_map_catalog"]["palette"][0]["metadata"], "#CC0000")
+
+        invalid = json.loads(json.dumps(settings))
+        invalid["maps"]["DROP"]["F"]["color"] = []
+        request = urllib.request.Request(url, data=json.dumps({"cue_maps": invalid}).encode(),
+                                         method="POST", headers=headers)
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(raised.exception.code, 400)
+        with urllib.request.urlopen(url) as response:
+            self.assertEqual(json.load(response)["cue_maps"]["maps"]["DROP"]["F"]["color"],
+                             "yellow")
+
+    def test_experiment_settings_report_and_export(self):
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        headers = {"Content-Type": "application/json", "Origin": base,
+                   "X-AutoCue-Token": server.SESSION_TOKEN}
+        with urllib.request.urlopen(base + "/api/settings") as response:
+            saved = json.load(response)
+        self.assertIn("kick_grid", saved["experiments"])
+        self.assertNotIn("roformer_stems", saved["experiments"])
+        request = urllib.request.Request(base + "/api/settings", data=json.dumps(
+            {"experiments": ["kick_grid"]}).encode(), method="POST", headers=headers)
+        urllib.request.urlopen(request).close()
+        with urllib.request.urlopen(base + "/api/settings") as response:
+            self.assertEqual(json.load(response)["experiments"], ["baseline", "kick_grid"])
+        bad = urllib.request.Request(base + "/api/settings", data=json.dumps(
+            {"experiments": ["nope"]}).encode(), method="POST", headers=headers)
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(bad)
+        self.assertEqual(raised.exception.code, 400)
+
+        source = Path(self.temporary.name) / "graded.mp3"
+        source.write_bytes(b"graded")
+        file_hash, _ = server.copy_import(source, source.name, source_path=str(source))
+        cue = lambda bar: {"bar": bar, "time_s": bar * 2.0}
+        plan = {"map_type": "VOCAL", "grid": {"t1": 0, "bar_s": 2.0}, "cues": {"A": cue(8)},
+                "variants": {"baseline": {"status": "ok", "label": "Baseline v6", "cues": {"A": cue(16)}},
+                             "kick_grid": {"status": "ok", "label": "Kick", "cues": {"A": cue(8)}}}}
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=?, reviewed=1 WHERE hash=?", (json.dumps(plan), file_hash))
+        with urllib.request.urlopen(base + "/api/experiments/report") as response:
+            report = json.load(response)
+        self.assertEqual(report["graded_songs"], 1)
+        self.assertEqual(report["variants"]["kick_grid"]["wins"], 1)
+        with urllib.request.urlopen(base + "/api/experiments/export") as response:
+            exported = json.load(response)
+        self.assertEqual(exported["tracks"][0]["plan"]["variants"]["baseline"]["cues"]["A"]["bar"], 16)
 
     def test_map_aware_cue_fallbacks_replace_legacy_chorus_names(self):
         source = Path(self.temporary.name) / "song.mp3"
@@ -100,6 +170,8 @@ class WebServerTests(unittest.TestCase):
 
         record = server.track_record(row)
         self.assertEqual(record["cues"]["C"]["name"], "-32 DROP")
+        self.assertEqual(record["cues"]["C"]["color_id"], "purple")
+        self.assertEqual(record["cues"]["C"]["color"], "#6823B6")
         self.assertEqual(record["cues"]["D"]["name"], "FIRST DROP")
         updated = server._cue_binary(plan["cues"], plan)
         labels = {
@@ -108,6 +180,25 @@ class WebServerTests(unittest.TestCase):
             if name == "CUE"
         }
         self.assertEqual(labels, {2: "-32 DROP", 3: "FIRST DROP"})
+
+    def test_custom_label_that_matches_a_legacy_name_is_preserved(self):
+        source = Path(self.temporary.name) / "custom.mp3"
+        source.write_bytes(b"custom")
+        file_hash, _ = server.copy_import(source, source.name, source_path=str(source))
+        plan = {
+            "map_type": "DROP",
+            "grid": {"t1": 0, "bar_s": 2},
+            "cue_map": {"resolved": {}},
+            "cues": {"D": {"bar": 8, "name": "LAST CHORUS"}},
+        }
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
+            row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+
+        self.assertEqual(server.track_record(row)["cues"]["D"]["name"], "LAST CHORUS")
+        written = server._cue_binary(plan["cues"], plan)
+        cues = [payload for name, payload in server._marker2_entries(written) if name == "CUE"]
+        self.assertTrue(cues[0][12:].startswith(b"LAST CHORUS"))
 
     def test_review_edit_persists_cue_and_marks_reviewed(self):
         source = Path(self.temporary.name) / "song.mp3"

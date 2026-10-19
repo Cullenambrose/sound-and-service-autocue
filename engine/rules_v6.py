@@ -4,10 +4,10 @@ import csv
 import json
 import math
 import os
-import re
 import sys
 
 from synced_lyrics import align_synced_lyrics
+import cue_maps as cue_map_settings
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 SWITCHES = (
@@ -292,7 +292,7 @@ def _genre_bucket(genre):
 
 def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synced_lyrics=None,
                stems=None, low_energy=None, hop_s=0.05, config=None, detected_drops=None,
-               energy=None, fps=50):
+               energy=None, fps=50, cue_maps=None):
     config = {**DEFAULT_CONFIG, **(config or {})}
     config["switches"] = {**DEFAULT_CONFIG["switches"], **config.get("switches", {})}
     grid = analysis["grid"]
@@ -315,7 +315,8 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     lyric_alignment = None
     if config["switches"]["synced_lyrics"] and synced_lyrics:
         if words:
-            lyric_alignment = align_synced_lyrics(synced_lyrics, words, bar_s)
+            lyric_alignment = align_synced_lyrics(synced_lyrics, words, bar_s,
+                                                  fuzzy=bool(config.get("fuzzy_lyrics")))
         else:
             lyric_alignment = {"status": "rejected", "reason": "WhisperX word timings are unavailable",
                                "choruses": [], "matched_lines": 0}
@@ -326,10 +327,15 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     drops = list(detected_drops or [])
     if not drops and config["switches"]["drop_detection"] and stems and low_energy:
         drops = detect_drops(stems, low_energy, hop_s, grid, duration_s,
-                             genre_phrase_bars, config["drop_recovery_ratio"])
+                             config["drop_phrase_bars"], config["drop_recovery_ratio"])
     drop_confident = [drop for drop in drops if drop["confidence"] >= config["drop_min_confidence"]]
     genre_matches, genre_reason = _genre_is_drop(genre, bpm, config)
+    cue_maps = cue_map_settings.normalize_cue_maps(cue_maps)
     is_drop = bool(drop_confident and (genre_matches if config["switches"]["genre_map"] else True))
+    if cue_maps["mode"] == "DROP":
+        is_drop = True
+    elif cue_maps["mode"] == "VOCAL":
+        is_drop = False
     map_type = "DROP" if is_drop else "VOCAL"
     outro = next((section for section in analysis.get("segments", analysis.get("sections", []))
                   if "outro" in _normal_label(section)), None)
@@ -378,7 +384,9 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             intro_start = max(first_bar, intro_start)
             break
     intro_bars = max(0, start - intro_start)
-    intro_name = f"INTRO -{intro_bars}BS"
+    first_chorus = chorus_spans[0] if chorus_spans else None
+    last_chorus = chorus_spans[-1] if chorus_spans else None
+    intro_name = f"INTRO -{intro_bars}"
     cues["A"] = _cue(intro_name, intro_start if intro_bars else None, 0.7,
                      f"intro begins {intro_bars} bars before START" if intro_bars else "no measured intro before START",
                      [] if intro_bars else ["intro shorter than one bar"], grid)
@@ -386,34 +394,40 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
                      "retained v5 START on the existing downbeat grid", grid=grid)
 
     if is_drop:
-        first_drop, last_drop = drop_confident[0], drop_confident[-1]
-        for slot, name, bar, reason in (
-            ("C", "-32 DROP", first_drop["bar"] - 32, "32 bars before first confident drop"),
-            ("D", "FIRST DROP", first_drop["bar"], first_drop["reason"]),
-            ("E", "-32 LAST DROP", last_drop["bar"] - 32, "32 bars before last confident drop"),
-            ("F", "LAST DROP", last_drop["bar"], last_drop["reason"]),
-        ):
-            cue_flags = []
-            if bar < first_bar:
-                cue_flags.append("requested cue is before the track's first downbeat")
-                flags.append(f"{name} falls before the track's first downbeat")
-                bar = None
-            if len(drop_confident) == 1 and slot in ("E", "F"):
-                reason = "single drop: repeated first-drop slot by default"
-            cues[slot] = _cue(name, bar, first_drop["confidence"] if slot in ("C", "D") else last_drop["confidence"],
-                              reason, cue_flags, grid)
+        if drop_confident:
+            first_drop, last_drop = drop_confident[0], drop_confident[-1]
+            for slot, name, bar, reason in (
+                ("C", "-32 DROP", first_drop["bar"] - 32, "32 bars before first confident drop"),
+                ("D", "FIRST DROP", first_drop["bar"], first_drop["reason"]),
+                ("E", "-32 LAST DROP", last_drop["bar"] - 32, "32 bars before last confident drop"),
+                ("F", "LAST DROP", last_drop["bar"], last_drop["reason"]),
+            ):
+                cue_flags = []
+                if bar < first_bar:
+                    cue_flags.append("requested cue is before the track's first downbeat")
+                    flags.append(f"{name} falls before the track's first downbeat")
+                    bar = None
+                if len(drop_confident) == 1 and slot in ("E", "F"):
+                    reason = "single drop: repeated first-drop slot by default"
+                cues[slot] = _cue(name, bar,
+                                  first_drop["confidence"] if slot in ("C", "D") else last_drop["confidence"],
+                                  reason, cue_flags, grid)
+        else:
+            for slot, name in (("C", "-32 DROP"), ("D", "FIRST DROP"),
+                               ("E", "-32 LAST DROP"), ("F", "LAST DROP")):
+                cues[slot] = _cue(name, None, 0.0, "no confident drop detected",
+                                  ["drop unavailable"], grid)
     else:
-        first_chorus = chorus_spans[0] if chorus_spans else None
-        last_chorus = chorus_spans[-1] if chorus_spans else None
         chorus_end = first_chorus["end_bar"] if first_chorus else old_exit
         chorus_conf = first_chorus["confidence"] if first_chorus else 0.35
         cues["E"] = _cue("EXIT/JUMP", chorus_end, chorus_conf,
                          f"end of first chorus ({chorus_source})" if first_chorus else
                          "fallback to v5 EXIT; no chorus end was found",
                          [] if first_chorus else ["chorus end unavailable"], grid)
-        jump_in = last_chorus["start_bar"] - 1 if last_chorus else None
-        cues["F"] = _cue("JUMP IN", jump_in, last_chorus["confidence"] if last_chorus else 0.0,
-                         "one bar before the last chorus" if last_chorus else "last chorus unavailable",
+        last_chorus_start = last_chorus["start_bar"] if last_chorus else None
+        cues["F"] = _cue("LAST CHORUS", last_chorus_start,
+                         last_chorus["confidence"] if last_chorus else 0.0,
+                         "start of the last chorus" if last_chorus else "last chorus unavailable",
                          [] if last_chorus else ["last chorus unavailable"], grid)
         exit_bar = chorus_end
         for slot, bars in (("C", 32), ("D", 16)):
@@ -463,7 +477,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
              if first_bar <= candidate < bar_count}
         ) if slot in anchors else ([] if bar is None else [bar])
 
-    return {
+    result = {
         "track_id": track_id,
         "schema_version": 2,
         "engine": {"name": "sound-and-service-autocue", "rules_version": "v6"},
@@ -489,6 +503,50 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         "switches": dict(config["switches"]),
         "gemini": {"used": False, "reason": "not run by the v6 builder; use the explicit opt-in tie-breaker"},
     }
+    candidate_events = {
+        "intro_start": {
+            "bar": intro_start if intro_bars else None,
+            "confidence": 0.7,
+            "reason": cues["A"]["reason"],
+            "flags": cues["A"]["flags"],
+        },
+        "start": cues["B"],
+        "first_chorus_start": {
+            "bar": first_chorus["start_bar"] if first_chorus else None,
+            "confidence": first_chorus["confidence"] if first_chorus else 0.0,
+            "reason": "start of first detected chorus",
+        },
+        "first_chorus_end": {
+            "bar": first_chorus["end_bar"] if first_chorus else None,
+            "confidence": first_chorus["confidence"] if first_chorus else 0.0,
+            "reason": "end of first detected chorus",
+        },
+        "last_chorus_start": {
+            "bar": last_chorus["start_bar"] if last_chorus else None,
+            "confidence": last_chorus["confidence"] if last_chorus else 0.0,
+            "reason": "start of last detected chorus",
+        },
+        "last_chorus_end": {
+            "bar": last_chorus["end_bar"] if last_chorus else None,
+            "confidence": last_chorus["confidence"] if last_chorus else 0.0,
+            "reason": "end of last detected chorus",
+        },
+        "first_drop_start": {
+            "bar": drop_confident[0]["bar"] if drop_confident else None,
+            "confidence": drop_confident[0]["confidence"] if drop_confident else 0.0,
+            "reason": drop_confident[0]["reason"] if drop_confident else "no confident first drop detected",
+        },
+        "last_drop_start": {
+            "bar": drop_confident[-1]["bar"] if drop_confident else None,
+            "confidence": drop_confident[-1]["confidence"] if drop_confident else 0.0,
+            "reason": drop_confident[-1]["reason"] if drop_confident else "no confident last drop detected",
+        },
+        "outro_start": cues["H"],
+    }
+    result = cue_map_settings.apply_cue_map(result, cue_maps, candidate_events, first_bar)
+    if cue_maps["mode"] != "AUTO":
+        result["flags"].append(f"cue map manually selected: {map_type}")
+    return result
 
 
 def _manifest_rows(path):

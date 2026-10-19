@@ -36,7 +36,21 @@ def _word_tokens(words):
     return tokens
 
 
-def _line_match(line_tokens, transcript_tokens, start_at=0):
+def _similar(left, right):
+    if left == right:
+        return True
+    if min(len(left), len(right)) < 4:
+        return False
+    try:
+        from rapidfuzz import fuzz
+        return fuzz.ratio(left, right) >= 80
+    except ImportError:
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, left, right).ratio() >= 0.8
+
+
+def _line_match(line_tokens, transcript_tokens, start_at=0, fuzzy=False):
+    same = _similar if fuzzy else (lambda left, right: left == right)
     if not line_tokens:
         return None
     # Allow missed or hallucinated words, but require a majority of lyric tokens.
@@ -48,7 +62,7 @@ def _line_match(line_tokens, transcript_tokens, start_at=0):
         cursor = start
         for token in line_tokens:
             found = next((i for i in range(cursor, min(len(transcript_tokens), cursor + 3))
-                          if transcript_tokens[i][0] == token), None)
+                          if same(transcript_tokens[i][0], token)), None)
             if found is not None:
                 if first is None:
                     first = found
@@ -95,7 +109,7 @@ def find_repeated_choruses(lines, bar_s):
     return spans
 
 
-def align_synced_lyrics(synced_text, words, bar_s, max_residual_s=2.5):
+def align_synced_lyrics(synced_text, words, bar_s, max_residual_s=2.5, fuzzy=False):
     lines = parse_synced_lyrics(synced_text)
     transcript = _word_tokens(words)
     if not lines or not transcript:
@@ -105,7 +119,7 @@ def align_synced_lyrics(synced_text, words, bar_s, max_residual_s=2.5):
     points = []
     cursor = 0
     for line in lines:
-        matched_time = _line_match(line["normalized"].split(), transcript, cursor)
+        matched_time = _line_match(line["normalized"].split(), transcript, cursor, fuzzy)
         if matched_time is not None:
             matched_index = next((i for i in range(cursor, len(transcript))
                                   if transcript[i][1] == matched_time), None)

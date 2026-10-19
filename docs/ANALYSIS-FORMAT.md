@@ -118,13 +118,17 @@ The v6 planner writes a separate plan per song with `schema_version: 2` and `eng
   "lyric_choruses": [{"start_bar": 32, "end_bar": 40, "confidence": 0.8, "source": "aligned_synced_lyrics"}],
   "flags": [],
   "cues": {
-    "A": {"name": "INTRO -16BS", "bar": 0, "time_s": 0.0, "confidence": 0.7, "reason": "…"},
+    "A": {"name": "INTRO -16", "bar": 0, "time_s": 0.0, "confidence": 0.7, "reason": "…"},
     "B": {"name": "START", "bar": 16, "time_s": 32.0, "confidence": 0.82, "reason": "…"}
   }
 }
 ```
 
-Every cue includes a confidence, reason, review flags, and candidate bars. The plan contains all eight slots A–H in order; map-specific labels are spec data and must match exactly. A DROP plan uses `INTRO -NBS`, `START`, `-32 DROP`, `FIRST DROP`, `-32 LAST DROP`, `LAST DROP`, `GO -32`, `OUTRO N`. A VOCAL plan uses `INTRO -NBS`, `START`, `EXIT -32`, `EXIT -16`, `EXIT/JUMP`, `JUMP IN`, `GO -32`, `OUTRO N`. `lyric_choruses` contains only accepted synced-lyric matches; `chorus_spans` also records audio-section fallbacks. Transcripts, synced lyric cache, stems, and Gemini cache remain outside Git.
+Every cue includes a confidence, reason, review flags, and candidate bars. The plan contains all eight slots A–H in order, plus the resolved cue meaning, label, and Serato palette color for each cue. The settings are user-editable in the web app and apply to new analyses; re-analyze a track to apply changed settings to an existing plan.
+
+Default VOCAL map: `INTRO -N`, `START`, `EXIT -32`, `EXIT -16`, `EXIT/JUMP`, `LAST CHORUS`, `GO -32`, `OUTRO -N`. Default DROP map: `INTRO -N`, `START`, `-32 DROP`, `FIRST DROP`, `-32 LAST DROP`, `LAST DROP`, `GO -32`, `OUTRO -N`. `N` is computed from the measured bar count. Users can choose another supported musical meaning, custom label, Serato palette color, or disable a cue. AUTO selects between the VOCAL and DROP maps using the planner's existing evidence; forcing DROP does not invent drops when none were detected.
+
+The palette stores Serato's metadata RGB value and uses its corresponding Pro/Lite display color for the UI. The mapping is based on the reverse-engineered [Triseratops Serato color reference](https://github.com/Holzhaus/triseratops/blob/8e92aae1794c4f02a2405eb88ea72f251b077f0c/src/tag/color.rs); it is not an official Serato specification. `lyric_choruses` contains only accepted synced-lyric matches; `chorus_spans` also records audio-section fallbacks. Transcripts, synced lyric cache, stems, and Gemini cache remain outside Git.
 
 Build and review steps are local-only:
 

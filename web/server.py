@@ -29,17 +29,13 @@ DB_PATH = DATA / "library.sqlite3"
 ALLOWED = {".wav", ".mp3", ".m4a", ".flac", ".aiff", ".aif", ".ogg", ".opus"}
 SLOT_NAMES = {
     "A": "INTRO", "B": "START", "C": "EXIT -32", "D": "EXIT -16",
-    "E": "EXIT/JUMP", "F": "JUMP IN", "G": "GO -32", "H": "OUTRO",
+    "E": "EXIT/JUMP", "F": "LAST CHORUS", "G": "GO -32", "H": "OUTRO",
 }
 DROP_SLOT_NAMES = {
     "A": "INTRO", "B": "START", "C": "-32 DROP", "D": "FIRST DROP",
     "E": "-32 LAST DROP", "F": "LAST DROP", "G": "GO -32", "H": "OUTRO",
 }
 LEGACY_CUE_NAMES = {"CHORUS", "LAST CHORUS"}
-COLORS = {
-    "A": "#38bdf8", "B": "#22c55e", "C": "#a78bfa", "D": "#f472b6",
-    "E": "#fb7185", "F": "#facc15", "G": "#2dd4bf", "H": "#f97316",
-}
 worker_queue = queue.Queue()
 paused_jobs = set()
 cancelled_jobs = set()
@@ -53,6 +49,14 @@ def connect():
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
+
+
+def _cue_maps_module():
+    engine = str(ROOT / "engine")
+    if engine not in sys.path:
+        sys.path.insert(0, engine)
+    import cue_maps
+    return cue_maps
 
 
 def initialize():
@@ -114,6 +118,8 @@ def initialize():
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES('gemini', 'false')")
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES('strictness', 'standard')")
+        db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES('cue_maps', ?)",
+                   (json.dumps(_cue_maps_module().DEFAULT_CUE_MAPS),))
 
 
 def track_record(row):
@@ -138,12 +144,21 @@ def track_record(row):
         "bar_s": plan.get("grid", {}).get("bar_s"),
         "cues": {
             slot: {
-                "name": _cue_name(cues.get(slot, {}).get("name"), slot, names),
+                "name": _cue_name(cues.get(slot, {}).get("name"), slot, names,
+                                  preserve_custom=bool(plan.get("cue_map"))),
                 "bar": cues.get(slot, {}).get("bar"),
                 "confidence": cues.get(slot, {}).get("confidence"),
                 "reason": cues.get(slot, {}).get("reason", ""),
+                "meaning": cues.get(slot, {}).get("meaning"),
+                "color_id": cues.get(slot, {}).get("color_id") or
+                            _cue_maps_module().DEFAULT_CUE_MAPS["maps"][plan.get("map_type", "VOCAL")][slot]["color"],
+                "color": cues.get(slot, {}).get("display_color") or
+                         _cue_maps_module().PALETTE_BY_ID[
+                             _cue_maps_module().DEFAULT_CUE_MAPS["maps"][plan.get("map_type", "VOCAL")][slot]["color"]
+                         ]["display"],
             } for slot in "ABCDEFGH"
         },
+        "variants": plan.get("variants") or {},
         "url": "/media/" + row["hash"],
     }
 
@@ -152,9 +167,9 @@ def _slot_names(map_type):
     return DROP_SLOT_NAMES if str(map_type).upper() == "DROP" else SLOT_NAMES
 
 
-def _cue_name(name, slot, names):
+def _cue_name(name, slot, names, preserve_custom=False):
     value = str(name or "").strip()
-    return names[slot] if not value or value.upper() in LEGACY_CUE_NAMES else value
+    return names[slot] if not value or (not preserve_custom and value.upper() in LEGACY_CUE_NAMES) else value
 
 
 def _mean_confidence(cues):
@@ -366,17 +381,20 @@ def _cue_binary(cues, plan, existing_data=None):
         position = max(0, int(round((t1 + bar_position * bar_s) * 1000)))
         if position >= 0xFFFFFFFF:
             raise ValueError(f"Cue {slot} exceeds Serato's supported timestamp.")
-        color = tuple(int(SLOT_HEX[index][offset:offset + 2], 16) for offset in (1, 3, 5))
-        label = _cue_name(cue.get("name"), slot, names).encode("utf-8")[:120] + b"\x00"
+        palette = _cue_maps_module().PALETTE_BY_ID
+        default_id = _cue_maps_module().DEFAULT_CUE_MAPS["maps"][plan.get("map_type", "VOCAL")][slot]["color"]
+        color_hex = cue.get("color") or palette[default_id]["metadata"]
+        if color_hex not in {item["metadata"] for item in palette.values()}:
+            raise ValueError(f"Cue {slot} color is not a Serato-compatible palette value.")
+        color = tuple(int(color_hex[offset:offset + 2], 16) for offset in (1, 3, 5))
+        label = _cue_name(cue.get("name"), slot, names,
+                          preserve_custom=bool(plan.get("cue_map"))).encode("utf-8")[:120] + b"\x00"
         payload = (bytes((0, index)) + position.to_bytes(4, "big") + bytes((0, *color, 0, 0)) + label)
         entries.append(("CUE", payload))
     raw = bytearray(b"\x01\x01")
     for name, payload in entries:
         raw.extend(name.encode("ascii") + b"\x00" + len(payload).to_bytes(4, "big") + payload)
     return b"\x01\x01" + base64.b64encode(bytes(raw)) + b"\x00"
-
-
-SLOT_HEX = ["#38bdf8", "#22c55e", "#a78bfa", "#f472b6", "#fb7185", "#facc15", "#2dd4bf", "#f97316"]
 
 
 WRITABLE = {".mp3": "mp3", ".aiff": "aiff", ".aif": "aiff", ".flac": "flac", ".m4a": "m4a"}
@@ -964,6 +982,24 @@ def _tags(path):
         return "", "", ""
 
 
+def _experiments_module():
+    sys.path.insert(0, str(ROOT / "engine"))
+    import experiments
+    return experiments
+
+
+def _enabled_experiments(settings):
+    module = _experiments_module()
+    raw = settings.get("experiments")
+    return module.normalize_enabled(json.loads(raw) if raw else None)
+
+
+def _graded_tracks():
+    with connect() as db:
+        rows = db.execute("SELECT hash,name,plan_json FROM tracks WHERE reviewed=1 AND plan_json IS NOT NULL").fetchall()
+    return [{"hash": row["hash"], "name": row["name"], "plan": json.loads(row["plan_json"])} for row in rows]
+
+
 def _analysis_import():
     sys.path.insert(0, str(ROOT / "engine"))
     import analyze
@@ -987,12 +1023,16 @@ def process_builtin(row, settings):
     analyze = _analysis_import()
     _live_reset(row)
     artist, title, genre = _tags(row["audio_path"])
+    cue_maps = _cue_maps_module().normalize_cue_maps(
+        json.loads(settings["cue_maps"]) if settings.get("cue_maps") else None
+    )
 
     def progress(step, state, detail):
         LIVE["steps"][step] = state
         LIVE["detail"] = detail or LIVE["detail"]
 
-    plan = analyze.analyze(row["audio_path"], artist, title, genre, progress)
+    plan = analyze.analyze(row["audio_path"], artist, title, genre, progress, cue_maps=cue_maps,
+                           experiments=_enabled_experiments(settings))
     LIVE["cues_found"] = [slot for slot, cue in plan["cues"].items() if cue.get("bar") is not None]
     return plan
 
@@ -1181,7 +1221,30 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/settings":
             with connect() as db:
                 settings = {row["key"]: row["value"] for row in db.execute("SELECT * FROM settings")}
+            module = _cue_maps_module()
+            settings["cue_maps"] = module.normalize_cue_maps(
+                json.loads(settings["cue_maps"]) if settings.get("cue_maps") else None
+            )
+            settings["cue_map_catalog"] = module.cue_map_catalog()
+            settings["cue_map_defaults"] = module.DEFAULT_CUE_MAPS
+            experiments = _experiments_module()
+            settings["experiments"] = _enabled_experiments(settings)
+            settings["experiment_catalog"] = experiments.CATALOG
             return json_response(self, settings)
+        if parsed.path == "/api/experiments/report":
+            return json_response(self, _experiments_module().score_tracks(_graded_tracks()))
+        if parsed.path == "/api/experiments/export":
+            tracks = _graded_tracks()
+            export = {"exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                      "report": _experiments_module().score_tracks(tracks), "tracks": tracks}
+            body = json.dumps(export, ensure_ascii=False, indent=1).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Disposition", 'attachment; filename="autocue-experiments.json"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/status":
             return json_response(self, {
                 "processor_configured": True,
@@ -1381,11 +1444,25 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"ok": True})
             if parsed.path == "/api/settings":
                 settings = self._body_json()
+                normalized_cue_maps = None
+                if "cue_maps" in settings:
+                    normalized_cue_maps = _cue_maps_module().normalize_cue_maps(settings["cue_maps"])
                 with connect() as db:
-                    db.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
-                                   ((key, str(value).lower() if isinstance(value, bool) else str(value))
-                                    for key, value in settings.items()
-                                    if key in ("gemini", "strictness")))
+                    if "gemini" in settings:
+                        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('gemini',?)",
+                                   (str(settings["gemini"]).lower(),))
+                    if "strictness" in settings:
+                        if settings["strictness"] not in ("relaxed", "standard", "strict"):
+                            raise ValueError("Review strictness must be relaxed, standard, or strict.")
+                        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('strictness',?)",
+                                   (settings["strictness"],))
+                    if "experiments" in settings:
+                        enabled = _experiments_module().normalize_enabled(settings["experiments"])
+                        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('experiments',?)",
+                                   (json.dumps(enabled),))
+                    if normalized_cue_maps is not None:
+                        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('cue_maps',?)",
+                                   (json.dumps(normalized_cue_maps),))
                 return json_response(self, {"ok": True})
             self.send_error(404)
         except (ValueError, OSError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError) as error:

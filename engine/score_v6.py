@@ -29,13 +29,13 @@ def load_marks(path):
 def label_valid(map_type, slot, label):
     if map_type == "DROP":
         expected = {
-            "A": r"INTRO -\d+BS", "B": r"START", "C": r"-32 DROP", "D": r"FIRST DROP",
-            "E": r"-32 LAST DROP", "F": r"LAST DROP", "G": r"GO -32", "H": r"OUTRO \d+",
+            "A": r"INTRO -\d+", "B": r"START", "C": r"-32 DROP", "D": r"FIRST DROP",
+            "E": r"-32 LAST DROP", "F": r"LAST DROP", "G": r"GO -32", "H": r"OUTRO -\d+",
         }
     else:
         expected = {
-            "A": r"INTRO -\d+BS", "B": r"START", "C": r"EXIT -32", "D": r"EXIT -16",
-            "E": r"EXIT/JUMP", "F": r"JUMP IN", "G": r"GO -32", "H": r"OUTRO \d+",
+            "A": r"INTRO -\d+", "B": r"START", "C": r"EXIT -32", "D": r"EXIT -16",
+            "E": r"EXIT/JUMP", "F": r"LAST CHORUS", "G": r"GO -32", "H": r"OUTRO -\d+",
         }
     return bool(re.fullmatch(expected[slot], str(label or "")))
 
@@ -48,13 +48,18 @@ def exact_label_slots(plan):
              for slot in SLOTS}
     intro = cues["A"]
     if intro.get("bar") is not None and cues["B"].get("bar") is not None:
-        match = re.fullmatch(r"INTRO -(\d+)BS", intro["name"])
+        match = re.fullmatch(r"INTRO -(\d+)", intro["name"])
         if not match or cues["B"]["bar"] - intro["bar"] != int(match.group(1)):
             exact["A"] = False
-    outro = re.fullmatch(r"OUTRO (\d+)", cues["H"]["name"])
+    outro = re.fullmatch(r"OUTRO -(\d+)", cues["H"]["name"])
     if outro and plan.get("outro_bars") is not None:
         if int(outro.group(1)) != plan["outro_bars"]:
             exact["H"] = False
+    resolved = plan.get("cue_map", {}).get("resolved", {})
+    if resolved:
+        for slot, spec in resolved.items():
+            if slot in exact:
+                exact[slot] = cues.get(slot, {}).get("name") == spec.get("label")
     return exact
 
 

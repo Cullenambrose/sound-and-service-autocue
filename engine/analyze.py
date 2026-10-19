@@ -414,7 +414,7 @@ def _run_lyrics(paths, artist, title):
 
 
 def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None, config_path=None,
-            switches=None):
+            switches=None, cue_maps=None, experiments=None):
     """Return a v6 plan dict for one audio file. `progress(step, state, detail)` is optional.
 
     state is one of running, done, skipped, failed. Raises AnalyzerMissing only for analyzers with no fallback.
@@ -482,14 +482,23 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
         hop = float(env["hop_s"])
     report("drops", "running", "")
     import rules_v6
+    import experiments as experiments_module
     config = rules_v6._load_json(str(config_path or HERE.parent / "config" / "genre_params_v6.json"),
                                  rules_v6.DEFAULT_CONFIG)
     if switches:
         config["switches"] = {**rules_v6.DEFAULT_CONFIG["switches"], **config.get("switches", {}), **switches}
-    plan = rules_v6.build_plan(
-        TRACK_ID, analysis, {"cues": {}}, duration, genre,
-        (words_record or {}).get("words"), (lyrics_record or {}).get("syncedLyrics"),
-        stems, feature["lo"].tolist(), hop, config, energy=feature["rms"].tolist(), fps=float(feature["fps"]))
+    low_raw = feature["lo"].tolist()
+    base_kwargs = dict(
+        track_id=TRACK_ID, analysis=analysis, plan={"cues": {}}, duration_s=duration, genre=genre,
+        words=(words_record or {}).get("words"), synced_lyrics=(lyrics_record or {}).get("syncedLyrics"),
+        stems=stems, low_energy=low_raw, hop_s=hop, config=config, energy=feature["rms"].tolist(),
+        fps=float(feature["fps"]), cue_maps=cue_maps)
+    plan = rules_v6.build_plan(**base_kwargs)
+    enabled = experiments_module.normalize_enabled(experiments)
+    context = {**base_kwargs, "low_energy_raw": low_raw, "paths": paths, "decoded_wav": decoded}
+    plan["variants"] = experiments_module.run_variants(base_kwargs, context, plan, enabled, rules_v6.build_plan)
+    plan["bar_energy"] = experiments_module.bar_energy_table(
+        stems, low_raw, base_kwargs["energy"], hop, float(feature["fps"]), grid, duration)
     report("drops", "done", plan.get("map_type", ""))
 
     report("cues", "running", "")

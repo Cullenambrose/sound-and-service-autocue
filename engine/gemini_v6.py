@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import urllib.request
+from cue_maps import MEANINGS, refresh_dynamic_labels
 
 MODEL = "gemini-3.1-pro-preview"
 PRICE_INPUT_PER_MILLION = 2.0
@@ -59,6 +60,8 @@ def apply(plan, answer, confidence_threshold=0.6):
         if slot not in plan["cues"] or not isinstance(response, dict):
             continue
         cue = plan["cues"][slot]
+        if len(cue.get("candidate_bars", [])) < 2:
+            continue
         pick = response.get("pick")
         if type(pick) is not int or pick not in cue.get("candidate_bars", []):
             continue
@@ -79,9 +82,9 @@ def apply(plan, answer, confidence_threshold=0.6):
         cue["bar"] = bar
         cue["time_s"] = (None if bar is None or not grid else
                          round(grid["t1"] + bar * grid["bar_s"] - grid.get("offset_ms", 0) / 1000, 3))
-        if label is not None:
+        if label is not None and not plan.get("cue_map"):
             cue["name"] = label
-    if plan.get("map_type") == "DROP":
+    if not plan.get("cue_map") and plan.get("map_type") == "DROP":
         if "D" in picks:
             first_drop = plan["cues"]["D"]["bar"]
             if plan.get("drops"):
@@ -111,7 +114,7 @@ def apply(plan, answer, confidence_threshold=0.6):
             plan["cues"]["E"]["candidate_bars"] = [] if plan["cues"]["E"]["bar"] is None else [plan["cues"]["E"]["bar"]]
             if plan["cues"]["E"]["bar"] is None:
                 plan["cues"]["E"].setdefault("flags", []).append("32-bar lead-in falls before track start")
-    else:
+    elif not plan.get("cue_map"):
         if "E" in picks:
             exit_bar = plan["cues"]["E"]["bar"]
             start = plan["cues"]["B"]["bar"]
@@ -122,11 +125,11 @@ def apply(plan, answer, confidence_threshold=0.6):
                                                         else [plan["cues"][slot]["bar"]])
                 if plan["cues"][slot]["bar"] is None:
                     plan["cues"][slot].setdefault("flags", []).append(f"EXIT -{bars} lands before START")
-    if "B" in picks:
+    if not plan.get("cue_map") and "B" in picks:
         intro = plan["cues"]["A"]["bar"]
         start = plan["cues"]["B"]["bar"]
         count = start - intro if intro is not None else 0
-        set_bar("A", intro if count > 0 else None, f"INTRO -{max(0, count)}BS")
+        set_bar("A", intro if count > 0 else None, f"INTRO -{max(0, count)}")
         if count <= 0:
             plan["cues"]["A"].setdefault("flags", []).append("no intro bar remains before START")
         if plan.get("map_type") == "VOCAL":
@@ -135,13 +138,73 @@ def apply(plan, answer, confidence_threshold=0.6):
                 if bar is not None and bar < start:
                     set_bar(slot, None)
                     plan["cues"][slot].setdefault("flags", []).append(f"{slot} lands before START after Gemini pick")
-    if "H" in picks:
+    if not plan.get("cue_map") and "H" in picks:
         outro_start = plan["cues"]["H"]["bar"]
         outro_bars = max(0, plan.get("bar_count", outro_start or 0) - outro_start) if outro_start is not None else 0
         plan["outro_bars"] = outro_bars
-        set_bar("H", outro_start, f"OUTRO {outro_bars}")
+        set_bar("H", outro_start, f"OUTRO -{outro_bars}")
         go = None if outro_start is None or outro_start - 32 < grid.get("first_bar", 0) else outro_start - 32
         set_bar("G", go, "GO -32")
+    if plan.get("cue_map"):
+        resolved = plan["cue_map"]["resolved"]
+        events = plan["cue_map"].get("candidates", {})
+        changed_events = {}
+        for slot in sorted(picks):
+            spec = resolved.get(slot)
+            if not spec:
+                continue
+            meaning = MEANINGS[spec["meaning"]]
+            event_bar = plan["cues"][slot]["bar"] - meaning["offset"]
+            if meaning["source"] in changed_events:
+                continue
+            if not 0 <= event_bar < plan.get("bar_count", event_bar + 1):
+                continue
+            changed_events[meaning["source"]] = event_bar
+
+        if len(plan.get("drops", [])) == 1:
+            if "first_drop_start" in changed_events:
+                changed_events.setdefault("last_drop_start", changed_events["first_drop_start"])
+            elif "last_drop_start" in changed_events:
+                changed_events.setdefault("first_drop_start", changed_events["last_drop_start"])
+
+        first_bar = grid.get("first_bar", 0)
+        for event_name, event_bar in changed_events.items():
+            if event_name in events:
+                events[event_name]["bar"] = event_bar
+            if grid:
+                event_time = round(grid["t1"] + event_bar * grid["bar_s"]
+                                   - grid.get("offset_ms", 0) / 1000, 3)
+            else:
+                event_time = None
+            if event_name == "first_drop_start" and plan.get("drops"):
+                plan["drops"][0]["bar"] = event_bar
+                plan["drops"][0]["time_s"] = event_time
+                if len(plan["drops"]) == 1:
+                    if "last_drop_start" in events:
+                        events["last_drop_start"]["bar"] = event_bar
+            elif event_name == "last_drop_start" and plan.get("drops"):
+                plan["drops"][-1]["bar"] = event_bar
+                plan["drops"][-1]["time_s"] = event_time
+                if len(plan["drops"]) == 1:
+                    if "first_drop_start" in events:
+                        events["first_drop_start"]["bar"] = event_bar
+            elif event_name == "outro_start":
+                plan["outro_bars"] = max(0, plan.get("bar_count", event_bar) - event_bar)
+
+            for slot, spec in resolved.items():
+                meaning = MEANINGS[spec["meaning"]]
+                if meaning["source"] != event_name or slot in picks:
+                    continue
+                bar = event_bar + meaning["offset"]
+                if not first_bar <= bar < plan.get("bar_count", bar + 1):
+                    bar = None
+                set_bar(slot, bar)
+                plan["cues"][slot]["candidate_bars"] = [] if bar is None else [bar]
+                if bar is None:
+                    plan["cues"][slot].setdefault("flags", []).append(
+                        f"{spec['meaning'].replace('_', ' ')} falls outside the track"
+                    )
+    refresh_dynamic_labels(plan)
     return picks
 
 

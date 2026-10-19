@@ -103,6 +103,17 @@ Steps (the chips on the page): Beats (Beat This) › Sections (all-in-one) › V
 - Beat This retries on CPU if MPS reports out-of-memory; it does not disable PyTorch's MPS memory limit. Downbeat fitting rejects local false/duplicate detections before building the beat grid.
 - **SongFormer license:** SongFormer's MuQ weights are licensed for non-commercial use only. They are optional and not installed by `setup.sh`; the pipeline runs fully without them, and a sellable version must keep them off.
 
+## Algorithm experiments (compare ideas on your own songs)
+
+Every analysis keeps the baseline v6 plan plus one plan per switched-on experiment, in `plan.variants`
+(see `engine/experiments.py`): low-band timing fix, fuzzy lyric matching, kick-snapped grid, stem-energy
+sections, and optional RoFormer vocals (slow; `pip install audio-separator`). Per-bar stem energies are saved
+in `plan.bar_energy`. In the review panel, toggle variant lanes and click a variant's time to use it. Save your
+review; saved cues are the answer key. **Experiments** in the top bar scores each variant (within one beat),
+split by VOCAL and DROP, with fixes and breaks vs baseline, and exports everything as JSON. Variants only exist for
+songs analyzed after an experiment is on, so re-analyze older songs. `rapidfuzz` is used for fuzzy matching when
+installed, with a `difflib` fallback. Genius lyrics are not included: they need an API key and have no timestamps.
+
 ## Serato writes
 
 Writes need a saved review, Serato closed, and a verified backup of the `_Serato_` folder and each song's original file. Supported formats: MP3, AIFF (ID3 `Serato Markers2`), FLAC (`SERATO_MARKERS_V2`) and M4A (`----:com.serato.dj:markersv2`). Other formats show "Write not supported yet". Foreign marker entries (loops, cues 9+) are preserved and the audio data is hash-checked before and after. **Undo this batch** restores one write; **Restore everything** (typed `RESTORE`) restores the song files and the `_Serato_` folder from a backup. FLAC and M4A writing follows the published Serato tag layout and is verified by read-back and audio-hash checks, but has not been opened in Serato itself.

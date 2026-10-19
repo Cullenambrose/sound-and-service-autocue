@@ -10,7 +10,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/"><span class="brand-mark">AC</span><span>AutoCue<small>LOCAL LIBRARY PREP</small></span></a>
-    <div class="top-actions"><span class="local-badge"><i></i> THIS MAC ONLY</span><button id="settings-open" class="quiet">Settings</button></div>
+    <div class="top-actions"><span class="local-badge"><i></i> THIS MAC ONLY</span><button id="cue-maps-open" class="quiet">Cue maps</button><button id="experiments-open" class="quiet">Experiments</button><button id="settings-open" class="quiet">Settings</button></div>
   </header>
   <main>
     <section class="hero">
@@ -31,7 +31,7 @@
         <canvas id="live-wave" height="90" aria-label="Live waveform"></canvas>
         <div id="live-chips" class="chips"></div>
       </div>
-      <div class="progress-track"><div id="progress-fill"></div></div>
+      <div class="progress-track"><canvas id="progress-fill" height="3" aria-hidden="true"></canvas></div>
       <div class="stage-foot"><span id="batch-message">Sound off · reduced motion respected</span><div class="stage-controls"><button id="job-pause" class="quiet" hidden>Pause</button><button id="job-resume" class="quiet" hidden>Resume</button><button id="job-cancel" class="quiet" hidden>Cancel</button><button id="sound-toggle" class="quiet">Sound: Off</button></div></div>
       <div id="victory" class="victory" hidden><div class="victory-star">✦</div><div><strong id="victory-title">Batch complete</strong><span id="victory-summary"></span></div><button id="start-review" class="button primary">Start review</button></div>
     </section>
@@ -75,6 +75,12 @@
   <dialog id="review-dialog" class="review-dialog">
     <div class="dialog-head"><div><span class="eyebrow">CUE REVIEW</span><h2 id="review-title"></h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
     <div class="wave-wrap"><canvas id="waveform" height="190"></canvas><div id="wave-legend" class="wave-legend"></div></div>
+    <section class="variant-panel" id="variant-panel" hidden>
+      <div class="variant-head"><strong>Algorithm variants</strong><span class="muted">Where each experiment would put the cues. Toggle lanes; click a time to use it.</span></div>
+      <div class="variant-chips" id="variant-chips"></div>
+      <canvas id="variant-lanes" height="10"></canvas>
+      <div class="variant-table-wrap"><table class="variant-table" id="variant-table"></table></div>
+    </section>
     <div class="audio-controls"><audio id="preview-audio" controls></audio><button id="finder-button" class="button secondary">Show in Finder</button></div>
     <div class="cue-edit-list" id="cue-edit-list"></div>
     <div class="review-actions"><span class="muted">Edits stay local and are saved as review corrections.</span><button id="save-cues" class="button primary">Save review</button></div>
@@ -84,6 +90,35 @@
     <label class="setting-row"><span><strong>Gemini tie-break</strong><small>Optional text-only tie-breaker; requires local API key.</small></span><input id="gemini-toggle" type="checkbox"></label>
     <label class="setting-row"><span><strong>Review strictness</strong><small>Lower confidence cues are marked for review.</small></span><select id="strictness"><option value="relaxed">Relaxed</option><option value="standard">Standard</option><option value="strict">Strict</option></select></label>
     <div class="dialog-foot"><span>Serato writes always require backup and a separate confirmation.</span><button id="settings-save" class="button primary">Save settings</button></div>
+  </dialog>
+  <dialog id="experiments-dialog" class="experiments-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">ALGORITHM LAB</span><h2>What is working?</h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <p class="cue-map-intro">Every analysis runs the baseline plus the experiments you switch on, and keeps all their cues. Review your songs as usual: your saved cues are the answer key. Newly switched-on experiments apply to songs you analyze or re-analyze next.</p>
+    <div class="experiment-list" id="experiment-list"></div>
+    <div class="experiment-report" id="experiment-report"></div>
+    <div class="dialog-foot"><a id="experiment-export" class="button secondary" href="/api/experiments/export" download="autocue-experiments.json">Export all data</a><button id="experiments-save" class="button primary">Save experiment choices</button></div>
+  </dialog>
+  <dialog id="cue-map-dialog" class="cue-map-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">YOUR WORKFLOW · CUE MAPS</span><h2>Make every cue yours.</h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <p class="cue-map-intro">Choose what each pad finds, what it says, and its Serato color. These defaults apply to new analyses; existing tracks change only when re-analyzed.</p>
+    <div class="cue-map-toolbar">
+      <div class="map-tabs" role="tablist" aria-label="Cue map">
+        <button class="map-tab active" data-map-tab="VOCAL" role="tab" aria-selected="true">Chorus &amp; vocals</button>
+        <button class="map-tab" data-map-tab="DROP" role="tab" aria-selected="false">Electronic &amp; drops</button>
+      </div>
+      <label class="map-mode">Choose automatically
+        <select id="cue-map-mode" aria-label="Cue map selection">
+          <option value="AUTO">Auto-select map</option><option value="VOCAL">Always use vocal map</option><option value="DROP">Always use electronic map</option>
+        </select>
+      </label>
+    </div>
+    <div id="cue-map-summary" class="cue-map-summary"></div>
+    <div id="cue-map-rows" class="cue-map-rows"></div>
+    <div class="serato-color-note"><span class="serato-color-sample"></span><span><strong>Serato colors, matched.</strong> Palette swatches show the Pro/Lite appearance; saved metadata uses Serato’s corresponding RGB value.</span></div>
+    <div class="cue-map-footer">
+      <button id="cue-map-defaults" class="quiet">Restore defaults</button><button id="cue-map-copy" class="quiet">Copy this map to the other tab</button>
+      <span class="spacer"></span><button id="cue-map-cancel" class="button secondary">Cancel</button><button id="cue-map-save" class="button primary">Save cue maps</button>
+    </div>
   </dialog>
   <dialog id="crate-dialog" class="settings-dialog">
     <div class="dialog-head"><div><span class="eyebrow">READ-ONLY SERATO CRATE</span><h2 id="crate-title"></h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
