@@ -1,0 +1,23 @@
+{
+  "_doc": "Switchable v6 cue-map and drop-detection settings. DROP classification requires a confident audio drop and a matching genre tag or configured BPM range.",
+  "switches": {
+    "synced_lyrics": true,
+    "drop_detection": true,
+    "genre_map": true,
+    "gemini_tiebreaker": false
+  },
+  "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco"],
+  "drop_bpm_range": [118, 150],
+  "drop_min_confidence": 0.65,
+  "drop_phrase_bars": 8,
+  "drop_recovery_ratio": 1.8,
+  "genres": {
+    "house_edm": {"phrase_bars": 32},
+    "hiphop_rnb": {"phrase_bars": 16},
+    "pop": {"phrase_bars": 8},
+    "latin": {"phrase_bars": 16},
+    "other": {"phrase_bars": 8}
+  },
+  "gemini_confidence_threshold": 0.6,
+  "gemini_spend_cap_usd": 3.0
+}

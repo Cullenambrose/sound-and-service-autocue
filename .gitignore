@@ -99,3 +99,4 @@ genre_tags.json
 # Local run state
 stats.json
 *.log
+web-data/

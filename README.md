@@ -27,6 +27,7 @@ Full rules: `docs/cue-logic.md`, `docs/SPEC.md`.
 ```
 engine/           Python/shell tools (rules, scorers, Gemini step, learners, stress5/)
 review-ui/        Local review page (index.html + serve.py)
+web/              Local web library, crate browser, review panel, and backup-gated MP3 writes
 docs/             Specs, scores, install notes, Google Serato handover
 config/           Learned profiles + genre bucket params (no keys)
 ```
@@ -36,14 +37,25 @@ config/           Learned profiles + genre bucket params (no keys)
 1. Install analyzers per `docs/INSTALL.md` and `docs/SONGFORMER-ON-MAC.md` (SongFormer needs disk space on the Mac).
 2. Set `GEMINI_API_KEY` in the environment when you want AI suggestions on low-confidence cues. Never commit the key.
 3. Source `engine/env.sh` (adjust `PROOF` to your checkout) and run the pipeline scripts under `engine/` (e.g. feature extract → `rules_v5.py` / build → review).
-4. Open the review UI:
+4. Start the local web library and review interface:
 
 ```bash
-cd review-ui
-HOST=127.0.0.1 python3 serve.py   # default port 8765
+./run.sh
 ```
 
-Corrections stay local (`corrections.json` is gitignored). Feed them back through the learner scripts to tune the profile in `config/`.
+Open `http://127.0.0.1:8770`. The app keeps its SQLite library, staged audio copies, jobs, and corrections in the ignored `web-data/` directory. It binds only to loopback. Music is not uploaded; dragged/picked files are copied to the local app for analysis and their originals are left in place. Paste a local folder path or use the crate picker to link originals for Finder access and Serato writes.
+
+Install the small Serato-tag dependency once to enable backed-up writes:
+
+```bash
+python3 -m pip install -r web/requirements.txt
+```
+
+The crate browser reads Serato `.crate` files under `~/Music/_Serato_/Subcrates` and mounted `/Volumes/*/_Serato_/Subcrates` folders without editing them. Serato writes are MP3-only, require a locally linked original, require a saved review, and require Serato to be closed. Each batch first zips discovered `_Serato_` folders and exact original MP3 files to `~/Music/AutoCue Backups/`; the app verifies the archive and hashes before writing. Undo restores the exact originals only when files still match the post-write hashes. The Serato `_Serato_` folders are backed up but are not changed by this app.
+
+**Fresh-audio processing is not yet wired to the web job runner.** The v6 planner consumes cached v5 analysis; the repository has no portable one-file pipeline that turns a newly imported arbitrary file into that cache. Until that integration is added, queued jobs report this limitation in the track row rather than inventing cues. The runner can invoke an explicitly configured `AUTOCUE_PROCESSOR` argv command; each command argument may contain `{input}`, `{output}`, or `{hash}` placeholders, and the processor must write v6 JSON with a `cues` object to `{output}`. This is an integration seam, not a built-in engine command.
+
+Corrections stay local in `web-data/corrections.json` (the standalone review UI's `corrections.json` is also gitignored). Feed the marks back through the learner scripts to tune the profile in `config/`.
 
 ## Ground truth
 
@@ -70,3 +82,7 @@ Corrections stay local (`corrections.json` is gitignored). Feed them back throug
 ## Status
 
 See `docs/STATUS.md` for current scores, the v5 ablation, and the 5-crate stress run.
+
+## v6 (separate, switchable plan)
+
+`engine/rules_v6.py` reads cached v5 analysis and writes a separate eight-cue DROP or VOCAL plan. The switch defaults and genre phrase lengths are in `config/genre_params_v6.json`. It does not change v5 defaults or write to Serato/audio. Synced LRCLIB lookups and WhisperX word timings are cacheable from a manifest; Gemini is an explicit opt-in (`engine/gemini_v6.py --enable`) and is disabled by default. Review data can be built beside v5 with `engine/build_v6_review.py`; usage and scoring are in `docs/ANALYSIS-FORMAT.md`.
