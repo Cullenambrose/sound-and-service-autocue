@@ -170,14 +170,31 @@ def compute_features(wav_path, out_path):
 
 
 def fit_grid(downbeats):
-    """Least-squares bar grid through Beat This downbeats: t1 is bar 0, bar_s the bar length."""
+    """Fit a bar grid robustly to Beat This output, excluding local spurious downbeats."""
     import numpy as np
     if len(downbeats) < 4:
         raise RuntimeError("Beat This found fewer than 4 downbeats; no reliable bar grid for this track.")
     times = np.asarray(downbeats, dtype=float)
-    index = np.arange(len(times))
-    slope, intercept = np.polyfit(index, times, 1)
-    residual = float(np.abs(times - (slope * index + intercept)).max())
+    intervals = np.diff(times)
+    plausible = intervals[(intervals >= 1.0) & (intervals <= 3.0)]
+    if len(plausible) < 3:
+        raise RuntimeError("Beat This downbeats are too irregular to fit a reliable bar grid.")
+    bar_s = float(np.median(plausible))
+    phases = np.mod(times, bar_s)
+    tolerance = max(0.08, min(0.14, bar_s * 0.06))
+    phase_differences = np.abs(phases[:, None] - phases[None, :])
+    phase_differences = np.minimum(phase_differences, bar_s - phase_differences)
+    counts = np.sum(phase_differences <= tolerance, axis=1)
+    phase = float(phases[int(np.argmax(counts))])
+    signed = ((times - phase + bar_s / 2) % bar_s) - bar_s / 2
+    inliers = np.abs(signed) <= tolerance
+    if int(inliers.sum()) < 4:
+        raise RuntimeError("Beat This downbeats do not form a stable bar-grid phase.")
+    bars = np.rint((times[inliers] - phase) / bar_s)
+    slope, intercept = np.polyfit(bars, times[inliers], 1)
+    residual = float(np.median(np.abs(times[inliers] - (slope * bars + intercept))))
+    if not 1.0 <= slope <= 3.0 or residual > tolerance:
+        raise RuntimeError("Beat This downbeats do not form a reliable bar grid.")
     return {"source": "beat_this_downbeats", "t1": round(float(intercept), 4), "bar_s": round(float(slope), 5),
             "bpm": round(240.0 / float(slope), 3), "offset_ms": 0.0, "fit": round(residual, 4)}
 
@@ -188,8 +205,18 @@ def _run_beats(source_wav, paths):
     if not available("beat_this"):
         raise AnalyzerMissing("beat_this")
     from beat_this.inference import File2Beats
-    beats, downbeats = File2Beats(checkpoint_path="final0", device=torch_device(), dbn=False)(str(source_wav))
+    device = torch_device()
+    try:
+        beats, downbeats = File2Beats(checkpoint_path="final0", device=device, dbn=False)(str(source_wav))
+    except RuntimeError as error:
+        if device != "mps" or "out of memory" not in str(error).casefold():
+            raise
+        import torch
+        torch.mps.empty_cache()
+        device = "cpu"
+        beats, downbeats = File2Beats(checkpoint_path="final0", device=device, dbn=False)(str(source_wav))
     record = {"engine": "beat_this", "checkpoint": "final0", "dbn": False,
+              "device": device,
               "beats": [round(float(value), 4) for value in beats],
               "downbeats": [round(float(value), 4) for value in downbeats]}
     _write_json(paths.beats, record)
@@ -255,17 +282,98 @@ def vocal_onsets(paths, threshold_ratio=0.15, min_gap_s=1.0):
     return onsets
 
 
+def _install_allin1_compat():
+    import collections
+    import collections.abc
+    import numpy as np
+
+    for name in ("MutableSequence", "MutableMapping", "MutableSet", "Sequence", "Mapping", "Set"):
+        if not hasattr(collections, name):
+            setattr(collections, name, getattr(collections.abc, name))
+    for name, value in (("float", float), ("int", int), ("complex", complex)):
+        if not hasattr(np, name):
+            setattr(np, name, value)
+
+    import natten.functional as functional
+    import torch
+
+    def indices_1d(length, kernel_size, dilation, device):
+        positions = torch.arange(length, device=device)
+        radius = kernel_size // 2
+        max_start = max(0, length - 1 - (kernel_size - 1) * dilation)
+        starts = (positions - radius * dilation).clamp(0, max_start)
+        neighbors = starts[:, None] + torch.arange(kernel_size, device=device)[None, :] * dilation
+        relative = (neighbors - positions[:, None]) // dilation + radius
+        return neighbors.long(), relative.long()
+
+    def na1d_qk(query, key, rpb, kernel_size, dilation):
+        batch, heads, length, width = query.shape
+        neighbors, relative = indices_1d(length, kernel_size, dilation, query.device)
+        gather = neighbors.reshape(1, 1, length * kernel_size, 1).expand(batch, heads, length * kernel_size, width)
+        local_keys = torch.gather(key, 2, gather).reshape(batch, heads, length, kernel_size, width)
+        scores = (query.unsqueeze(-2) * local_keys).sum(-1)
+        return scores + rpb[:, relative].unsqueeze(0)
+
+    def na1d_av(attention, value, kernel_size, dilation):
+        batch, heads, length, width = value.shape
+        neighbors, _ = indices_1d(length, kernel_size, dilation, value.device)
+        gather = neighbors.reshape(1, 1, length * kernel_size, 1).expand(batch, heads, length * kernel_size, width)
+        local_values = torch.gather(value, 2, gather).reshape(batch, heads, length, kernel_size, width)
+        return (attention.unsqueeze(-1) * local_values).sum(-2)
+
+    def indices_2d(height, width, kernel_size, dilation, device):
+        positions_y = torch.arange(height, device=device)
+        positions_x = torch.arange(width, device=device)
+        radius = kernel_size // 2
+        max_y = max(0, height - 1 - (kernel_size - 1) * dilation)
+        max_x = max(0, width - 1 - (kernel_size - 1) * dilation)
+        starts_y = (positions_y - radius * dilation).clamp(0, max_y)
+        starts_x = (positions_x - radius * dilation).clamp(0, max_x)
+        neighbors_y = starts_y[:, None] + torch.arange(kernel_size, device=device)[None, :] * dilation
+        neighbors_x = starts_x[:, None] + torch.arange(kernel_size, device=device)[None, :] * dilation
+        relative_y = (neighbors_y - positions_y[:, None]) // dilation + radius
+        relative_x = (neighbors_x - positions_x[:, None]) // dilation + radius
+        linear = (neighbors_y[:, None, :, None] * width + neighbors_x[None, :, None, :]).reshape(
+            height * width, kernel_size * kernel_size)
+        rel_y = relative_y[:, None, :, None].expand(height, width, kernel_size, kernel_size)
+        rel_x = relative_x[None, :, None, :].expand(height, width, kernel_size, kernel_size)
+        return linear.long(), rel_y.reshape(height * width, -1).long(), rel_x.reshape(height * width, -1).long()
+
+    def na2d_qk(query, key, rpb, kernel_size, dilation):
+        batch, heads, height, width, channels = query.shape
+        neighbors, relative_y, relative_x = indices_2d(height, width, kernel_size, dilation, query.device)
+        length, count = neighbors.shape
+        query_flat = query.reshape(batch, heads, length, channels)
+        key_flat = key.reshape(batch, heads, length, channels)
+        gather = neighbors.reshape(1, 1, length * count, 1).expand(batch, heads, length * count, channels)
+        local_keys = torch.gather(key_flat, 2, gather).reshape(batch, heads, length, count, channels)
+        scores = (query_flat.unsqueeze(-2) * local_keys).sum(-1)
+        bias = rpb[:, relative_y, relative_x].reshape(heads, length, count)
+        return (scores + bias.unsqueeze(0)).reshape(batch, heads, height, width, count)
+
+    def na2d_av(attention, value, kernel_size, dilation):
+        batch, heads, height, width, channels = value.shape
+        neighbors, _, _ = indices_2d(height, width, kernel_size, dilation, value.device)
+        length, count = neighbors.shape
+        value_flat = value.reshape(batch, heads, length, channels)
+        gather = neighbors.reshape(1, 1, length * count, 1).expand(batch, heads, length * count, channels)
+        local_values = torch.gather(value_flat, 2, gather).reshape(batch, heads, length, count, channels)
+        result = (attention.reshape(batch, heads, length, count).unsqueeze(-1) * local_values).sum(-2)
+        return result.reshape(batch, heads, height, width, channels)
+
+    for name, implementation in (
+        ("natten1dqkrpb", na1d_qk), ("natten1dav", na1d_av),
+        ("natten2dqkrpb", na2d_qk), ("natten2dav", na2d_av),
+    ):
+        if not hasattr(functional, name):
+            setattr(functional, name, implementation)
+
+
 def _run_sections(source_wav, paths):
     if paths.sections.exists():
         return _read_json(paths.sections)
     if available("allin1"):
-        # madmom (a transitive allin1 dependency) still imports old collections aliases.
-        # Provide them at runtime so sectioning can run on modern Python versions.
-        import collections
-        import collections.abc
-        for name in ("MutableSequence", "MutableMapping", "MutableSet", "Sequence", "Mapping", "Set"):
-            if not hasattr(collections, name):
-                setattr(collections, name, getattr(collections.abc, name))
+        _install_allin1_compat()
         import allin1
         # Reuses the Demucs stems already separated for this file (vocals step runs first).
         result = allin1.analyze(str(source_wav), out_dir=None, device="cpu", keep_byproducts=True,
@@ -401,7 +509,8 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
         for cue in plan.get("cues", {}).values():
             if cue.get("confidence") is not None:
                 cue["confidence"] = round(min(float(cue["confidence"]), 0.9), 3)
-    plan["pipeline"] = {"hash": digest, "device": torch_device(), "vocal_onsets": onsets[:50],
+    plan["pipeline"] = {"hash": digest, "device": (beats or {}).get("device", torch_device()),
+                        "vocal_onsets": onsets[:50],
                         "step_seconds": timings, "notes": notes, "total_s": round(time.time() - started, 2),
                         "analyzers": environment_report()}
     _write_json(paths.meta, plan["pipeline"])

@@ -102,6 +102,56 @@ class AnalyzeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             analyze.fit_grid([1, 2])
 
+    def test_grid_fit_ignores_local_false_downbeats_and_missing_bars(self):
+        true_downbeats = [0.32 + 1.96 * i for i in range(120) if i not in (16, 62)]
+        false_cluster = [89.28, 90.74, 90.84, 91.32, 91.72, 91.82, 92.8, 93.78, 94.68, 94.76, 95.24, 96.72]
+        grid = analyze.fit_grid(sorted(true_downbeats + false_cluster))
+        self.assertAlmostEqual(grid["bar_s"], 1.96, places=2)
+        self.assertAlmostEqual(grid["t1"], 0.32, places=2)
+        self.assertLess(grid["fit"], 0.05)
+
+    @unittest.skipUnless(analyze.available("torch"), "Torch is required for NATTEN compatibility tests.")
+    def test_allin1_legacy_attention_compatibility(self):
+        import torch
+        analyze._install_allin1_compat()
+        from natten import functional
+
+        q1 = torch.randn(1, 2, 7, 4)
+        bias1 = torch.zeros(2, 5)
+        scores1 = functional.natten1dqkrpb(q1, q1, bias1, 3, 1)
+        context1 = functional.natten1dav(torch.softmax(scores1, -1), q1, 3, 1)
+        self.assertEqual(tuple(scores1.shape), (1, 2, 7, 3))
+        self.assertEqual(tuple(context1.shape), tuple(q1.shape))
+
+        q2 = torch.randn(1, 2, 4, 5, 3)
+        bias2 = torch.zeros(2, 5, 5)
+        scores2 = functional.natten2dqkrpb(q2, q2, bias2, 3, 1)
+        context2 = functional.natten2dav(torch.softmax(scores2, -1), q2, 3, 1)
+        self.assertEqual(tuple(scores2.shape), (1, 2, 4, 5, 9))
+        self.assertEqual(tuple(context2.shape), tuple(q2.shape))
+
+    @unittest.skipUnless(analyze.available("torch"), "Torch is required for MPS fallback tests.")
+    def test_beat_this_retries_on_cpu_after_mps_out_of_memory(self):
+        import torch
+
+        class FakeBeatThis:
+            def __init__(self, checkpoint_path, device, dbn):
+                self.device = device
+
+            def __call__(self, _path):
+                if self.device == "mps":
+                    raise RuntimeError("MPS backend out of memory")
+                return [0.1, 0.6, 1.1, 1.6], [0.1, 2.1, 4.1, 6.1]
+
+        paths = analyze.Paths(Path(self.tmp.name) / "beat-cache")
+        with patch("analyze.torch_device", return_value="mps"), \
+                patch("beat_this.inference.File2Beats", side_effect=FakeBeatThis), \
+                patch.object(torch.mps, "empty_cache") as empty_cache:
+            record = analyze._run_beats(Path(self.tmp.name) / "input.wav", paths)
+        self.assertEqual(record["device"], "cpu")
+        self.assertEqual(len(record["downbeats"]), 4)
+        empty_cache.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

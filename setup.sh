@@ -48,8 +48,15 @@ $PIP install "https://github.com/CPJKU/beat_this/archive/main.zip"   # beats and
 $PIP install demucs                                                   # stems (vocals, drums, bass)
 
 # Optional analyzers: each failure is reported, and the pipeline falls back (lower confidence).
-$PIP install whisperx || echo "WARNING: WhisperX failed. Lyrics will use LRCLIB text and vocal onsets only."
+$PIP install "whisperx==3.3.1" || echo "WARNING: WhisperX failed. Lyrics will use LRCLIB text and vocal onsets only."
 $PIP install allin1 || echo "WARNING: allin1 failed. Section labels are unavailable (cues are capped to 'Needs a look')."
+$PIP install cython
+$PIP install --no-build-isolation madmom || echo "WARNING: madmom failed. allin1 section analysis is unavailable."
+
+# SciPy 1.15+ PROPACK does not load on macOS 27's bundled Python ABI; 1.14.1 is verified here.
+# NumPy remains >=2.1 for WhisperX, and <2.3 for the SciPy 1.14 binary interface.
+$PIP install "pyannote-metrics>=3.2,<4.0"
+$PIP install "numpy>=2.1,<2.3" "scipy==1.14.1"
 
 echo "SongFormer is optional and not installed here. Its MuQ weights are non-commercial; see README."
 
