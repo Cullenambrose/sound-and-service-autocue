@@ -478,7 +478,7 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
     hop = 0.05
     if paths.stems_env.exists():
         env = np.load(paths.stems_env)
-        stems = {key: env[key].tolist() for key in ("drums", "bass") if key in env}
+        stems = {key: env[key].tolist() for key in ("drums", "bass", "vocals") if key in env}
         hop = float(env["hop_s"])
     report("drops", "running", "")
     import rules_v6

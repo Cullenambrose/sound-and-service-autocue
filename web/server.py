@@ -28,9 +28,14 @@ UPLOADS = DATA / "audio"
 DB_PATH = DATA / "library.sqlite3"
 ALLOWED = {".wav", ".mp3", ".m4a", ".flac", ".aiff", ".aif", ".ogg", ".opus"}
 SLOT_NAMES = {
-    "A": "INTRO", "B": "START", "C": "CHORUS", "D": "LAST CHORUS",
+    "A": "INTRO", "B": "START", "C": "EXIT -32", "D": "EXIT -16",
     "E": "EXIT/JUMP", "F": "JUMP IN", "G": "GO -32", "H": "OUTRO",
 }
+DROP_SLOT_NAMES = {
+    "A": "INTRO", "B": "START", "C": "-32 DROP", "D": "FIRST DROP",
+    "E": "-32 LAST DROP", "F": "LAST DROP", "G": "GO -32", "H": "OUTRO",
+}
+LEGACY_CUE_NAMES = {"CHORUS", "LAST CHORUS"}
 COLORS = {
     "A": "#38bdf8", "B": "#22c55e", "C": "#a78bfa", "D": "#f472b6",
     "E": "#fb7185", "F": "#facc15", "G": "#2dd4bf", "H": "#f97316",
@@ -114,6 +119,7 @@ def initialize():
 def track_record(row):
     plan = json.loads(row["plan_json"]) if row["plan_json"] else {}
     cues = plan.get("cues", {})
+    names = _slot_names(plan.get("map_type", "VOCAL"))
     return {
         "hash": row["hash"],
         "name": row["name"],
@@ -132,7 +138,7 @@ def track_record(row):
         "bar_s": plan.get("grid", {}).get("bar_s"),
         "cues": {
             slot: {
-                "name": cues.get(slot, {}).get("name") or SLOT_NAMES[slot],
+                "name": _cue_name(cues.get(slot, {}).get("name"), slot, names),
                 "bar": cues.get(slot, {}).get("bar"),
                 "confidence": cues.get(slot, {}).get("confidence"),
                 "reason": cues.get(slot, {}).get("reason", ""),
@@ -140,6 +146,15 @@ def track_record(row):
         },
         "url": "/media/" + row["hash"],
     }
+
+
+def _slot_names(map_type):
+    return DROP_SLOT_NAMES if str(map_type).upper() == "DROP" else SLOT_NAMES
+
+
+def _cue_name(name, slot, names):
+    value = str(name or "").strip()
+    return names[slot] if not value or value.upper() in LEGACY_CUE_NAMES else value
 
 
 def _mean_confidence(cues):
@@ -335,6 +350,7 @@ def _cue_binary(cues, plan, existing_data=None):
     entries = _marker2_entries(existing_data)
     entries = [(name, payload) for name, payload in entries
                if name != "CUE" or len(payload) < 2 or payload[1] not in range(8)]
+    names = _slot_names(plan.get("map_type", "VOCAL"))
     t1 = float(plan.get("grid", {}).get("t1", 0))
     bar_s = float(plan.get("grid", {}).get("bar_s", 0))
     if not math.isfinite(t1) or not math.isfinite(bar_s) or bar_s <= 0:
@@ -351,7 +367,7 @@ def _cue_binary(cues, plan, existing_data=None):
         if position >= 0xFFFFFFFF:
             raise ValueError(f"Cue {slot} exceeds Serato's supported timestamp.")
         color = tuple(int(SLOT_HEX[index][offset:offset + 2], 16) for offset in (1, 3, 5))
-        label = str(cue.get("name") or SLOT_NAMES[slot]).encode("utf-8")[:120] + b"\x00"
+        label = _cue_name(cue.get("name"), slot, names).encode("utf-8")[:120] + b"\x00"
         payload = (bytes((0, index)) + position.to_bytes(4, "big") + bytes((0, *color, 0, 0)) + label)
         entries.append(("CUE", payload))
     raw = bytearray(b"\x01\x01")
@@ -1391,6 +1407,7 @@ class Handler(BaseHTTPRequestHandler):
                 plan = json.loads(row["plan_json"]) if row["plan_json"] else {
                     "map_type": body.get("map_type", "VOCAL"), "cues": {},
                 }
+                fallback_names = _slot_names(plan.get("map_type", "VOCAL"))
                 grid = plan.get("grid", {})
                 if grid.get("t1") is None or not grid.get("bar_s"):
                     raise ValueError("Analyze this track and build its beat grid before saving a cue review.")
@@ -1402,7 +1419,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Unknown cue slot: " + slot)
                     cue = plan.setdefault("cues", {}).setdefault(slot, {})
                     old_name, old_bar = cue.get("name"), cue.get("bar")
-                    new_name = str(edit.get("name", SLOT_NAMES[slot]))[:80]
+                    new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names)[:80]
                     new_bar = float(edit["bar"]) if edit.get("bar") not in (None, "") else None
                     if new_bar is not None and (not math.isfinite(new_bar) or new_bar < 0):
                         raise ValueError(f"Cue {slot} bar must be a finite non-negative number.")

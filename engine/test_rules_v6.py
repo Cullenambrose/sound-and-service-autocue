@@ -117,6 +117,57 @@ class V6RulesTests(unittest.TestCase):
         self.assertEqual(result["cues"]["A"]["name"], "INTRO -8BS")
         self.assertEqual(result["cues"]["A"]["bar"], 0)
 
+    def test_energy_fade_infers_low_confidence_outro_and_go_32(self):
+        analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 128}]}
+        energy = [1.0] * (128 * 10)
+        for frame in range(56 * 2 * 10, len(energy)):
+            energy[frame] = 0.25
+
+        result = build_plan("fade", analysis, {"cues": {"B": {"bar": 8}}}, 128,
+                            genre="pop", config=self.config, energy=energy, fps=10)
+
+        self.assertEqual(result["cues"]["H"]["bar"], 56)
+        self.assertEqual(result["cues"]["G"]["bar"], 24)
+        self.assertLess(result["cues"]["H"]["confidence"], 0.6)
+        self.assertLess(result["cues"]["G"]["confidence"], 0.6)
+        self.assertTrue(any("outro inferred from" in flag for flag in result["flags"]))
+        self.assertIn("outro inferred from energy/vocal fade", result["cues"]["H"]["flags"])
+
+    def test_stable_energy_does_not_invent_outro(self):
+        analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 128}]}
+        result = build_plan("stable", analysis, {"cues": {"B": {"bar": 8}}}, 128,
+                            genre="pop", config=self.config, energy=[1.0] * 1280, fps=10)
+
+        self.assertIsNone(result["cues"]["H"]["bar"])
+        self.assertIsNone(result["cues"]["G"]["bar"])
+        self.assertEqual(result["cues"]["H"]["confidence"], 0.0)
+
+    def test_vocal_fade_can_infer_outro_when_full_mix_does_not_fade(self):
+        analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 128}]}
+        vocals = [1.0] * int(128 / 0.05)
+        for frame in range(int(112 / 0.05), len(vocals)):
+            vocals[frame] = 0.2
+        result = build_plan("vocal-fade", analysis, {"cues": {"B": {"bar": 8}}}, 128,
+                            genre="pop", config=self.config, energy=[1.0] * 1280, fps=10,
+                            stems={"vocals": vocals}, hop_s=0.05)
+
+        self.assertEqual(result["cues"]["H"]["bar"], 56)
+        self.assertLess(result["cues"]["H"]["confidence"], 0.6)
+        self.assertIn("outro inferred from energy/vocal fade", result["cues"]["H"]["flags"])
+
+    def test_inferred_outro_and_go_32_stay_inside_track_bounds(self):
+        analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 70}]}
+        energy = [1.0] * 700
+        for frame in range(60 * 10, len(energy)):
+            energy[frame] = 0.2
+        result = build_plan("short-fade", analysis, {"cues": {"B": {"bar": 8}}}, 70,
+                            genre="pop", config=self.config, energy=energy, fps=10)
+
+        self.assertLess(result["cues"]["H"]["bar"], result["bar_count"])
+        self.assertLess(result["cues"]["H"]["time_s"], 70)
+        self.assertTrue(result["cues"]["G"]["bar"] is None or
+                        0 <= result["cues"]["G"]["bar"] < result["bar_count"])
+
     def test_timed_lyrics_alignment_handles_offset_and_tempo(self):
         text = "[00:00.00] hello there friend\n[00:02.00] we sing this line\n[00:20.00] hello there friend\n[00:22.00] we sing this line"
         words = []

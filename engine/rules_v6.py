@@ -208,6 +208,65 @@ def _snap_phrase(bar, anchor, phrase_bars=4):
     return int(anchor + round((bar - anchor) / phrase_bars) * phrase_bars)
 
 
+def _detect_fade_outro(energy, fps, grid, duration_s, start_bar, phrase_bars, vocal_energy=None,
+                       vocal_hop_s=0.05):
+    """Find a sustained end-of-track fade in the final 32 bars, aligned to a phrase."""
+    if energy is None or len(energy) == 0 or fps <= 0 or grid["bar_s"] <= 0:
+        return None
+    bar_count = max(0, int(math.ceil((duration_s - grid["t1"]) / grid["bar_s"])))
+    first_candidate = max(start_bar, bar_count - 32)
+    means = {}
+    for bar in range(first_candidate, bar_count):
+        left = max(0, int((grid["t1"] + bar * grid["bar_s"]) * fps))
+        right = min(len(energy), int((grid["t1"] + (bar + 1) * grid["bar_s"]) * fps))
+        if right > left:
+            values = energy[left:right]
+            means[bar] = math.sqrt(sum(float(value) ** 2 for value in values) / len(values))
+    vocal_means = {}
+    if vocal_energy is not None and len(vocal_energy) and vocal_hop_s > 0:
+        for bar in range(first_candidate, bar_count):
+            left = max(0, int((grid["t1"] + bar * grid["bar_s"]) / vocal_hop_s))
+            right = min(len(vocal_energy), int((grid["t1"] + (bar + 1) * grid["bar_s"]) / vocal_hop_s))
+            if right > left:
+                values = vocal_energy[left:right]
+                vocal_means[bar] = math.sqrt(sum(float(value) ** 2 for value in values) / len(values))
+
+    # Require a real sustained drop against the preceding four-bar level. A single quiet
+    # phrase or one final partial bar is not enough to claim a fade.
+    for bar in range(first_candidate, bar_count - 1):
+        previous = [means.get(index) for index in range(bar - 4, bar) if means.get(index) is not None]
+        tail = [means.get(index) for index in range(bar, bar_count) if means.get(index) is not None]
+        if len(previous) < 3 or len(tail) < 2:
+            continue
+        baseline = sorted(previous)[len(previous) // 2]
+        tail_level = sum(tail) / len(tail)
+        head_level = sum(tail[:2]) / min(2, len(tail))
+        full_mix_fade = (baseline > 1e-6 and head_level <= baseline * 0.98 and tail_level <= baseline * 0.68
+                         and min(tail[-2:]) <= baseline * 0.55)
+
+        vocal_previous = [vocal_means.get(index) for index in range(bar - 4, bar)
+                          if vocal_means.get(index) is not None]
+        vocal_tail = [vocal_means.get(index) for index in range(bar, bar_count)
+                      if vocal_means.get(index) is not None]
+        vocal_fade = False
+        if len(vocal_previous) >= 3 and len(vocal_tail) >= 2:
+            vocal_baseline = sorted(vocal_previous)[len(vocal_previous) // 2]
+            vocal_head = sum(vocal_tail[:2]) / min(2, len(vocal_tail))
+            vocal_fade = (vocal_baseline > 1e-6 and vocal_head <= vocal_baseline * 0.98
+                          and sum(vocal_tail) / len(vocal_tail) <= vocal_baseline * 0.5
+                          and min(vocal_tail[-2:]) <= vocal_baseline * 0.35)
+        if not (full_mix_fade or vocal_fade):
+            continue
+
+        snapped = _snap_phrase(bar, start_bar, max(1, phrase_bars))
+        if snapped >= bar_count:
+            snapped = start_bar + ((bar_count - 1 - start_bar) // max(1, phrase_bars)) * max(1, phrase_bars)
+        if snapped < first_candidate or snapped < start_bar:
+            continue
+        return snapped
+    return None
+
+
 def _genre_is_drop(genre, bpm, config):
     lowered = (genre or "").casefold()
     if any(token in lowered for token in config["drop_genres"]):
@@ -274,11 +333,16 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     map_type = "DROP" if is_drop else "VOCAL"
     outro = next((section for section in analysis.get("segments", analysis.get("sections", []))
                   if "outro" in _normal_label(section)), None)
+    fallback_outro = False
     if outro is not None:
         outro_start, _ = _section_bars(outro, grid)
         outro_start = max(first_bar, outro_start)
     else:
-        outro_start = None
+        outro_start = _detect_fade_outro(
+            energy, fps, grid, duration_s, start, genre_phrase_bars,
+            (stems or {}).get("vocals"), hop_s,
+        )
+        fallback_outro = outro_start is not None
     lyric_choruses = []
     if lyric_alignment and lyric_alignment.get("status") == "aligned":
         for span in lyric_alignment.get("choruses", []):
@@ -303,6 +367,8 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         flags.append("single drop: last-drop slots repeat first-drop slots")
     if not chorus_spans and not is_drop:
         flags.append("no chorus span found from lyrics or section labels")
+    if fallback_outro:
+        flags.append("outro inferred from sustained end-of-track energy/vocal fade; review recommended")
 
     cues = {}
     intro_start = first_bar
@@ -366,12 +432,20 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         go_flags.append("GO -32 falls before the track's first downbeat")
         flags.append("GO -32 falls before the track's first downbeat")
         go = None
-    cues["G"] = _cue("GO -32", go, 0.6 if go is not None else 0.0,
+    if fallback_outro:
+        go_flags.append("outro inferred from energy/vocal fade")
+    cues["G"] = _cue("GO -32", go, 0.38 if fallback_outro and go is not None else
+                     0.6 if go is not None else 0.0,
+                     "32 bars before the inferred energy/vocal fade" if fallback_outro else
                      "32 bars before the detected outro" if outro_start is not None else "outro section unavailable",
                      go_flags, grid)
     outro_bars = max(0, bar_count - outro_start) if outro_start is not None else 0
-    cues["H"] = _cue(f"OUTRO {outro_bars}", outro_start, 0.65 if outro_start is not None else 0.0,
-                     f"detected outro start; {outro_bars} bars remain" if outro_start is not None else "outro section unavailable",
+    cues["H"] = _cue(f"OUTRO {outro_bars}", outro_start,
+                     0.42 if fallback_outro else 0.65 if outro_start is not None else 0.0,
+                     f"energy/vocal fade begins near the end; {outro_bars} bars remain" if fallback_outro else
+                     f"detected outro start; {outro_bars} bars remain" if outro_start is not None else
+                     "outro section unavailable",
+                     ["outro inferred from energy/vocal fade"] if fallback_outro else
                      [] if outro_start is not None else ["outro unavailable"], grid)
 
     cues = {slot: cues[slot] for slot in "ABCDEFGH"}
@@ -450,7 +524,7 @@ def run(root, output_dir, manifest, lyrics_dir, words_dir, genre_path, config_pa
         stems, low_energy, hop = None, None, 0.05
         if os.path.exists(stem_path):
             env = np.load(stem_path)
-            stems = {key: env[key].tolist() for key in ("drums", "bass") if key in env}
+            stems = {key: env[key].tolist() for key in ("drums", "bass", "vocals") if key in env}
             hop = float(env["hop_s"])
         low_energy = feature["lo"].tolist() if "lo" in feature else None
         words = _load_json(os.path.join(words_dir, track_id + ".json"))

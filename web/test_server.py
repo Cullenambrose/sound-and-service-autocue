@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -87,6 +88,27 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(cue_entries[0][2:6], "big"), 8000)
         self.assertTrue(cue_entries[0][12:].startswith(b"INTRO"))
 
+    def test_map_aware_cue_fallbacks_replace_legacy_chorus_names(self):
+        source = Path(self.temporary.name) / "song.mp3"
+        source.write_bytes(b"song")
+        file_hash, _ = server.copy_import(source, source.name, source_path=str(source))
+        plan = {"map_type": "DROP", "grid": {"t1": 0, "bar_s": 2},
+                "cues": {"C": {"bar": 4}, "D": {"bar": 8, "name": "CHORUS"}}}
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
+            row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+
+        record = server.track_record(row)
+        self.assertEqual(record["cues"]["C"]["name"], "-32 DROP")
+        self.assertEqual(record["cues"]["D"]["name"], "FIRST DROP")
+        updated = server._cue_binary(plan["cues"], plan)
+        labels = {
+            payload[1]: payload[12:].split(b"\x00", 1)[0].decode()
+            for name, payload in server._marker2_entries(updated)
+            if name == "CUE"
+        }
+        self.assertEqual(labels, {2: "-32 DROP", 3: "FIRST DROP"})
+
     def test_review_edit_persists_cue_and_marks_reviewed(self):
         source = Path(self.temporary.name) / "song.mp3"
         source.write_bytes(b"song")
@@ -141,7 +163,7 @@ class WebServerTests(unittest.TestCase):
     def _serato_home(self):
         home = Path(self.temporary.name) / "home"
         serato = home / "Music" / "_Serato_"
-        (serato / "Subcrates").mkdir(parents=True)
+        (serato / "Subcrates").mkdir(parents=True, exist_ok=True)
         (serato / "database V2").write_bytes(b"read-only Serato database")
         return home
 
@@ -157,6 +179,7 @@ class WebServerTests(unittest.TestCase):
                        (json.dumps(plan), file_hash))
         return song, file_hash
 
+    @unittest.skipUnless(sys.platform == "darwin", "Serato write/restore tests require macOS.")
     def test_write_undo_and_full_restore_for_every_supported_format(self):
         try:
             import mutagen  # noqa: F401
@@ -197,6 +220,7 @@ class WebServerTests(unittest.TestCase):
                     db.execute("DELETE FROM tracks")
                     db.execute("DELETE FROM backups")
 
+    @unittest.skipUnless(sys.platform == "darwin", "Serato write tests require macOS.")
     def test_unsupported_format_is_reported_instead_of_failing_mid_write(self):
         home = self._serato_home()
         song, file_hash = self._import_reviewed(home, "song.ogg", b"OggS" + b"\x00" * 40)
