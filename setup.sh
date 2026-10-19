@@ -14,11 +14,9 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "Note: this script targets Apple Silicon macOS. Continuing anyway; MPS will not be used."
 fi
 
-# Beat This needs Python 3.10+. Use one if present, otherwise fetch a private 3.10 with uv (nothing system-wide).
+# This analyzer stack is verified on Python 3.10. Use it if present, otherwise fetch a private 3.10 with uv.
 PYTHON=""
-for candidate in python3.12 python3.11 python3.10; do
-  if [[ -z "$PYTHON" ]] && command -v "$candidate" >/dev/null; then PYTHON="$candidate"; fi
-done
+if command -v python3.10 >/dev/null; then PYTHON=python3.10; fi
 if [[ ! -d .venv ]]; then
   if [[ -n "$PYTHON" ]]; then
     "$PYTHON" -m venv .venv
