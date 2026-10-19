@@ -14,7 +14,7 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "Note: this script targets Apple Silicon macOS. Continuing anyway; MPS will not be used."
 fi
 
-# Beat This needs Python 3.10+. Use one if present, otherwise fetch a private 3.11 with uv (nothing system-wide).
+# Beat This needs Python 3.10+. Use one if present, otherwise fetch a private 3.10 with uv (nothing system-wide).
 PYTHON=""
 for candidate in python3.12 python3.11 python3.10; do
   if [[ -z "$PYTHON" ]] && command -v "$candidate" >/dev/null; then PYTHON="$candidate"; fi
@@ -24,7 +24,7 @@ if [[ ! -d .venv ]]; then
     "$PYTHON" -m venv .venv
   else
     python3 -m pip install --user --quiet uv
-    python3 -m uv venv --python 3.11 .venv
+    python3 -m uv venv --python 3.10 .venv
   fi
 fi
 .venv/bin/python --version
@@ -40,7 +40,7 @@ if ! command -v ffmpeg >/dev/null; then
 fi
 
 PIP=".venv/bin/python -m pip"
-$PIP install --upgrade pip wheel setuptools
+$PIP install --upgrade pip wheel "setuptools<81"
 
 # Core: always needed
 $PIP install numpy soundfile mutagen torch torchaudio

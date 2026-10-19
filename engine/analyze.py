@@ -259,6 +259,13 @@ def _run_sections(source_wav, paths):
     if paths.sections.exists():
         return _read_json(paths.sections)
     if available("allin1"):
+        # madmom (a transitive allin1 dependency) still imports old collections aliases.
+        # Provide them at runtime so sectioning can run on modern Python versions.
+        import collections
+        import collections.abc
+        for name in ("MutableSequence", "MutableMapping", "MutableSet", "Sequence", "Mapping", "Set"):
+            if not hasattr(collections, name):
+                setattr(collections, name, getattr(collections.abc, name))
         import allin1
         # Reuses the Demucs stems already separated for this file (vocals step runs first).
         result = allin1.analyze(str(source_wav), out_dir=None, device="cpu", keep_byproducts=True,
