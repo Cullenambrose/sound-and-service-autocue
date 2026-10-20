@@ -23,7 +23,7 @@ DEFAULT_CONFIG = {
         "genre_map": True,
         "gemini_tiebreaker": False,
     },
-    "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco"],
+    "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco", "dubstep", "drum and bass", "dnb", "bass music", "electro", "garage"],
     "drop_bpm_range": [118, 150],
     "drop_min_confidence": 0.65,
     "drop_phrase_bars": 8,
@@ -279,7 +279,7 @@ def _genre_is_drop(genre, bpm, config):
 
 def _genre_bucket(genre):
     lowered = (genre or "").casefold()
-    if any(token in lowered for token in ("house", "edm", "dance", "electronic", "techno", "trance", "disco")):
+    if any(token in lowered for token in ("house", "edm", "dance", "electronic", "techno", "trance", "disco", "dubstep", "drum and bass", "dnb", "bass music", "electro", "garage")):
         return "house_edm"
     if any(token in lowered for token in ("hip hop", "hip-hop", "rap", "r&b", "rnb", "trap")):
         return "hiphop_rnb"

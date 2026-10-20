@@ -6,7 +6,7 @@
     "genre_map": true,
     "gemini_tiebreaker": false
   },
-  "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco"],
+  "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco", "dubstep", "drum and bass", "dnb", "bass music", "electro", "garage"],
   "drop_bpm_range": [118, 150],
   "drop_min_confidence": 0.65,
   "drop_phrase_bars": 8,
