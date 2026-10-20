@@ -94,6 +94,7 @@
 .variant-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:#aaa}
 .variant-dot[data-variant="baseline"]{background:#d9e2e4}
 .variant-dot[data-variant="fuzzy_lyrics"]{background:#ffcc33}
+.variant-dot[data-variant="phrase_changes"]{background:#b58cff}
 .variant-dot[data-variant="kick_grid"]{background:#4aa8ff}
 .variant-dot[data-variant="stem_energy"]{background:#ff7ac8}
 .variant-dot[data-variant="roformer_stems"]{background:#ff9a3c}

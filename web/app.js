@@ -279,7 +279,7 @@ function previewCue(slot) {
   const audio = $("#preview-audio"); audio.currentTime = Math.max(0, activeTrack.t1 + bar * activeTrack.bar_s); audio.play();
 }
 let waveDuration = 0;
-const VARIANT_COLORS = {baseline:"#d9e2e4", fuzzy_lyrics:"#ffcc33", kick_grid:"#4aa8ff", stem_energy:"#ff7ac8", roformer_stems:"#ff9a3c"};
+const VARIANT_COLORS = {baseline:"#d9e2e4", fuzzy_lyrics:"#ffcc33", phrase_changes:"#b58cff", kick_grid:"#4aa8ff", stem_energy:"#ff7ac8", roformer_stems:"#ff9a3c"};
 function hiddenVariants() { try { return new Set(JSON.parse(localStorage.getItem("hiddenVariants") || "[]")); } catch { return new Set(); } }
 function variantList(track) { return Object.entries(track.variants || {}); }
 function renderVariantPanel(track) {

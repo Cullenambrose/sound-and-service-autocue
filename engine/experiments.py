@@ -14,6 +14,8 @@ BASELINE = "baseline"
 CATALOG = [
     {"id": "baseline", "label": "Baseline v6", "default": True, "heavy": False,
      "summary": "The current engine, unchanged."},
+    {"id": "phrase_changes", "label": "Phrase changes", "default": True, "heavy": False,
+     "summary": "Adds drops wherever the full mix gets clearly louder at a phrase boundary, not only after a long breakdown."},
     {"id": "fuzzy_lyrics", "label": "Fuzzy lyric matching", "default": True, "heavy": False,
      "summary": "Matches mis-heard transcript words to lyrics by similarity, not exact spelling."},
     {"id": "kick_grid", "label": "Kick-snapped grid", "default": True, "heavy": False,
@@ -106,6 +108,70 @@ def _stem_energy(context):
     return {"energy": np.asarray(mixed, dtype=float).tolist()}
 
 
+def detect_energy_jumps(rms, low, fps, grid, duration_s, first_bar=0, phrase_bars=8, minimum_jump=1.3):
+    """Phrase-aligned small-to-big changes in the full mix (drops) from per-bar loudness and low end."""
+    bar_s, t1 = float(grid["bar_s"]), float(grid["t1"])
+    count = max(0, int((duration_s - t1) / bar_s))
+
+    def bar_mean(values, bar):
+        if values is None or t1 + bar * bar_s < 0:
+            return None
+        left = max(0, int((t1 + bar * bar_s) * fps))
+        right = min(len(values), int((t1 + (bar + 1) * bar_s) * fps))
+        return sum(values[left:right]) / (right - left) if right > left else None
+
+    def level(bar):
+        parts = [bar_mean(rms, bar), bar_mean(low, bar)]
+        return parts if None not in parts else None
+
+    jumps = []
+    for bar in range(first_bar + phrase_bars, count - 2, phrase_bars):
+        best = None
+        for candidate in (bar - 1, bar, bar + 1):
+            before = [level(b) for b in range(candidate - 4, candidate)]
+            after = [level(b) for b in range(candidate, candidate + 2)]
+            if None in before or None in after:
+                continue
+            ratios = []
+            for index in range(2):
+                low_before = sorted(row[index] for row in before)[len(before) // 2]
+                high_after = sum(row[index] for row in after) / len(after)
+                ratios.append(high_after / low_before if low_before > 0 else 0.0)
+            score = 0.6 * ratios[0] + 0.4 * ratios[1]
+            if best is None or score > best[0]:
+                best = (score, ratios)
+        if best and best[0] >= minimum_jump:
+            jumps.append({
+                "bar": bar, "time_s": round(t1 + bar * bar_s, 3),
+                "confidence": round(min(0.95, 0.6 + (best[0] - minimum_jump) * 0.5), 2),
+                "reason": f"loudness x{best[1][0]:.2f} and low end x{best[1][1]:.2f} over the previous 4 bars",
+                "breakdown_start_bar": max(first_bar, bar - 4),
+            })
+    return jumps
+
+
+def _first_bar_with_preroll(context):
+    import rules_v6
+    grid = context["analysis"]["grid"]
+    return rules_v6._first_bar(grid, float(grid["bar_s"]), context.get("energy"), float(context.get("fps") or 50))
+
+
+def _phrase_changes(context):
+    rms, low = context.get("energy"), context.get("low_energy_raw")
+    if not rms or not low:
+        raise Unavailable("needs full-mix and low-band energy")
+    grid = context["analysis"]["grid"]
+    first_bar = _first_bar_with_preroll(context)
+    jumps = detect_energy_jumps(rms, low, float(context.get("fps") or 50), grid, context["duration_s"], first_bar)
+    if not jumps:
+        raise Unavailable("no clear phrase-aligned energy jumps")
+    merged = {drop["bar"]: drop for drop in context.get("detected_drops") or []}
+    for jump in jumps:
+        merged.setdefault(jump["bar"], jump)
+    return {"detected_drops": sorted(merged.values(), key=lambda drop: drop["bar"]),
+            "note": f"{len(jumps)} phrase-aligned energy jumps: bars " + ", ".join(str(j["bar"]) for j in jumps)}
+
+
 def _separator_command():
     root = Path(__file__).resolve().parent.parent
     for candidate in (os.environ.get("AUTOCUE_SEPARATOR"), root / ".venv-separator" / "bin" / "audio-separator",
@@ -151,6 +217,7 @@ def _roformer(context):
 
 
 RUNNERS = {
+    "phrase_changes": _phrase_changes,
     "fuzzy_lyrics": _fuzzy_lyrics,
     "kick_grid": _kick_grid,
     "stem_energy": _stem_energy,
@@ -173,6 +240,7 @@ def run_variants(base_kwargs, context, baseline_plan, enabled, build_plan):
     """Return {id: summary}. `base_kwargs` are the exact build_plan arguments used for the baseline."""
     variants = {BASELINE: summarize(baseline_plan, "Baseline v6")}
     labels = {item["id"]: item["label"] for item in CATALOG}
+    context = {**context, "detected_drops": baseline_plan.get("drops") or []}
     for variant in enabled:
         if variant == BASELINE or variant not in RUNNERS:
             continue

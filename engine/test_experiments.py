@@ -31,6 +31,15 @@ class ExperimentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             experiments.normalize_enabled(["made_up"])
 
+    def test_energy_jumps_land_on_phrase_boundaries(self):
+        grid = {"t1": 0.0, "bar_s": 2.0}
+        fps = 10
+        rms = [0.2] * (16 * 2 * fps) + [0.6] * (16 * 2 * fps)
+        low = [0.1] * (16 * 2 * fps) + [0.5] * (16 * 2 * fps)
+        jumps = experiments.detect_energy_jumps(rms, low, fps, grid, 64.0)
+        self.assertEqual([jump["bar"] for jump in jumps], [16])
+        self.assertEqual(experiments.detect_energy_jumps([0.3] * 640, [0.2] * 640, fps, grid, 64.0), [])
+
     def test_kick_grid_shifts_onto_measured_kicks(self):
         kwargs = base_kwargs()
         low = [0.0] * 8800
