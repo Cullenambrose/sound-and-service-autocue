@@ -256,7 +256,7 @@ async function openReview(hash) {
       <input class="cue-name" data-slot="${slot}" value="${escapeHtml(cue.name || slot)}" aria-label="${slot} cue name"></div>
       <div class="cue-timing"><button data-preview="${slot}" title="Play from cue">▶</button><button data-nudge="-0.25" data-slot="${slot}" title="Nudge one beat earlier">−¼</button>
       <button data-nudge="0.25" data-slot="${slot}" title="Nudge one beat later">+¼</button><button data-nudge="-1" data-slot="${slot}" title="Nudge one bar earlier">−B</button>
-      <button data-nudge="1" data-slot="${slot}" title="Nudge one bar later">+B</button><input class="cue-bar" data-slot="${slot}" type="number" min="0" step="0.25" value="${cue.bar ?? ""}" placeholder="Empty" aria-label="${slot} bar"></div></div>`;
+      <button data-nudge="1" data-slot="${slot}" title="Nudge one bar later">+B</button><input class="cue-bar" data-slot="${slot}" type="number" min="${firstBar()}" step="0.25" value="${cue.bar ?? ""}" placeholder="Empty" aria-label="${slot} bar"></div></div>`;
   }).join("");
   $("#review-dialog").showModal();
   renderVariantPanel(activeTrack);
@@ -264,10 +264,14 @@ async function openReview(hash) {
   $$(".cue-timing button[data-preview]").forEach(button => button.onclick=()=>previewCue(button.dataset.preview));
   await drawWaveform(activeTrack);
 }
+function firstBar() {
+  const {t1, bar_s} = activeTrack || {};
+  return t1 > 0 && bar_s > 0 ? Math.min(0, Math.ceil(-t1 / bar_s - 1e-6)) : 0;
+}
 function nudgeCue(slot, bars) {
   const input = $(`.cue-bar[data-slot="${slot}"]`);
   if (input.value === "") return toast("Set a cue bar before nudging.");
-  input.value = Math.max(0, Number(input.value) + bars);
+  input.value = Math.max(firstBar(), Number(input.value) + bars);
 }
 function previewCue(slot) {
   const bar = Number($(`.cue-bar[data-slot="${slot}"]`).value);
@@ -275,7 +279,7 @@ function previewCue(slot) {
   const audio = $("#preview-audio"); audio.currentTime = Math.max(0, activeTrack.t1 + bar * activeTrack.bar_s); audio.play();
 }
 let waveDuration = 0;
-const VARIANT_COLORS = {baseline:"#d9e2e4", low_band_hop_fix:"#46d9a6", fuzzy_lyrics:"#ffcc33", kick_grid:"#4aa8ff", stem_energy:"#ff7ac8", roformer_stems:"#ff9a3c"};
+const VARIANT_COLORS = {baseline:"#d9e2e4", fuzzy_lyrics:"#ffcc33", kick_grid:"#4aa8ff", stem_energy:"#ff7ac8", roformer_stems:"#ff9a3c"};
 function hiddenVariants() { try { return new Set(JSON.parse(localStorage.getItem("hiddenVariants") || "[]")); } catch { return new Set(); } }
 function variantList(track) { return Object.entries(track.variants || {}); }
 function renderVariantPanel(track) {

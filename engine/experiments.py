@@ -14,8 +14,6 @@ BASELINE = "baseline"
 CATALOG = [
     {"id": "baseline", "label": "Baseline v6", "default": True, "heavy": False,
      "summary": "The current engine, unchanged."},
-    {"id": "low_band_hop_fix", "label": "Low-band timing fix", "default": True, "heavy": False,
-     "summary": "Resamples the 50 fps low-band energy to the 50 ms stem step before drop detection."},
     {"id": "fuzzy_lyrics", "label": "Fuzzy lyric matching", "default": True, "heavy": False,
      "summary": "Matches mis-heard transcript words to lyrics by similarity, not exact spelling."},
     {"id": "kick_grid", "label": "Kick-snapped grid", "default": True, "heavy": False,
@@ -54,15 +52,6 @@ def _resample(values, source_hop, target_hop, count=None):
     count = count or int(len(values) * source_hop / target_hop)
     source_times = np.arange(len(values)) * source_hop
     return np.interp(np.arange(count) * target_hop, source_times, values)
-
-
-def _low_band_hop_fix(context):
-    feature_fps = float(context.get("fps") or 50)
-    low = context.get("low_energy")
-    hop = float(context.get("hop_s") or 0.05)
-    if not low or abs(1 / feature_fps - hop) < 1e-6:
-        raise Unavailable("low band already uses the stem step; nothing to fix")
-    return {"low_energy": _resample(low, 1 / feature_fps, hop).tolist()}
 
 
 def _fuzzy_lyrics(context):
@@ -162,7 +151,6 @@ def _roformer(context):
 
 
 RUNNERS = {
-    "low_band_hop_fix": _low_band_hop_fix,
     "fuzzy_lyrics": _fuzzy_lyrics,
     "kick_grid": _kick_grid,
     "stem_energy": _stem_energy,

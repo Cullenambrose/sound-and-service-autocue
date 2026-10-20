@@ -26,16 +26,10 @@ def base_kwargs():
 class ExperimentTests(unittest.TestCase):
     def test_enabled_list_is_validated_and_keeps_baseline_first(self):
         self.assertEqual(experiments.normalize_enabled(["kick_grid"]), ["baseline", "kick_grid"])
-        self.assertIn("low_band_hop_fix", experiments.normalize_enabled(None))
+        self.assertIn("kick_grid", experiments.normalize_enabled(None))
         self.assertNotIn("roformer_stems", experiments.normalize_enabled(None))
         with self.assertRaises(ValueError):
             experiments.normalize_enabled(["made_up"])
-
-    def test_low_band_resample_matches_stem_step(self):
-        kwargs = base_kwargs()
-        context = {**kwargs, "low_energy_raw": kwargs["low_energy"], "fps": 50.0}
-        fixed = experiments._low_band_hop_fix(context)["low_energy"]
-        self.assertEqual(len(fixed), 3520)
 
     def test_kick_grid_shifts_onto_measured_kicks(self):
         kwargs = base_kwargs()

@@ -1512,8 +1512,9 @@ class Handler(BaseHTTPRequestHandler):
                     old_name, old_bar = cue.get("name"), cue.get("bar")
                     new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names)[:80]
                     new_bar = float(edit["bar"]) if edit.get("bar") not in (None, "") else None
-                    if new_bar is not None and (not math.isfinite(new_bar) or new_bar < 0):
-                        raise ValueError(f"Cue {slot} bar must be a finite non-negative number.")
+                    earliest = min(0, math.ceil(-t1 / bar_s - 1e-6)) if t1 and bar_s else 0
+                    if new_bar is not None and (not math.isfinite(new_bar) or new_bar < earliest):
+                        raise ValueError(f"Cue {slot} bar must be a finite number on or after bar {earliest}.")
                     cue_changed = cue.get("name") != new_name or cue.get("bar") != new_bar
                     changed |= cue_changed
                     cue.update({

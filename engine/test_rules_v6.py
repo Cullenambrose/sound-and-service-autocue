@@ -230,6 +230,17 @@ class V6RulesTests(unittest.TestCase):
         self.assertIsNone(result["cues"]["G"]["bar"])
         self.assertEqual(result["cues"]["H"]["confidence"], 0.0)
 
+    def test_dance_tracks_get_a_16_or_32_bar_intro(self):
+        analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 128}]}
+        energy = [0.2] * 400 + [1.0] * 880
+        result = build_plan("edm", analysis, {"cues": {"B": {"bar": 2}}}, 128,
+                            genre="House", config=self.config, energy=energy, fps=10)
+        self.assertEqual(result["cues"]["B"]["bar"], 16)
+        self.assertEqual(result["cues"]["A"]["name"], "INTRO -16")
+        pop = build_plan("pop", analysis, {"cues": {"B": {"bar": 2}}}, 128,
+                         genre="pop", config=self.config, energy=energy, fps=10)
+        self.assertEqual(pop["cues"]["B"]["bar"], 2)
+
     def test_vocal_fade_can_infer_outro_when_full_mix_does_not_fade(self):
         analysis = {"grid": self.grid, "segments": [{"label": "verse", "start": 0, "end": 128}]}
         vocals = [1.0] * int(128 / 0.05)

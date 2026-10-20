@@ -290,6 +290,46 @@ def _genre_bucket(genre):
     return "other"
 
 
+def _first_bar(grid, bar_s, energy, fps):
+    """First bar index. A full bar of audible music before the first detected beat counts as a bar."""
+    first = int(math.ceil(-grid["t1"] / bar_s - 1e-6))
+    if first >= 0 or energy is None or len(energy) == 0 or fps <= 0:
+        return 0
+    typical = sorted(energy)[len(energy) // 2]
+    while first < 0:
+        start = max(0, int((grid["t1"] + first * bar_s) * fps))
+        chunk = energy[start:int((grid["t1"] + (first + 1) * bar_s) * fps)]
+        if chunk and typical > 0 and sum(chunk) / len(chunk) >= 0.5 * typical:
+            break
+        first += 1
+    return first
+
+
+def _snap_intro(bar, first_bar, bar_count):
+    """Dance intros are 16 or 32 bars: snap a detected entry to whichever is closer."""
+    length = 32 if bar - first_bar > 24 else 16
+    return min(first_bar + length, max(first_bar, bar_count - 2))
+
+
+def _electronic_start(energy, fps, vocals, hop_s, grid, first_bar, bar_count, minimum=16, maximum=32):
+    """START for dance music: the first clear energy or vocal entry 16-32 bars into the track, else bar 32."""
+    if not energy or fps <= 0:
+        return None
+    def mean(values, step, bar, count=1):
+        return _bar_mean(values, step, grid, bar, count) if values else None
+    for bar in range(first_bar + minimum, first_bar + maximum + 1):
+        if bar + 2 > bar_count:
+            break
+        before, after = mean(energy, 1 / fps, bar - 4, 4), mean(energy, 1 / fps, bar, 2)
+        if before and after and after >= 1.25 * before:
+            return _snap_intro(bar, first_bar, bar_count), "energy rises after the intro"
+        v_before, v_after = mean(vocals, hop_s, bar - 4, 4), mean(vocals, hop_s, bar, 2)
+        if v_before is not None and v_after is not None and v_before < 0.02 and v_after >= 0.04:
+            return _snap_intro(bar, first_bar, bar_count), "vocals enter after the intro"
+    fallback = first_bar + maximum
+    return (fallback, "no clear entry; dance intros are usually 32 bars") if fallback + 2 <= bar_count else None
+
+
 def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synced_lyrics=None,
                stems=None, low_energy=None, hop_s=0.05, config=None, detected_drops=None,
                energy=None, fps=50, cue_maps=None):
@@ -297,7 +337,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     config["switches"] = {**DEFAULT_CONFIG["switches"], **config.get("switches", {})}
     grid = analysis["grid"]
     bar_s = float(grid["bar_s"])
-    first_bar = max(0, int(math.ceil(-grid["t1"] / bar_s - 1e-6)))
+    first_bar = _first_bar(grid, bar_s, energy, fps)
     bar_count = max(first_bar, int(math.ceil((duration_s - grid["t1"]) / bar_s)))
     old_cues = plan.get("cues", {})
     start = old_cues.get("B", {}).get("bar")
@@ -331,6 +371,12 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     drop_confident = [drop for drop in drops if drop["confidence"] >= config["drop_min_confidence"]]
     genre_matches, genre_reason = _genre_is_drop(genre, bpm, config)
     cue_maps = cue_map_settings.normalize_cue_maps(cue_maps)
+    start_reason = "retained v5 START on the existing downbeat grid"
+    tagged_dance = any(token in (genre or "").casefold() for token in config["drop_genres"])
+    if config["switches"]["genre_map"] and (tagged_dance or genre_bucket == "house_edm"):
+        found = _electronic_start(energy, fps, (stems or {}).get("vocals"), hop_s, grid, first_bar, bar_count)
+        if found and start - first_bar < 16:
+            start, start_reason = found[0], "dance-music intro of at least 16 bars: " + found[1]
     is_drop = bool(drop_confident and (genre_matches if config["switches"]["genre_map"] else True))
     if cue_maps["mode"] == "DROP":
         is_drop = True
@@ -381,7 +427,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     for section in analysis.get("segments", analysis.get("sections", [])):
         if "intro" in _normal_label(section):
             intro_start, _ = _section_bars(section, grid)
-            intro_start = max(first_bar, intro_start)
+            intro_start = first_bar if intro_start <= 0 else max(first_bar, intro_start)
             break
     intro_bars = max(0, start - intro_start)
     first_chorus = chorus_spans[0] if chorus_spans else None
@@ -391,7 +437,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
                      f"intro begins {intro_bars} bars before START" if intro_bars else "no measured intro before START",
                      [] if intro_bars else ["intro shorter than one bar"], grid)
     cues["B"] = _cue("START", start, old_cues.get("B", {}).get("confidence", 0.6),
-                     "retained v5 START on the existing downbeat grid", grid=grid)
+                     start_reason, grid=grid)
 
     if is_drop:
         if drop_confident:

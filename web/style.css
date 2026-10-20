@@ -93,7 +93,6 @@
 .variant-use[disabled]{color:#56686d;cursor:default}
 .variant-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:#aaa}
 .variant-dot[data-variant="baseline"]{background:#d9e2e4}
-.variant-dot[data-variant="low_band_hop_fix"]{background:#46d9a6}
 .variant-dot[data-variant="fuzzy_lyrics"]{background:#ffcc33}
 .variant-dot[data-variant="kick_grid"]{background:#4aa8ff}
 .variant-dot[data-variant="stem_energy"]{background:#ff7ac8}

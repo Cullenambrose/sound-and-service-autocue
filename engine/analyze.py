@@ -488,10 +488,11 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
     if switches:
         config["switches"] = {**rules_v6.DEFAULT_CONFIG["switches"], **config.get("switches", {}), **switches}
     low_raw = feature["lo"].tolist()
+    low_stem_step = experiments_module._resample(low_raw, 1 / float(feature["fps"]), hop).tolist()
     base_kwargs = dict(
         track_id=TRACK_ID, analysis=analysis, plan={"cues": {}}, duration_s=duration, genre=genre,
         words=(words_record or {}).get("words"), synced_lyrics=(lyrics_record or {}).get("syncedLyrics"),
-        stems=stems, low_energy=low_raw, hop_s=hop, config=config, energy=feature["rms"].tolist(),
+        stems=stems, low_energy=low_stem_step, hop_s=hop, config=config, energy=feature["rms"].tolist(),
         fps=float(feature["fps"]), cue_maps=cue_maps)
     plan = rules_v6.build_plan(**base_kwargs)
     enabled = experiments_module.normalize_enabled(experiments)
