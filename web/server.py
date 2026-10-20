@@ -996,8 +996,10 @@ def _enabled_experiments(settings):
 
 def _graded_tracks():
     with connect() as db:
-        rows = db.execute("SELECT hash,name,plan_json FROM tracks WHERE reviewed=1 AND plan_json IS NOT NULL").fetchall()
-    return [{"hash": row["hash"], "name": row["name"], "plan": json.loads(row["plan_json"])} for row in rows]
+        rows = db.execute("SELECT hash,name,plan_json,reviewed FROM tracks WHERE plan_json IS NOT NULL").fetchall()
+    tracks = [{"hash": row["hash"], "name": row["name"], "reviewed": bool(row["reviewed"]),
+               "plan": json.loads(row["plan_json"])} for row in rows]
+    return [track for track in tracks if track["reviewed"] or track["plan"].get("answer_key")]
 
 
 def _analysis_import():
@@ -1037,6 +1039,22 @@ def process_builtin(row, settings):
     return plan
 
 
+def _store_plan(file_hash, plan, status):
+    """Save a new plan. A reviewed song keeps its reviewed cues as the answer key for scoring."""
+    with connect() as db:
+        old = db.execute("SELECT plan_json,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+        if old and old["plan_json"]:
+            previous = json.loads(old["plan_json"])
+            key = previous.get("answer_key")
+            if old["reviewed"]:
+                key = {"grid": previous.get("grid", {}),
+                       "cues": {slot: {"bar": cue.get("bar")} for slot, cue in previous.get("cues", {}).items()}}
+            if key:
+                plan["answer_key"] = key
+        db.execute("UPDATE tracks SET plan_json=?, status=?, error=NULL, reviewed=0, edited=0 WHERE hash=?",
+                   (json.dumps(plan, ensure_ascii=False), status, file_hash))
+
+
 def process_track(file_hash):
     with connect() as db:
         row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
@@ -1052,9 +1070,7 @@ def process_track(file_hash):
         threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
             settings.get("strictness", "standard"), 0.6)
         low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
-        with connect() as db:
-            db.execute("UPDATE tracks SET plan_json=?, status=?, error=NULL WHERE hash=?",
-                       (json.dumps(plan, ensure_ascii=False), "Needs a look" if low else "Cues ready", file_hash))
+        _store_plan(file_hash, plan, "Needs a look" if low else "Cues ready")
         return
     import shlex
     output = DATA / "results" / (file_hash + ".json")
@@ -1086,9 +1102,7 @@ def process_track(file_hash):
     threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
         settings.get("strictness", "standard"), 0.6)
     low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
-    with connect() as db:
-        db.execute("UPDATE tracks SET plan_json=?, status=?, error=NULL WHERE hash=?",
-                   (json.dumps(plan, ensure_ascii=False), "Needs a look" if low else "Cues ready", file_hash))
+    _store_plan(file_hash, plan, "Needs a look" if low else "Cues ready")
 
 
 def worker():
@@ -1525,6 +1539,7 @@ class Handler(BaseHTTPRequestHandler):
                         "bar_s": bar_s, "t1": t1,
                         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     })
+                plan.pop("answer_key", None)
                 status = "Edited by you" if changed else "Cues ready"
                 db.execute("UPDATE tracks SET plan_json=?,status=?,edited=?,reviewed=1 WHERE hash=?",
                            (json.dumps(plan, ensure_ascii=False), status, int(changed), file_hash))

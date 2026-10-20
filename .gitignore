@@ -101,3 +101,5 @@ stats.json
 *.log
 web-data/
 tests/fixtures/crates/
+
+.venv-separator/

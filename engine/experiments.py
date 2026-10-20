@@ -4,6 +4,9 @@ An experiment prepares overrides for rules_v6.build_plan. It never edits the bas
 can show every variant's cues side by side and the report can score them against the cues you grade.
 """
 import math
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 BASELINE = "baseline"
@@ -24,6 +27,7 @@ CATALOG = [
 ]
 IDS = [item["id"] for item in CATALOG]
 ROFORMER_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+ROFORMER_TIMEOUT_S = int(os.environ.get("AUTOCUE_ROFORMER_TIMEOUT", "900"))
 
 
 class Unavailable(RuntimeError):
@@ -113,26 +117,40 @@ def _stem_energy(context):
     return {"energy": np.asarray(mixed, dtype=float).tolist()}
 
 
+def _separator_command():
+    root = Path(__file__).resolve().parent.parent
+    for candidate in (os.environ.get("AUTOCUE_SEPARATOR"), root / ".venv-separator" / "bin" / "audio-separator",
+                      shutil.which("audio-separator")):
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    raise Unavailable("audio-separator is not installed. Run ./setup.sh --separator "
+                      "(or: python3 -m venv .venv-separator && .venv-separator/bin/pip install audio-separator)")
+
+
+def _roformer_timeout(context):
+    # About 2x real time on Apple Silicon (MPS) at overlap 2; allow generous headroom.
+    return max(ROFORMER_TIMEOUT_S, int(float(context.get("duration_s") or 0) * 5))
+
+
 def _roformer(context):
-    import importlib.util
-    if importlib.util.find_spec("audio_separator") is None:
-        raise Unavailable("audio-separator is not installed. Install it with: pip install audio-separator")
-    paths = context.get("paths")
-    if paths is None:
-        raise Unavailable("no cache folder to hold the separated vocals")
     import numpy as np
+    command = _separator_command()
+    paths = context.get("paths")
+    if paths is None or context.get("decoded_wav") is None:
+        raise Unavailable("no decoded audio to separate")
     target = paths.root / "work" / "roformer_vocals.wav"
     if not target.exists():
-        from audio_separator.separator import Separator
         output = paths.root / "work" / "roformer"
         output.mkdir(parents=True, exist_ok=True)
-        separator = Separator(output_dir=str(output), output_single_stem="Vocals")
-        separator.load_model(model_filename=ROFORMER_MODEL)
-        produced = separator.separate(str(context["decoded_wav"]))
-        found = next((output / name for name in produced if (output / name).exists()), None)
-        if found is None:
-            raise Unavailable("RoFormer produced no vocal file")
-        found.replace(target)
+        done = subprocess.run([command, str(context["decoded_wav"]), "--model_filename", ROFORMER_MODEL,
+                               "--single_stem", "Vocals", "--output_format", "WAV", "--output_dir", str(output),
+                               "--mdxc_overlap", "2", "--mdxc_batch_size", "4"],
+                              capture_output=True, text=True, timeout=_roformer_timeout(context))
+        found = sorted(output.glob("*Vocals*.wav"))
+        if done.returncode or not found:
+            raise Unavailable("RoFormer failed: " + (done.stderr or done.stdout or "no vocal file").strip()[-300:])
+        found[0].replace(target)
+        shutil.rmtree(output, ignore_errors=True)
     import analyze
     data, rate = analyze.read_mono(target)
     step = int(round(float(context.get("hop_s") or 0.05) * rate))
@@ -226,14 +244,16 @@ def score_tracks(tracks):
     results, per_track = {}, []
     for track in tracks:
         plan = track["plan"]
+        answer = plan.get("answer_key") or {"grid": plan.get("grid", {}), "cues": plan.get("cues", {})}
         grid = plan.get("grid", {})
+        key_grid = answer.get("grid") or grid
         variants = plan.get("variants") or {}
-        if not grid.get("bar_s") or not variants:
+        if not grid.get("bar_s") or not key_grid.get("bar_s") or not variants:
             continue
         beat = float(grid["bar_s"]) / 4
         row = {"name": track["name"], "map_type": plan.get("map_type"), "slots": {}}
         for slot in "ABCDEFGH":
-            truth = _truth_time(plan.get("cues", {}).get(slot, {}), grid)
+            truth = _truth_time(answer["cues"].get(slot, {}), key_grid)
             row["slots"][slot] = {"truth": truth, "variants": {}}
             for key, variant in variants.items():
                 if variant.get("status") != "ok":

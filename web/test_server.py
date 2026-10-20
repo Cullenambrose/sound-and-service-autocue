@@ -158,6 +158,31 @@ class WebServerTests(unittest.TestCase):
             exported = json.load(response)
         self.assertEqual(exported["tracks"][0]["plan"]["variants"]["baseline"]["cues"]["A"]["bar"], 16)
 
+    def test_reanalysis_keeps_reviewed_cues_as_the_scoring_answer_key(self):
+        source = Path(self.temporary.name) / "again.mp3"
+        source.write_bytes(b"again")
+        file_hash, _ = server.copy_import(source, source.name, source_path=str(source))
+        cue = lambda bar: {"bar": bar, "time_s": bar * 2.0}
+        reviewed = {"map_type": "VOCAL", "grid": {"t1": 0, "bar_s": 2.0}, "cues": {"A": cue(8)}}
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=?, reviewed=1, edited=1, status='Edited by you' WHERE hash=?",
+                       (json.dumps(reviewed), file_hash))
+        fresh = {"map_type": "VOCAL", "grid": {"t1": 0, "bar_s": 2.0}, "cues": {"A": cue(16)},
+                 "variants": {"baseline": {"status": "ok", "label": "Baseline", "cues": {"A": cue(16)}},
+                              "kick_grid": {"status": "ok", "label": "Kick", "cues": {"A": cue(8)}}}}
+        server._store_plan(file_hash, fresh, "Cues ready")
+        with server.connect() as db:
+            row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+        self.assertEqual(row["reviewed"], 0)
+        self.assertEqual(json.loads(row["plan_json"])["answer_key"]["cues"]["A"]["bar"], 8)
+        report = server._experiments_module().score_tracks(server._graded_tracks())
+        self.assertEqual(report["variants"]["kick_grid"]["wins"], 1)
+        # a second re-analysis still keeps the original key
+        server._store_plan(file_hash, dict(fresh), "Cues ready")
+        with server.connect() as db:
+            again = json.loads(db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()[0])
+        self.assertEqual(again["answer_key"]["cues"]["A"]["bar"], 8)
+
     def test_map_aware_cue_fallbacks_replace_legacy_chorus_names(self):
         source = Path(self.temporary.name) / "song.mp3"
         source.write_bytes(b"song")
