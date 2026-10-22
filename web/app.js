@@ -7,6 +7,8 @@ let eventSource;
 let lastCompletedJob = "";
 let sessionToken;
 let cueMapSettings = null, cueMapCatalog = null, activeCueMap = "VOCAL";
+let reviewSaved = "", reviewSaving = false, reviewLeaveResolve = null;
+let eventReviewSaving = false;
 
 async function api(url, options = {}) {
   if (sessionToken === undefined) {
@@ -138,7 +140,7 @@ function drawLiveWave(live){
   const track=tracks.find(item=>item.hash===live.hash);
   if(track&&track.t1!=null&&track.bar_s&&liveWave.duration){
     "ABCDEFGH".split("").forEach((slot,i)=>{const bar=track.cues?.[slot]?.bar;if(bar==null)return;
-      const x=(track.t1+bar*track.bar_s)/liveWave.duration*width;context.fillStyle=SLOT_COLORS[i];context.fillRect(x,0,2,height);context.fillText(slot,x+3,10)});
+      const x=AutoCueTiming.barToTime(bar,track)/liveWave.duration*width;context.fillStyle=SLOT_COLORS[i];context.fillRect(x,0,2,height);context.fillText(slot,x+3,10)});
   }
 }
 function formatDuration(seconds){return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,"0")}`}
@@ -245,41 +247,170 @@ async function refreshCrates() {
   catch (error) { $("#crate-list").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`; }
 }
 async function openReview(hash) {
-  activeTrack = tracks.find(track => track.hash === hash);
-  if (!activeTrack) return;
+  const track = tracks.find(track => track.hash === hash);
+  if (!track || (activeTrack?.hash === hash && $("#review-dialog").open)) return;
+  if (!(await confirmReviewLeave())) return;
+  $("#preview-audio").pause();
+  activeTrack = track;
   $("#review-title").textContent = displayName(activeTrack);
   $("#preview-audio").src = activeTrack.url;
   $("#cue-edit-list").innerHTML = "ABCDEFGH".split("").map((slot, i) => {
     const cue = activeTrack.cues?.[slot] || {};
-    return `<div class="cue-edit"><span class="slot cue-${slot.toLowerCase()}">${slot}</span>
-      <div class="cue-edit-main"><div class="cue-edit-title"><strong>${escapeHtml(cue.name || slot)}</strong><small>${escapeHtml(cue.meaning ? meaningLabel(cue.meaning) : "Cue slot " + slot)}</small></div>
-      <input class="cue-name" data-slot="${slot}" value="${escapeHtml(cue.name || slot)}" aria-label="${slot} cue name"></div>
-      <div class="cue-timing"><button data-preview="${slot}" title="Play from cue">▶</button><button data-nudge="-0.25" data-slot="${slot}" title="Nudge one beat earlier">−¼</button>
+    return `<div class="cue-edit" data-row="${slot}"><span class="slot cue-${slot.toLowerCase()}">${slot}</span>
+      <div class="cue-edit-main"><div class="cue-edit-title" title="${escapeHtml([cue.reason, ...(cue.flags || [])].filter(Boolean).join(" · "))}"><strong>${escapeHtml(cue.name || slot)}</strong><small>${escapeHtml(cue.meaning ? meaningLabel(cue.meaning) : "Cue slot " + slot)}</small></div>
+      <input class="cue-name" data-slot="${slot}" value="${escapeHtml(cue.name || slot)}" aria-label="${slot} cue name">${cue.bar == null && cue.reason ? `<small class="cue-explanation">${escapeHtml(cue.reason)}</small>` : ""}</div>
+      <div class="cue-timing"><button data-preview="${slot}" title="Play from cue (P)">▶</button><button data-here="${slot}" title="Set cue to the playhead, snapped to the nearest beat (C)">⌖</button><button data-nudge="-0.25" data-slot="${slot}" title="Nudge one beat earlier">−¼</button>
       <button data-nudge="0.25" data-slot="${slot}" title="Nudge one beat later">+¼</button><button data-nudge="-1" data-slot="${slot}" title="Nudge one bar earlier">−B</button>
       <button data-nudge="1" data-slot="${slot}" title="Nudge one bar later">+B</button><input class="cue-bar" data-slot="${slot}" type="number" min="${firstBar()}" step="0.25" value="${cue.bar ?? ""}" placeholder="Empty" aria-label="${slot} bar"></div></div>`;
   }).join("");
-  $("#review-dialog").showModal();
+  $("#map-select").value = activeTrack.map_override || "AUTO";
+  $("#outro-note").textContent = outroEvidenceText(activeTrack);
+  $("#map-reason").textContent = `Using ${activeTrack.map_type}: ${activeTrack.map_choice?.reason || "no reason recorded"}` +
+    (activeTrack.map_choice?.vocal_ratio != null && !activeTrack.map_choice.reason.startsWith("vocals in") ? ` · vocals in ${Math.round(activeTrack.map_choice.vocal_ratio * 100)}% of bars` : "");
+  const gem = activeTrack.gemini, gemNote = $("#gemini-note");
+  gemNote.hidden = !gem || (!gem.used && !gem.error);
+  if (!gemNote.hidden) {
+    gemNote.textContent = gem.error ? `Gemini unavailable: ${gem.error}` :
+      `Gemini: ${gem.map || "no map verdict"}${gem.map_why ? " — " + gem.map_why : ""}` +
+      (gem.concerns?.length ? ` · ${gem.concerns.map(item => `${item.cue}: ${item.issue}`).join("; ")}` : "") +
+      ` · $${(gem.cost_usd || 0).toFixed(3)}${gem.cached ? " (cached)" : ""}`;
+  }
+  if (!$("#review-dialog").open) $("#review-dialog").showModal();
+  reviewSaved = JSON.stringify(reviewSnapshot());
+  updateReviewState();
+  updateNavButtons();
   renderVariantPanel(activeTrack);
   $$(".cue-timing button[data-nudge]").forEach(button => button.onclick=()=>nudgeCue(button.dataset.slot,Number(button.dataset.nudge)));
   $$(".cue-timing button[data-preview]").forEach(button => button.onclick=()=>previewCue(button.dataset.preview));
-  await drawWaveform(activeTrack);
+  $$(".cue-timing button[data-here]").forEach(button => button.onclick=()=>cueToPlayhead(button.dataset.here));
+  renderEventReviewLoading();
+  await Promise.all([drawWaveform(activeTrack), loadEventReview(activeTrack.hash)]);
+}
+function renderEventReviewLoading() {
+  $("#event-review-status").textContent = "Loading annotations…";
+  $("#event-label-list").innerHTML = '<div class="empty-state">Loading human event labels…</div>';
+}
+async function loadEventReview(hash) {
+  try {
+    const data = await api(`/api/tracks/${hash}/event-review`);
+    if (activeTrack?.hash === hash) renderEventReview(data);
+  } catch (error) {
+    if (activeTrack?.hash === hash) {
+      $("#event-review-status").textContent = `Could not load event labels: ${error.message}`;
+      $("#event-label-list").innerHTML = '<div class="empty-state">Event labels are unavailable.</div>';
+      toast(error.message);
+    }
+  }
+}
+function eventLabelName(type) {
+  return ({drop:"Drop",build:"Build",breakdown:"Breakdown",chorus:"Chorus",other:"Other"})[type] || type;
+}
+function renderEventReview(data) {
+  if (activeTrack?.hash !== data.track_hash) return;
+  const review = data.review || {};
+  $("#event-review-state").value = review.state || "pending";
+  $("#event-review-note").value = review.note || "";
+  const annotations = data.annotations || [];
+  $("#event-label-list").innerHTML = annotations.length ? annotations.map(annotation => {
+    const certainty = annotation.certainty === "uncertain" ? "uncertain" : "certain";
+    const time = Number(annotation.time_s);
+    const bar = Number.isFinite(annotation.bar) ? ` · bar ${Number(annotation.bar).toFixed(2)}` : "";
+    return `<div class="event-label-row">
+      <button class="event-label-time" data-event-seek="${time}" title="Seek to this annotation">${time.toFixed(2)}s${bar}</button>
+      <span class="event-label-tag ${certainty}">${escapeHtml(eventLabelName(annotation.event_type))} · ${certainty}</span>
+      <span class="event-label-provenance" title="${escapeHtml(annotation.note || "")}">Human · ${escapeHtml(annotation.created_at || "")}${annotation.note ? ` · ${escapeHtml(annotation.note)}` : ""}</span>
+      <button class="quiet event-label-retract" data-event-retract="${Number(annotation.id)}" aria-label="Retract this annotation">Retract</button>
+    </div>`;
+  }).join("") : '<div class="empty-state">No event labels yet. Seek or click the waveform, then label the playhead.</div>';
+  $$(".event-label-time").forEach(button => button.onclick = () => {
+    const time = Number(button.dataset.eventSeek);
+    if (!Number.isFinite(time)) return;
+    const audio = $("#preview-audio");
+    audio.currentTime = time;
+    wave.playhead = time;
+    ensureVisible(time);
+    drawWave();
+    updateReadout(time);
+  });
+  $$(".event-label-retract").forEach(button => button.onclick = () => retractEventAnnotation(Number(button.dataset.eventRetract)));
+  const updated = review.updated_at ? ` · saved ${review.updated_at}` : "";
+  $("#event-review-status").textContent = `${annotations.length} active label${annotations.length === 1 ? "" : "s"} · ${review.state || "pending"}${updated}`;
+}
+async function addEventLabel() {
+  if (eventReviewSaving || !activeTrack) return;
+  const track = activeTrack;
+  const audio = $("#preview-audio"), time = audio.currentTime;
+  const duration = wave.duration > 0 ? wave.duration : audio.duration;
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time) ||
+      time < 0 || time > duration + 0.05) {
+    toast("The playhead is outside the available audio.");
+    return;
+  }
+  eventReviewSaving = true;
+  $("#add-event-label").disabled = true;
+  try {
+    await api(`/api/event-annotations/${track.hash}`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        event_type:$("#event-label-type").value,
+        certainty:$("#event-label-certainty").value,
+        time_s:time, note:$("#event-label-note").value,
+      }),
+    });
+    if (activeTrack?.hash === track.hash) $("#event-label-note").value = "";
+    await loadEventReview(track.hash);
+    toast("Human event label saved.");
+  } catch (error) { toast(error.message); }
+  finally { eventReviewSaving = false; $("#add-event-label").disabled = false; }
+}
+async function saveEventReviewState() {
+  if (eventReviewSaving || !activeTrack) return;
+  const track = activeTrack;
+  const state = $("#event-review-state").value;
+  if (state === "skipped" && !confirm("Mark this track skipped? Existing event annotations will be retained.")) return;
+  eventReviewSaving = true;
+  $("#save-event-review").disabled = true;
+  try {
+    await api(`/api/event-reviews/${track.hash}`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({state, note:$("#event-review-note").value}),
+    });
+    await loadEventReview(track.hash);
+    toast(`Event review marked ${state.replace("_", " ")}.`);
+  } catch (error) { toast(error.message); }
+  finally { eventReviewSaving = false; $("#save-event-review").disabled = false; }
+}
+async function retractEventAnnotation(id) {
+  if (eventReviewSaving || !Number.isInteger(id) || id < 1 ||
+      !confirm("Retract this label? It will be excluded from the active review but retained in the export history.")) return;
+  const hash = activeTrack?.hash;
+  if (!hash) return;
+  eventReviewSaving = true;
+  try {
+    await api(`/api/event-annotations/${id}/retract`, {method:"POST"});
+    await loadEventReview(hash);
+    toast("Annotation retracted; its provenance remains in export history.");
+  } catch (error) { toast(error.message); }
+  finally { eventReviewSaving = false; }
+}
+function outroEvidenceText(track) {
+  const evidence = track.outro_vocal_evidence;
+  if (!evidence || evidence.status !== "analyzed") {
+    return `Instrumental outro unverified: ${evidence?.reason || "vocal evidence unavailable"}. Listen before writing cues.`;
+  }
+  const boundary = Number(evidence.last_vocal_end_s);
+  const note = track.no_vocal_free_outro
+    ? "No full detected vocal-free outro bar remains. End-of-song cues, if enabled, are not an instrumental outro."
+    : `Last detected vocal activity ends at ${boundary.toFixed(2)}s. No later stem activity above the detection threshold.`;
+  return note + " Stem leakage/reverb and missed vocals require listening review." +
+    (evidence.ignored_words ? ` ${evidence.ignored_words} invalid or stem-unsupported word timings ignored.` : "");
 }
 function firstBar() {
-  const {t1, bar_s} = activeTrack || {};
-  return t1 > 0 && bar_s > 0 ? Math.min(0, Math.ceil(-t1 / bar_s - 1e-6)) : 0;
-}
-function nudgeCue(slot, bars) {
-  const input = $(`.cue-bar[data-slot="${slot}"]`);
-  if (input.value === "") return toast("Set a cue bar before nudging.");
-  input.value = Math.max(firstBar(), Number(input.value) + bars);
-}
-function previewCue(slot) {
-  const bar = Number($(`.cue-bar[data-slot="${slot}"]`).value);
-  if (!Number.isFinite(bar) || activeTrack.t1 == null || activeTrack.bar_s == null) return toast("This track has no timing grid yet.");
-  const audio = $("#preview-audio"); audio.currentTime = Math.max(0, activeTrack.t1 + bar * activeTrack.bar_s); audio.play();
+  if (activeTrack?.t1 == null || !(activeTrack.bar_s > 0)) return 0;
+  return Math.min(0, Math.ceil(timeToBar(0) - 1e-6));
 }
 let waveDuration = 0;
-const VARIANT_COLORS = {baseline:"#d9e2e4", fuzzy_lyrics:"#ffcc33", phrase_changes:"#b58cff", kick_grid:"#4aa8ff", stem_energy:"#ff7ac8", roformer_stems:"#ff9a3c"};
+const VARIANT_COLORS = {baseline:"#d9e2e4", gemini:"#46d9a6", fuzzy_lyrics:"#ffcc33", phrase_changes:"#b58cff", kick_grid:"#4aa8ff", stem_energy:"#ff7ac8", roformer_stems:"#ff9a3c"};
 function hiddenVariants() { try { return new Set(JSON.parse(localStorage.getItem("hiddenVariants") || "[]")); } catch { return new Set(); } }
 function variantList(track) { return Object.entries(track.variants || {}); }
 function renderVariantPanel(track) {
@@ -309,9 +440,9 @@ function renderVariantPanel(track) {
     }).join("")}</tr>`).join("") + "</tbody>" +
     (unavailable.length ? `<caption>${unavailable.map(([, variant]) => escapeHtml(variant.label + ": " + variant.detail)).join(" · ")}</caption>` : "");
   $$(".variant-use:not([disabled])").forEach(button => button.onclick = () => {
-    const bar = (Number(button.dataset.time) - activeTrack.t1) / activeTrack.bar_s;
-    $(`.cue-bar[data-slot="${button.dataset.slot}"]`).value = (Math.round(bar * 4) / 4).toString();
-    toast(`Cue ${button.dataset.slot} set to bar ${Math.round(bar * 4) / 4}. Save review to keep it.`);
+    const bar = timeToBar(Number(button.dataset.time));
+    setCueBar(button.dataset.slot, bar);
+    toast(`Cue ${button.dataset.slot} set to bar ${formatBar(bar)}. Save review to keep it.`);
   });
 }
 function drawVariantLanes() {
@@ -326,47 +457,516 @@ function drawVariantLanes() {
     ctx.fillStyle = VARIANT_COLORS[id] || "#aaa";
     for (const slot of "ABCDEFGH") {
       const time = variant.cues?.[slot]?.time_s; if (time == null) continue;
-      const x = Math.max(0, Math.min(width - 2, time / waveDuration * width));
+      if (time < wave.viewStart || time > wave.viewStart + wave.viewSpan) continue;
+      const x = Math.max(0, Math.min(width - 2, (time - wave.viewStart) / wave.viewSpan * width));
       ctx.fillRect(x - 1, top + 3, 3, laneHeight - 6);
       ctx.font = "10px monospace"; ctx.fillText(slot, x + 4, top + 15);
     }
   });
 }
-async function drawWaveform(track) {
-  const canvas = $("#waveform"), ctx = canvas.getContext("2d"), width = canvas.clientWidth, height = 190;
-  const scale = devicePixelRatio || 1; canvas.width = width * scale; canvas.height = height * scale; ctx.scale(scale, scale);
-  ctx.fillStyle = "#0a1012"; ctx.fillRect(0,0,width,height);
-  try {
-    const response = await fetch(track.url), buffer = await response.arrayBuffer();
-    const audio = await (new AudioContext()).decodeAudioData(buffer);
-    const samples = audio.getChannelData(0), columns = Math.floor(width), step = Math.max(1, Math.floor(samples.length / columns));
-    ctx.strokeStyle = "#395b52"; ctx.lineWidth = 1; ctx.beginPath();
-    for(let x=0;x<columns;x++){let peak=0;for(let i=x*step;i<Math.min((x+1)*step,samples.length);i+=8)peak=Math.max(peak,Math.abs(samples[i]));const y=peak*(height*.44);ctx.moveTo(x,height/2-y);ctx.lineTo(x,height/2+y)}
-    ctx.stroke();
-    for(const [i,slot] of "ABCDEFGH".split("").entries()){
-      const bar=track.cues?.[slot]?.bar;if(bar==null)continue;
-      const seconds=track.t1+bar*track.bar_s, x=Math.max(0,Math.min(width,seconds/audio.duration*width));
-      const color=track.cues?.[slot]?.color||SLOT_COLORS[i];
-      ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(x,12);ctx.lineTo(x,height-12);ctx.stroke();
-      ctx.fillStyle=color;ctx.fillRect(x-4,10,8,8);
-    }
-    waveDuration = audio.duration; drawVariantLanes();
-    $("#wave-legend").innerHTML = "ABCDEFGH".split("").map((s,i)=>`<span data-cue-color="${escapeHtml(track.cues?.[s]?.color_id||SLOT_COLOR_IDS[i])}">${s} · ${escapeHtml(track.cues?.[s]?.name||"")}</span>`).join("");
-  } catch { ctx.fillStyle="#829198";ctx.font="12px monospace";ctx.fillText("Waveform preview unavailable for this file format",14,30); }
+const wave = {hash: null, overview: null, detail: null, duration: 0, error: "",
+  viewStart: 0, viewSpan: 1, selected: null, playhead: 0, follow: true, audition: true,
+  undo: [], redo: [], committed: {}, drag: null, raf: 0, stopAt: null, ready: false, mini: null};
+const WAVE_H = 240, RULER_H = 18, LABEL_ROW = 13, LABEL_ROWS = 4, MINI_H = 36, HIT_PX = 7;
+const waveTop = () => RULER_H + LABEL_ROW * LABEL_ROWS + 4;
+
+function cueBarValue(slot) {
+  const value = $(`.cue-bar[data-slot="${slot}"]`)?.value;
+  return value === "" || value == null || !Number.isFinite(Number(value)) ? null : Number(value);
 }
-async function saveReview() {
+function barToTime(bar) { return AutoCueTiming.barToTime(bar, activeTrack); }
+function timeToBar(time) { return AutoCueTiming.timeToBar(time, activeTrack); }
+function formatBar(bar) { return String(Number(bar.toFixed(2))); }
+function waveSnapshot() { return Object.fromEntries("ABCDEFGH".split("").map(slot => [slot, $(`.cue-bar[data-slot="${slot}"]`)?.value ?? ""])); }
+function waveCommit() {
+  const now = waveSnapshot();
+  if (JSON.stringify(now) === JSON.stringify(wave.committed)) return;
+  wave.undo.push(wave.committed); wave.redo = []; wave.committed = now; updateUndoButtons();
+}
+function waveApply(snapshot) {
+  for (const [slot, value] of Object.entries(snapshot)) { const input = $(`.cue-bar[data-slot="${slot}"]`); if (input) input.value = value; }
+  wave.committed = waveSnapshot(); updateUndoButtons(); updateReviewState(); drawWave();
+}
+function waveUndo() { if (!wave.undo.length) return; wave.redo.push(waveSnapshot()); waveApply(wave.undo.pop()); }
+function waveRedo() { if (!wave.redo.length) return; wave.undo.push(waveSnapshot()); waveApply(wave.redo.pop()); }
+function updateUndoButtons() {
+  const undo = $("#wave-undo"), redo = $("#wave-redo");
+  if (undo) undo.disabled = !wave.undo.length;
+  if (redo) redo.disabled = !wave.redo.length;
+}
+function setCueBar(slot, bar, {silent = false} = {}) {
+  if (reviewSaving) return;
+  const input = $(`.cue-bar[data-slot="${slot}"]`); if (!input) return;
+  input.value = bar == null ? "" : String(Number(Math.max(firstBar(), bar).toFixed(9)));
+  input.dispatchEvent(new Event("input", {bubbles: true}));
+  if (!silent) input.dispatchEvent(new Event("change", {bubbles: true}));
+}
+function nudgeCue(slot, bars) {
+  const bar = cueBarValue(slot);
+  if (bar == null) return toast("Set a cue bar before nudging.");
+  selectCue(slot);
+  setCueBar(slot, bar + bars);
+  if (wave.audition) auditionCue(slot);
+}
+function cueToPlayhead(slot) {
+  const audio = $("#preview-audio");
+  if (!activeTrack?.bar_s) return toast("This track has no timing grid yet.");
+  selectCue(slot);
+  setCueBar(slot, Math.round(timeToBar(audio.currentTime) * 4) / 4);
+}
+function startPreviewPlayback() {
+  const audio = $("#preview-audio"), source = audio.currentSrc || audio.src;
+  audio.play().catch(error => {
+    if (error.name === "AbortError" && (audio.paused || (audio.currentSrc || audio.src) !== source)) return;
+    toast("Audio playback unavailable: " + error.message);
+  });
+}
+function playFromCue(slot, length) {
+  const bar = cueBarValue(slot);
+  if (bar == null || activeTrack.t1 == null || activeTrack.bar_s == null) return toast("This track has no timing grid yet.");
+  const audio = $("#preview-audio"), time = Math.max(0, barToTime(bar));
+  audio.currentTime = time; wave.stopAt = length ? time + length : null; startPreviewPlayback();
+  wave.playhead = time; ensureVisible(time); drawWave();
+}
+function previewCue(slot) { selectCue(slot); playFromCue(slot, null); }
+function auditionCue(slot) { playFromCue(slot, Math.min(6, activeTrack.bar_s * 2)); }
+
+function selectCue(slot) {
+  wave.selected = slot;
+  $$(".cue-edit").forEach(row => row.classList.toggle("selected", row.dataset.row === slot));
+  $$("#wave-legend [data-slot]").forEach(item => item.classList.toggle("selected", item.dataset.slot === slot));
+  drawWave();
+}
+function clampView(start, span) {
+  const minSpan = Math.min(wave.duration, Math.max(1.5, (activeTrack.bar_s || 2) / 2));
+  span = Math.max(minSpan, Math.min(wave.duration, span));
+  wave.viewSpan = span; wave.viewStart = Math.max(0, Math.min(wave.duration - span, start));
+}
+function zoomAt(factor, time) {
+  const span = wave.viewSpan * factor, ratio = (time - wave.viewStart) / wave.viewSpan;
+  clampView(time - ratio * span, span); drawWave();
+}
+function ensureVisible(time) {
+  if (time < wave.viewStart || time > wave.viewStart + wave.viewSpan) clampView(time - wave.viewSpan * 0.1, wave.viewSpan);
+}
+function centerOn(time) { clampView(time - wave.viewSpan / 2, wave.viewSpan); drawWave(); }
+function zoomToCue(slot) {
+  const bar = cueBarValue(slot);
+  if (bar == null) return toast(`Cue ${slot} has no bar yet.`);
+  clampView(barToTime(bar) - activeTrack.bar_s * 8, activeTrack.bar_s * 16); drawWave();
+}
+function fitView() { clampView(0, wave.duration); drawWave(); }
+
+async function loadWaveData(track, signal) {
+  const overview = wave.hash === track.hash && wave.overview
+    ? wave.overview : await api(`/api/waveform/${track.hash}?detail=1`, {signal});
+  return {hash: track.hash, duration: overview.duration, overview, detail: null};
+}
+function refineWave(width) {
+  if (wave.viewSpan >= wave.duration - 0.01) {
+    clearTimeout(wave.detailTimer); wave.detailController?.abort();
+    wave.detailKey = null; wave.detail = null; return;
+  }
+  const points = Math.max(64, Math.min(4096, Math.ceil(width * 2)));
+  const key = `${wave.hash}:${wave.viewStart}:${wave.viewSpan}:${points}`;
+  if (wave.detailKey === key) return;
+  wave.detailKey = key;
+  clearTimeout(wave.detailTimer); wave.detailController?.abort();
+  const hash = wave.hash, loadId = wave.loadId, start = wave.viewStart, end = start + wave.viewSpan;
+  wave.detailTimer = setTimeout(async () => {
+    const controller = new AbortController(); wave.detailController = controller;
+    const current = () => wave.loadId === loadId && wave.hash === hash && wave.detailKey === key && $("#review-dialog").open;
+    try {
+      const data = await api(`/api/waveform/${hash}?detail=1&start=${start}&end=${end}&points=${points}`, {signal: controller.signal});
+      if (!current()) return;
+      wave.detail = data; drawWave();
+    } catch (error) {
+      if (current() && error.name !== "AbortError") toast("Waveform zoom detail unavailable: " + error.message);
+    }
+  }, 60);
+}
+function waveBands(t0, t1, overviewOnly = false) {
+  const detail = wave.detail;
+  const data = !overviewOnly && detail && t0 >= detail.start && t1 <= detail.start + detail.columns.length * detail.hop_s
+    ? detail : wave.overview;
+  const count = data.columns.length, first = Math.max(0, Math.min(count - 1, Math.floor((t0 - data.start) / data.hop_s)));
+  const last = Math.max(first + 1, Math.min(count, Math.ceil((t1 - data.start) / data.hop_s)));
+  const out = [0, 0, 0, 0, 0];
+  for (let index = first; index < last; index++) {
+    const column = data.columns[index];
+    out[0] = Math.min(out[0], column[0]); out[1] = Math.max(out[1], column[1]);
+    for (let band = 2; band < 5; band++) out[band] += column[band] / (last - first);
+  }
+  return out;
+}
+function paintWaveColumns(ctx, columns, mid, half) {
+  ctx.strokeStyle = "rgba(120,150,160,.28)"; ctx.lineWidth = 1; ctx.beginPath();
+  columns.forEach(([lo, hi], x) => { ctx.moveTo(x + 0.5, mid - Math.max(hi, 0.004) * half); ctx.lineTo(x + 0.5, mid - Math.min(lo, -0.004) * half); });
+  ctx.stroke();
+  [[4, "rgba(235,248,255,.9)", 0.5], [3, "rgba(236,150,48,.9)", 0.8], [2, "rgba(54,112,232,.95)", 1]].forEach(([index, color, gain]) => {
+    ctx.strokeStyle = color; ctx.beginPath();
+    columns.forEach((column, x) => { const h = Math.max(0.01, column[index] * gain) * half; ctx.moveTo(x + 0.5, mid - h); ctx.lineTo(x + 0.5, mid + h); });
+    ctx.stroke();
+  });
+}
+function sizeCanvas(canvas, height) {
+  const width = canvas.clientWidth, scale = devicePixelRatio || 1;
+  if (canvas.width !== Math.round(width * scale) || canvas.height !== Math.round(height * scale)) {
+    canvas.width = Math.round(width * scale); canvas.height = Math.round(height * scale);
+  }
+  const ctx = canvas.getContext("2d"); ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  return [ctx, width];
+}
+function cueColor(slot) {
+  const index = "ABCDEFGH".indexOf(slot);
+  return activeTrack.cues?.[slot]?.color_id ? (SLOT_COLORS[SLOT_COLOR_IDS.indexOf(activeTrack.cues[slot].color_id)] || activeTrack.cues[slot].display_color || SLOT_COLORS[index]) : SLOT_COLORS[index];
+}
+function cueDisplayColor(slot) { return activeTrack.cues?.[slot]?.display_color || cueColor(slot); }
+
+function drawWave() {
+  if (!activeTrack || !$("#review-dialog").open) return;
+  const canvas = $("#waveform"), [ctx, width] = sizeCanvas(canvas, WAVE_H);
+  ctx.fillStyle = "#0a1012"; ctx.fillRect(0, 0, width, WAVE_H);
+  if (!wave.ready) {
+    const coarse = wave.coarse?.hash === activeTrack.hash ? wave.coarse.peaks : null;
+    if (coarse?.length) {
+      const mid = WAVE_H / 2, half = WAVE_H / 2 - 4;
+      ctx.fillStyle = "#3f6f73";
+      for (let x = 0; x < width; x++) {
+        const value = coarse[Math.min(coarse.length - 1, Math.floor(x / width * coarse.length))];
+        ctx.fillRect(x, mid - value * half, 1, Math.max(1, value * half * 2));
+      }
+    }
+    ctx.fillStyle = "#829198"; ctx.font = "12px monospace";
+    ctx.fillText(wave.error || "Loading cached waveform…", 14, 20); return;
+  }
+  refineWave(width);
+  const {viewStart, viewSpan} = wave, top = waveTop(), mid = top + (WAVE_H - top) / 2, half = (WAVE_H - top) / 2 - 2;
+  const toX = time => (time - viewStart) / viewSpan * width;
+  ctx.fillStyle = "#0d1519"; ctx.fillRect(0, 0, width, top - 2);
+
+  const barS = activeTrack.bar_s, t1 = activeTrack.t1, hasGrid = barS > 0 && t1 != null;
+  if (hasGrid) {
+    const pxBar = barS / viewSpan * width, first = Math.floor(timeToBar(viewStart)) - 1, last = Math.ceil(timeToBar(viewStart + viewSpan)) + 1;
+    const labelEvery = [1, 2, 4, 8, 16, 32, 64].find(step => pxBar * step >= 46) || 64;
+    ctx.font = "10px monospace"; ctx.textBaseline = "alphabetic";
+    for (let bar = first; bar <= last; bar++) {
+      const x = Math.round(toX(barToTime(bar))) + 0.5, phrase = bar % 8 === 0, four = bar % 4 === 0;
+      if (pxBar >= 4 || four) {
+        ctx.strokeStyle = phrase ? "rgba(160,190,200,.34)" : four ? "rgba(160,190,200,.22)" : "rgba(160,190,200,.12)";
+        if (pxBar >= 4 || phrase || four) { ctx.beginPath(); ctx.moveTo(x, RULER_H - 6); ctx.lineTo(x, WAVE_H); ctx.stroke(); }
+      }
+      if (pxBar / 4 >= 11) {
+        ctx.strokeStyle = "rgba(160,190,200,.07)";
+        for (let beat = 1; beat < 4; beat++) { const bx = Math.round(toX(barToTime(bar + beat / 4))) + 0.5; ctx.beginPath(); ctx.moveTo(bx, top); ctx.lineTo(bx, WAVE_H); ctx.stroke(); }
+      }
+      if (bar % labelEvery === 0 && x > 0 && x < width - 14) { ctx.fillStyle = "#8aa0a7"; ctx.fillText(String(bar), x + 3, 11); }
+    }
+  }
+
+  // Bars in three layers: faint peak outline, then low (blue), mid (amber) and high (white) energy.
+  const columns = [];
+  for (let x = 0; x < width; x++) columns.push(waveBands(viewStart + x / width * viewSpan, viewStart + (x + 1) / width * viewSpan));
+  paintWaveColumns(ctx, columns, mid, half);
+
+  for (const [index, slot] of "ABCDEFGH".split("").entries()) {
+    const bar = cueBarValue(slot); if (bar == null || !hasGrid) continue;
+    const x = toX(barToTime(bar)); if (x < -4 || x > width + 4) continue;
+    const color = cueDisplayColor(slot), selectedCue = wave.selected === slot;
+    ctx.strokeStyle = color; ctx.lineWidth = selectedCue ? 2.5 : 1.5;
+    ctx.beginPath(); ctx.moveTo(x, RULER_H); ctx.lineTo(x, WAVE_H); ctx.stroke();
+    const name = $(`.cue-name[data-slot="${slot}"]`)?.value || activeTrack.cues?.[slot]?.name || slot;
+    const text = `${slot} ${name}`; ctx.font = "10px monospace";
+    const boxW = Math.min(150, ctx.measureText(text).width + 8), row = index % LABEL_ROWS, y = RULER_H + row * LABEL_ROW;
+    const boxX = x + boxW + 2 > width ? x - boxW : x;
+    ctx.fillStyle = color; ctx.fillRect(boxX, y, boxW, LABEL_ROW - 1);
+    if (selectedCue) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.strokeRect(boxX + 0.5, y + 0.5, boxW - 1, LABEL_ROW - 2); }
+    ctx.fillStyle = "#06090a"; ctx.save(); ctx.beginPath(); ctx.rect(boxX, y, boxW, LABEL_ROW); ctx.clip();
+    ctx.fillText(text, boxX + 4, y + 10); ctx.restore();
+  }
+
+  if (wave.playhead >= viewStart && wave.playhead <= viewStart + viewSpan) {
+    const x = Math.round(toX(wave.playhead)) + 0.5;
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, WAVE_H); ctx.stroke();
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(x - 4, 0); ctx.lineTo(x + 4, 0); ctx.lineTo(x, 6); ctx.fill();
+  }
+  drawMiniMap(); drawVariantLanes();
+}
+function drawMiniMap() {
+  const canvas = $("#wave-mini"); if (!canvas || !wave.ready) return;
+  const [ctx, width] = sizeCanvas(canvas, MINI_H);
+  ctx.fillStyle = "#0a1012"; ctx.fillRect(0, 0, width, MINI_H);
+  if (!wave.mini || wave.mini.width !== Math.floor(width) || wave.mini.hash !== wave.hash) {
+    const columns = Math.floor(width), data = [];
+    for (let x = 0; x < columns; x++) data.push(waveBands(x / columns * wave.duration, (x + 1) / columns * wave.duration, true));
+    wave.mini = {width: columns, hash: wave.hash, data};
+  }
+  paintWaveColumns(ctx, wave.mini.data, MINI_H / 2, MINI_H / 2 - 2);
+  for (const slot of "ABCDEFGH") {
+    const bar = cueBarValue(slot); if (bar == null || !activeTrack.bar_s) continue;
+    ctx.fillStyle = cueDisplayColor(slot); ctx.fillRect(Math.round(barToTime(bar) / wave.duration * width) - 1, 0, 2, MINI_H);
+  }
+  const x0 = wave.viewStart / wave.duration * width, w = Math.max(3, wave.viewSpan / wave.duration * width);
+  ctx.fillStyle = "rgba(255,255,255,.12)"; ctx.fillRect(x0, 0, w, MINI_H);
+  ctx.strokeStyle = "rgba(255,255,255,.6)"; ctx.strokeRect(x0 + 0.5, 0.5, w - 1, MINI_H - 1);
+  ctx.fillStyle = "#fff"; ctx.fillRect(Math.round(wave.playhead / wave.duration * width), 0, 1, MINI_H);
+}
+function updateReadout(time) {
+  const el = $("#wave-readout"); if (!el || !wave.ready) return;
+  const bar = activeTrack.bar_s ? ` · bar ${formatBar(timeToBar(time))}` : "";
+  const minutes = Math.floor(time / 60), seconds = (time % 60).toFixed(2).padStart(5, "0");
+  el.textContent = `${minutes}:${seconds}${bar} · ${wave.viewSpan >= wave.duration - 0.01 ? "full track" : (wave.viewSpan / (activeTrack.bar_s || 2)).toFixed(1) + " bars in view"}`;
+}
+function markerAt(x) {
+  if (!activeTrack.bar_s) return null;
+  let best = null, bestDistance = HIT_PX + 1;
+  for (const slot of "ABCDEFGH") {
+    const bar = cueBarValue(slot); if (bar == null) continue;
+    const distance = Math.abs((barToTime(bar) - wave.viewStart) / wave.viewSpan * $("#waveform").clientWidth - x);
+    if (distance < bestDistance || (distance === bestDistance && slot === wave.selected)) { best = slot; bestDistance = distance; }
+  }
+  return best;
+}
+function snapBar(bar, event) {
+  if (event.altKey) return Math.round(bar * 20) / 20;
+  return event.shiftKey ? Math.round(bar * 4) / 4 : Math.round(bar);
+}
+function waveFrame() {
+  const audio = $("#preview-audio");
+  wave.playhead = audio.currentTime;
+  if (wave.stopAt != null && audio.currentTime >= wave.stopAt) { wave.stopAt = null; audio.pause(); }
+  if (wave.follow && !audio.paused && wave.viewSpan < wave.duration) {
+    if (wave.playhead > wave.viewStart + wave.viewSpan * 0.92 || wave.playhead < wave.viewStart) clampView(wave.playhead - wave.viewSpan * 0.08, wave.viewSpan);
+  }
+  drawWave(); updateReadout(wave.playhead);
+  wave.raf = audio.paused ? 0 : requestAnimationFrame(waveFrame);
+}
+function bindWaveEditor() {
+  if (wave.bound) return; wave.bound = true;
+  const canvas = $("#waveform"), mini = $("#wave-mini"), audio = $("#preview-audio"), dialog = $("#review-dialog");
+  const localX = (event, el = canvas) => event.clientX - el.getBoundingClientRect().left;
+  canvas.addEventListener("wheel", event => {
+    if (!wave.ready) return; event.preventDefault();
+    const width = canvas.clientWidth, time = wave.viewStart + localX(event) / width * wave.viewSpan;
+    if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      clampView(wave.viewStart + (event.deltaX || event.deltaY) / width * wave.viewSpan, wave.viewSpan); drawWave();
+    } else zoomAt(Math.exp(event.deltaY * (event.ctrlKey ? 0.01 : 0.002)), time);
+  }, {passive: false});
+  canvas.addEventListener("pointerdown", event => {
+    if (!wave.ready || event.button !== 0) return;
+    canvas.setPointerCapture(event.pointerId);
+    const x = localX(event), slot = markerAt(x);
+    if (slot) { selectCue(slot); wave.drag = {slot, startX: x, moved: false}; }
+    else wave.drag = {pan: true, startX: x, startView: wave.viewStart, moved: false};
+  });
+  canvas.addEventListener("pointermove", event => {
+    if (!wave.ready) return;
+    const x = localX(event), width = canvas.clientWidth, time = wave.viewStart + x / width * wave.viewSpan, drag = wave.drag;
+    if (!drag) { canvas.style.cursor = markerAt(x) ? "ew-resize" : "crosshair"; updateReadout(time); return; }
+    if (drag.slot) {
+      if (!drag.moved && Math.abs(x - drag.startX) <= 2) return;
+      drag.moved = true;
+      setCueBar(drag.slot, snapBar(timeToBar(time), event), {silent: true}); updateReadout(time);
+    } else {
+      if (Math.abs(x - drag.startX) > 3) drag.panning = true;
+      if (drag.panning) { clampView(drag.startView - (x - drag.startX) / width * wave.viewSpan, wave.viewSpan); drawWave(); canvas.style.cursor = "grabbing"; }
+    }
+  });
+  canvas.addEventListener("pointerup", event => {
+    const drag = wave.drag; wave.drag = null; canvas.style.cursor = "crosshair"; if (!drag) return;
+    if (drag.slot) {
+      if (drag.moved) { $(`.cue-bar[data-slot="${drag.slot}"]`).dispatchEvent(new Event("change", {bubbles: true})); if (wave.audition) auditionCue(drag.slot); }
+    } else if (!drag.panning) {
+      audio.currentTime = Math.max(0, wave.viewStart + localX(event) / canvas.clientWidth * wave.viewSpan);
+      wave.playhead = audio.currentTime; drawWave(); updateReadout(wave.playhead);
+    }
+  });
+  canvas.addEventListener("dblclick", event => { if (!markerAt(localX(event))) fitView(); });
+
+  const miniMove = event => { if (wave.ready) centerOn(localX(event, mini) / mini.clientWidth * wave.duration); };
+  mini.addEventListener("pointerdown", event => { mini.setPointerCapture(event.pointerId); wave.miniDrag = true; miniMove(event); });
+  mini.addEventListener("pointermove", event => { if (wave.miniDrag) miniMove(event); });
+  mini.addEventListener("pointerup", () => { wave.miniDrag = false; });
+
+  audio.addEventListener("play", () => { if (!wave.raf) wave.raf = requestAnimationFrame(waveFrame); });
+  audio.addEventListener("pause", () => { wave.stopAt = null; wave.playhead = audio.currentTime; drawWave(); });
+  audio.addEventListener("seeked", () => { wave.playhead = audio.currentTime; drawWave(); });
+  dialog.addEventListener("close", () => {
+    audio.pause(); wave.stopAt = null; invalidateWaveLoad(); updateReviewState();
+  });
+  window.addEventListener("resize", () => drawWave());
+
+  $("#cue-edit-list").addEventListener("input", event => {
+    if (event.target.matches(".cue-bar, .cue-name")) { updateReviewState(); drawWave(); }
+  });
+  $("#cue-edit-list").addEventListener("change", event => { if (event.target.matches(".cue-bar")) waveCommit(); });
+  $("#cue-edit-list").addEventListener("focusin", event => {
+    const row = event.target.closest(".cue-edit"); if (row && row.dataset.row !== wave.selected) selectCue(row.dataset.row);
+  });
+  $("#wave-legend").addEventListener("click", event => {
+    const item = event.target.closest("[data-slot]"); if (!item) return;
+    selectCue(item.dataset.slot); if (cueBarValue(item.dataset.slot) != null) centerOn(barToTime(cueBarValue(item.dataset.slot))); else toast(`Cue ${item.dataset.slot} has no bar yet.`);
+  });
+  $("#wave-zoom-in").onclick = () => zoomAt(0.5, wave.playhead >= wave.viewStart && wave.playhead <= wave.viewStart + wave.viewSpan ? wave.playhead : wave.viewStart + wave.viewSpan / 2);
+  $("#wave-zoom-out").onclick = () => zoomAt(2, wave.viewStart + wave.viewSpan / 2);
+  $("#wave-fit").onclick = fitView;
+  $("#wave-zoom-bars").onclick = () => { clampView(wave.playhead - activeTrack.bar_s * 4, activeTrack.bar_s * 16); drawWave(); };
+  $("#wave-zoom-cue").onclick = () => wave.selected ? zoomToCue(wave.selected) : toast("Select a cue first (click a marker or press 1–8).");
+  $("#wave-undo").onclick = waveUndo; $("#wave-redo").onclick = waveRedo;
+  $("#wave-follow").onchange = event => { wave.follow = event.target.checked; };
+  $("#wave-audition").onchange = event => { wave.audition = event.target.checked; };
+
+  dialog.addEventListener("keydown", event => {
+    if (!wave.ready || reviewSaving || reviewLeaveResolve || event.altKey) return;
+    const tag = event.target.tagName, typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+    const mod = event.metaKey || event.ctrlKey, key = event.key;
+    if (mod && key.toLowerCase() === "z" && !(typing && event.target.matches(".cue-name"))) { event.preventDefault(); event.shiftKey ? waveRedo() : waveUndo(); return; }
+    if (mod && key.toLowerCase() === "y") { event.preventDefault(); waveRedo(); return; }
+    if (mod || typing || tag === "AUDIO") return;
+    const beat = activeTrack.bar_s / 4, step = event.shiftKey ? activeTrack.bar_s : beat;
+    if (key === " " && tag !== "BUTTON") { event.preventDefault(); audio.paused ? startPreviewPlayback() : audio.pause(); }
+    else if (key === "+" || key === "=") zoomAt(0.5, wave.playhead >= wave.viewStart && wave.playhead <= wave.viewStart + wave.viewSpan ? wave.playhead : wave.viewStart + wave.viewSpan / 2);
+    else if (key === "-" || key === "_") zoomAt(2, wave.viewStart + wave.viewSpan / 2);
+    else if (key === "0") fitView();
+    else if (key === "ArrowLeft" || key === "ArrowRight") { event.preventDefault(); audio.currentTime = Math.max(0, Math.min(wave.duration, audio.currentTime + (key === "ArrowLeft" ? -step : step))); wave.playhead = audio.currentTime; ensureVisible(wave.playhead); drawWave(); }
+    else if ((key === "[" || key === "]") && wave.selected) { nudgeCue(wave.selected, (key === "[" ? -1 : 1) * (event.shiftKey ? 1 : 0.25)); }
+    else if (key === "{" && wave.selected) nudgeCue(wave.selected, -1);
+    else if (key === "}" && wave.selected) nudgeCue(wave.selected, 1);
+    else if (/^[1-8]$/.test(key)) {
+      const slot = "ABCDEFGH"[Number(key) - 1]; selectCue(slot);
+      const bar = cueBarValue(slot); bar == null ? toast(`Cue ${slot} has no bar yet. Press C to set it at the playhead.`) : centerOn(barToTime(bar));
+    }
+    else if (key.toLowerCase() === "p" && wave.selected) previewCue(wave.selected);
+    else if (key.toLowerCase() === "c" && wave.selected) cueToPlayhead(wave.selected);
+    else if (key.toLowerCase() === "f") { wave.follow = !wave.follow; $("#wave-follow").checked = wave.follow; }
+  });
+}
+function invalidateWaveLoad() {
+  wave.loadId = (wave.loadId || 0) + 1;
+  wave.controller?.abort();
+  wave.detailController?.abort(); clearTimeout(wave.detailTimer); wave.detailKey = null;
+}
+async function drawWaveform(track) {
+  bindWaveEditor();
+  invalidateWaveLoad();
+  const loadId = wave.loadId, controller = new AbortController();
+  wave.controller = controller;
+  const current = () => wave.loadId === loadId && activeTrack?.hash === track.hash && $("#review-dialog").open;
+  const fresh = wave.hash !== track.hash || !wave.ready;
+  if (wave.hash !== track.hash) {
+    wave.overview = null; wave.detail = null; wave.coarse = null; wave.duration = 0; waveDuration = 0;
+    wave.viewStart = 0; wave.viewSpan = 1; wave.mini = null;
+  }
+  wave.ready = false; wave.error = ""; wave.selected = null; wave.stopAt = null;
+  wave.drag = null; wave.miniDrag = false;
+  $("#wave-legend").textContent = ""; $("#wave-readout").textContent = "";
+  wave.undo = []; wave.redo = []; wave.committed = waveSnapshot(); updateUndoButtons(); drawWave();
+  if (wave.coarse?.hash !== track.hash) {
+    api(`/api/waveform/${track.hash}`, {signal: controller.signal}).then(data => {
+      if (!current()) return;
+      wave.coarse = {hash: track.hash, peaks: data.peaks || []};
+      if (!wave.ready) drawWave();
+    }).catch(error => {
+      if (current() && error.name !== "AbortError") console.warn("Cached waveform unavailable", error);
+    });
+  }
+  let data;
+  try { data = await loadWaveData(track, controller.signal); }
+  catch (error) {
+    if (!current() || error.name === "AbortError") return;
+    wave.error = "Waveform preview unavailable: " + error.message; wave.ready = false; drawWave(); return;
+  }
+  if (!current()) return;
+  Object.assign(wave, data, {mini: null});
+  wave.ready = true; waveDuration = wave.duration;
+  if (fresh) clampView(0, wave.duration);
+  wave.playhead = $("#preview-audio").currentTime || 0;
+  $("#wave-legend").innerHTML = "ABCDEFGH".split("").map((s, i) => `<span data-slot="${s}" data-cue-color="${escapeHtml(track.cues?.[s]?.color_id || SLOT_COLOR_IDS[i])}" title="Select and center on cue ${s}">${s} · ${escapeHtml(track.cues?.[s]?.name || "")}</span>`).join("");
+  drawWave(); updateReadout(wave.playhead);
+}
+function neighborTrack(step) {
+  const index = tracks.findIndex(track => track.hash === activeTrack?.hash);
+  return index < 0 ? null : tracks[index + step] || null;
+}
+function updateNavButtons() {
+  $("#prev-track").disabled = !neighborTrack(-1); $("#next-track").disabled = !neighborTrack(1);
+  $("#save-next").disabled = !neighborTrack(1);
+}
+function reviewSnapshot() {
   const cues = {};
   $$(".cue-edit").forEach(row => {
     const slot = $(".cue-name", row).dataset.slot;
-    cues[slot] = {name:$(".cue-name",row).value,bar:$(".cue-bar",row).value};
+    const value = $(".cue-bar", row).value;
+    cues[slot] = {name: $(".cue-name", row).value, bar: value === "" ? null : Number(value)};
   });
+  return cues;
+}
+function reviewHasChanges() {
+  return $("#review-dialog").open && JSON.stringify(reviewSnapshot()) !== reviewSaved;
+}
+function updateReviewState() {
+  $("#review-state").textContent = reviewSaving ? "Saving review..." :
+    reviewHasChanges() ? "Unsaved changes" : "Edits stay local until you save.";
+}
+function setReviewBusy(busy) {
+  reviewSaving = busy;
+  $("#review-dialog").inert = busy;
+  $("#review-dialog").setAttribute("aria-busy", String(busy));
+  updateReviewState();
+}
+function resolveReviewLeave(choice) {
+  const resolve = reviewLeaveResolve;
+  reviewLeaveResolve = null;
+  $("#unsaved-review-dialog").close();
+  resolve?.(choice);
+}
+async function confirmReviewLeave() {
+  if (reviewSaving) { toast("Wait for this review operation to finish."); return false; }
+  if (reviewLeaveResolve) return false;
+  if (!reviewHasChanges()) return true;
+  const choice = await new Promise(resolve => {
+    reviewLeaveResolve = resolve;
+    $("#unsaved-review-dialog").showModal();
+  });
+  if (choice === "save") return persistReview();
+  return choice === "discard";
+}
+async function closeReview() {
+  if (await confirmReviewLeave()) $("#review-dialog").close();
+}
+async function persistReview() {
+  if (reviewSaving || !activeTrack) return false;
+  const track = activeTrack, cues = reviewSnapshot();
+  setReviewBusy(true);
   try {
-    await api(`/api/tracks/${activeTrack.hash}`, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({cues,map_type:activeTrack.map_type})});
-    selected.add(activeTrack.hash);$("#review-dialog").close();toast("Review saved. Cue edits are local.");await reload();
-  } catch(error) { toast(error.message); }
+    await api(`/api/tracks/${track.hash}`, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({cues,map_type:track.map_type})});
+    reviewSaved = JSON.stringify(cues);
+    for (const [slot, cue] of Object.entries(cues)) track.cues[slot] = {...track.cues[slot], ...cue};
+    track.edited = true; track.reviewed = true;
+    selected.add(track.hash); toast("Review saved. Cue edits are local."); await reload();
+    return true;
+  } catch (error) { toast(error.message); return false; }
+  finally { setReviewBusy(false); }
+}
+async function saveReview(advance = false) {
+  const next = advance === true ? neighborTrack(1) : null;
+  if (reviewLeaveResolve || !(await persistReview())) return;
+  if (next) await openReview(next.hash);
+  else $("#review-dialog").close();
 }
 async function openSettings() {
-  const data=await api("/api/settings");$("#gemini-toggle").checked=data.gemini==="true";$("#strictness").value=data.strictness||"standard";$("#settings-dialog").showModal();
+  const data=await api("/api/settings");$("#gemini-toggle").checked=data.gemini==="true";$("#strictness").value=data.strictness||"standard";
+  const status=data.gemini_status||{}, lines=[
+    status.configured?`Credential configured (${status.key_source}); access not yet verified.`:"Credential missing. Configure GEMINI_API_KEY locally; never paste it into chat.",
+    `Model: ${status.model||"unavailable"}${status.model_source?` (${status.model_source})`:""}.`,
+    status.budget_note||"Local spend limit; not a provider billing guarantee.",
+  ];
+  if(status.spent_usd!=null)lines.push(`Recorded lifetime spend: $${status.spent_usd.toFixed(4)}.`);
+  if(status.pending_reconciliation)lines.push("Requests blocked: a previous request needs provider usage reconciliation.");
+  if(status.blocked)lines.push(`Requests blocked: ${status.blocked}`);
+  if(status.error||status.last_error)lines.push(status.error||status.last_error);
+  $("#gemini-status").textContent=lines.join(" ");
+  $("#settings-dialog").showModal();
 }
 function meaningLabel(id) {
   return cueMapCatalog?.meanings?.find(item=>item.id===id)?.label || id.replaceAll("_"," ");
@@ -379,17 +979,19 @@ function renderCueMapEditor() {
     : "For electronic tracks. Drop cues are placed only when the audio supports a confident drop.";
   $("#cue-map-summary").textContent=description;
   $("#cue-map-mode").value=cueMapSettings.mode;
+  for (const key of ["intro","go","exit"]) $(`#mix-${key}`).value=cueMapSettings.mix_lengths[key].join(", ");
+  $("#mix-end-fallback").checked=cueMapSettings.end_of_song_fallback;
   $("#cue-map-rows").innerHTML="ABCDEFGH".split("").map(slot=>{
     const spec=map[slot];
     const selectedColor=cueMapCatalog.palette.find(color=>color.id===spec.color)||cueMapCatalog.palette[0];
     const options=cueMapCatalog.palette.map(color=>`<option value="${color.id}" ${color.id===spec.color?"selected":""}>${escapeHtml(color.name)} · ${color.display}</option>`).join("");
     const meanings=cueMapCatalog.meanings.map(item=>`<option value="${item.id}" ${item.id===spec.meaning?"selected":""}>${escapeHtml(item.label)}</option>`).join("");
-    const preview=spec.label.replaceAll("{bars}","16");
+    const preview=spec.label.replaceAll("{bars}","8").replaceAll("{beats}","32");
     return `<article class="cue-map-row ${spec.enabled?"":"disabled"}" data-cue-slot="${slot}">
       <div class="cue-map-slot" data-cue-color="${selectedColor.id}"><strong>${slot}</strong><small>PAD ${slot}</small></div>
       <div class="cue-map-fields"><label>What should this cue find?<select class="map-meaning" data-slot="${slot}">${meanings}</select></label>
         <label>Serato label<input class="map-label" data-slot="${slot}" maxlength="80" value="${escapeHtml(spec.label)}" placeholder="Example: OUTRO -{bars}">
-          <span class="field-hint">Use {bars} for an automatic bar count.</span></label></div>
+          <span class="field-hint">Use {beats} for beats or {bars} for bars (END for an end-of-song EXIT). INTRO/GO/EXIT defaults count beats; drop/chorus leads count bars.</span></label></div>
       <div class="cue-map-color"><label>Pad color<select class="map-color" data-slot="${slot}">${options}</select></label>
         <span class="palette-preview" data-cue-color="${selectedColor.id}"><i></i><span>${selectedColor.display} in Serato</span></span>
         <label class="cue-enabled"><input class="map-enabled" data-slot="${slot}" type="checkbox" ${spec.enabled?"checked":""}> Enabled</label></div>
@@ -401,7 +1003,7 @@ function renderCueMapEditor() {
   $$(".map-meaning").forEach(select=>select.onchange=()=>{readCueMapEditor();renderCueMapEditor()});
   $$(".map-label").forEach(input=>input.oninput=()=>{
     const preview=$(".cue-map-preview strong",input.closest(".cue-map-row"));
-    preview.textContent=input.value.replaceAll("{bars}","16");
+    preview.textContent=input.value.replaceAll("{bars}","8").replaceAll("{beats}","32");
   });
 }
 async function openCueMaps() {
@@ -418,6 +1020,10 @@ async function openCueMaps() {
   $("#cue-map-dialog").showModal();
 }
 function readCueMapEditor() {
+  cueMapSettings.end_of_song_fallback=$("#mix-end-fallback").checked;
+  cueMapSettings.mix_lengths=Object.fromEntries(["intro","go","exit"].map(key=>[
+    key,$(`#mix-${key}`).value.split(",").map(value=>Number(value.trim()))
+  ]));
   const map=cueMapSettings.maps[activeCueMap];
   $$(".cue-map-row").forEach(row=>{
     const slot=row.dataset.cueSlot;
@@ -432,7 +1038,7 @@ function readCueMapEditor() {
 async function saveCueMaps() {
   readCueMapEditor();
   cueMapSettings.mode=$("#cue-map-mode").value;
-  const payload={version:cueMapSettings.version,mode:cueMapSettings.mode,maps:cueMapSettings.maps};
+  const payload={version:cueMapSettings.version,mode:cueMapSettings.mode,maps:cueMapSettings.maps,mix_lengths:cueMapSettings.mix_lengths,end_of_song_fallback:cueMapSettings.end_of_song_fallback};
   await api("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cue_maps:payload})});
   $("#cue-map-dialog").close();
   toast("Cue maps saved. New analyses will use your settings.");
@@ -491,6 +1097,22 @@ $("#dropzone").addEventListener("drop",event=>{event.preventDefault();$("#dropzo
 $("#path-add").onclick=async()=>{try{const data=await api("/api/import-path",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:$("#path-input").value})});await reload();await queueTracks(data.items.map(item=>item.hash));toast(`${data.items.length} tracks added · ${data.skipped} skipped`)}catch(error){toast(error.message)}};
 $("#process-selected").onclick=()=>queueTracks([...selected]).catch(error=>toast(error.message));
 $("#reanalyze-selected").onclick=()=>{if(confirm("Re-analyze selected tracks even if they already have results?"))queueTracks([...selected],true).catch(error=>toast(error.message))};
+const removeTracks=async(body,message)=>{if(!confirm(message))return;try{const data=await api("/api/tracks/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});body.hashes?.forEach(hash=>selected.delete(hash));if(body.all)selected.clear();await reload();toast(`Removed ${data.removed} track${data.removed===1?"":"s"} from the library.`)}catch(error){toast(error.message)}};
+$("#remove-selected").onclick=()=>{if(!selected.size)return toast("Select tracks to remove first.");removeTracks({hashes:[...selected]},`Remove ${selected.size} selected track(s), including their local cue reviews and event labels? Original files are not touched.`)};
+$("#clear-library").onclick=()=>removeTracks({all:true},"Clear the whole library? Analysis results, cue reviews, and event labels will be lost. Your original files are not touched.");
+$("#map-select").onchange=async event=>{
+  const choice=event.target.value,track=activeTrack;
+  if(!track||choice===(track.map_override||"AUTO"))return;
+  event.target.value=track.map_override||"AUTO";
+  if(!(await confirmReviewLeave()))return;
+  const warning=track.edited?" Your saved cue edits for this song will be replaced.":"";
+  if(!confirm(`Re-derive this song's cues using the ${choice==="AUTO"?"automatic":choice} map?${warning} It reuses the earlier analysis, so it only takes a moment.`)){event.target.value=track.map_override||"AUTO";return}
+  setReviewBusy(true);
+  try{const result=await api(`/api/tracks/${track.hash}/map`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map_type:choice})});
+    $("#review-dialog").close();if(result.job_id){activeJob=result.job_id;startPolling()}await reload();toast("Re-deriving cues with the new map…")}
+  catch(error){event.target.value=track.map_override||"AUTO";toast(error.message)}
+  finally{setReviewBusy(false)}
+};
 $("#start-review").onclick=()=>{$("#status-filter").value="Needs a look";renderTracks();document.querySelector(".library-section").scrollIntoView({behavior:"smooth"})};
 $("#select-all").onchange=()=>{const visible=tracks.filter(track=>!$("#status-filter").value||track.status===$("#status-filter").value);visible.forEach(track=>$("#select-all").checked?selected.add(track.hash):selected.delete(track.hash));renderTracks()};
 $("#search").oninput=renderTracks;$("#status-filter").onchange=renderTracks;
@@ -511,7 +1133,7 @@ $("#cue-map-save").onclick=()=>saveCueMaps().catch(error=>toast(error.message));
 $("#cue-map-defaults").onclick=()=>{
   if(!confirm("Restore both cue maps to their recommended defaults? Your custom meanings, labels, and colors will be replaced."))return;
   const defaults=cueMapSettings._defaults;
-  cueMapSettings={version:defaults.version,mode:defaults.mode,maps:JSON.parse(JSON.stringify(defaults.maps)),_defaults:defaults};
+  cueMapSettings={version:defaults.version,mode:defaults.mode,maps:JSON.parse(JSON.stringify(defaults.maps)),mix_lengths:JSON.parse(JSON.stringify(defaults.mix_lengths)),end_of_song_fallback:defaults.end_of_song_fallback,_defaults:defaults};
   renderCueMapEditor();
 };
 $("#cue-map-copy").onclick=()=>{
@@ -520,10 +1142,21 @@ $("#cue-map-copy").onclick=()=>{
   cueMapSettings.maps[other]=JSON.parse(JSON.stringify(cueMapSettings.maps[activeCueMap]));
   toast(`Copied ${activeCueMap==="VOCAL"?"vocal":"electronic"} cue settings to the ${other==="VOCAL"?"vocal":"electronic"} map.`);
 };
-$("#save-cues").onclick=saveReview;$("#write-reviewed").onclick=writeReviewed;
+$("#save-cues").onclick=()=>saveReview();$("#save-next").onclick=()=>saveReview(true);$("#next-track").onclick=()=>{const t=neighborTrack(1);if(t)openReview(t.hash)};$("#prev-track").onclick=()=>{const t=neighborTrack(-1);if(t)openReview(t.hash)};$("#write-reviewed").onclick=writeReviewed;
+$("#add-event-label").onclick=()=>addEventLabel();$("#save-event-review").onclick=()=>saveEventReviewState();
 $("#sound-toggle").onclick=()=>{soundOn=!soundOn;$("#sound-toggle").textContent=`Sound: ${soundOn?"On":"Off"}`};
 $("#finder-button").onclick=async()=>{try{await api(`/api/finder/${activeTrack.hash}`,{method:"POST"});toast("Showing original file in Finder.")}catch(error){toast(error.message)}};
-$$("[data-close]").forEach(button=>button.onclick=()=>button.closest("dialog").close());
+$$("[data-close]").forEach(button=>button.onclick=()=>{
+  const dialog=button.closest("dialog");
+  if(dialog.id==="review-dialog")closeReview();
+  else dialog.close();
+});
+$$("[data-review-leave]").forEach(button=>button.onclick=()=>resolveReviewLeave(button.dataset.reviewLeave));
+$("#unsaved-review-dialog").addEventListener("cancel",event=>{event.preventDefault();resolveReviewLeave("cancel")});
+$("#review-dialog").addEventListener("cancel",event=>{event.preventDefault();closeReview()});
+window.addEventListener("beforeunload",event=>{
+  if(reviewSaving||eventReviewSaving||reviewHasChanges()){event.preventDefault();event.returnValue=""}
+});
 drawRunner();drawProgress(0);reload();refreshCrates();loadSettingsLine();loadCapabilities();
 async function loadSettingsLine(){try{const data=await api("/api/settings");$("#using-settings").textContent=`Using: ${cueMapModeLabel(data.cue_maps?.mode||"AUTO")} · Gemini tie-break ${data.gemini==="true"?"on":"off"} · Review ${data.strictness||"standard"}`}catch(error){toast(error.message)}}
 async function loadCapabilities(){
@@ -539,14 +1172,21 @@ async function openExperiments() {
   const [settings, report] = await Promise.all([api("/api/settings"), api("/api/experiments/report")]);
   const enabled = new Set(settings.experiments || []);
   $("#experiment-list").innerHTML = settings.experiment_catalog.map(item => `<label class="setting-row"><span><strong><i class="variant-dot" data-variant="${item.id}"></i>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.summary)}${item.heavy ? " Slow." : ""}</small></span><input type="checkbox" data-experiment="${item.id}" ${enabled.has(item.id) ? "checked" : ""} ${item.id === "baseline" ? "disabled" : ""}></label>`).join("");
-  const rows = Object.entries(report.variants || {});
-  $("#experiment-report").innerHTML = report.graded_songs ? `<h3>Scored on ${report.graded_songs} graded song${report.graded_songs === 1 ? "" : "s"} (within one beat of your saved cues)</h3>
-    <table class="variant-table"><thead><tr><th>Experiment</th><th>Accuracy</th><th>Vocal</th><th>Drop</th><th>Fixes vs baseline</th><th>Breaks vs baseline</th></tr></thead><tbody>` +
-    rows.map(([id, row]) => {
-      const pct = value => value && value.total ? Math.round(100 * value.right / value.total) + "%" : "–";
-      return `<tr><th><i class="variant-dot" data-variant="${id}"></i>${escapeHtml(row.label)}</th><td>${Math.round(100 * row.accuracy)}% <small>(${row.right}/${row.total})</small></td><td>${pct(row.by_map?.VOCAL)}</td><td>${pct(row.by_map?.DROP)}</td><td>${id === "baseline" ? "–" : row.wins}</td><td>${id === "baseline" ? "–" : row.losses}</td></tr>`;
-    }).join("") + `</tbody></table>` : `<div class="empty-state">Analyze some songs, then review and save them. Your saved cues become the answer key and this table fills in.</div>`;
+  $("#experiment-report").innerHTML = renderScoreReport(report);
   $("#experiments-dialog").showModal();
+}
+function renderScoreReport(report) {
+  const rows = Object.entries(report.variants || {});
+  const pct = value => value && value.total ? Math.round(100 * value.right / value.total) + "%" : "–";
+  const positionedPct = value => pct({right:value?.positioned_right || 0,total:value?.positioned_total || 0});
+  const notes = `<p class="muted">Only saved human targets count. Omitted targets stay unknown; explicit empty targets are shown separately. Different cue meanings/maps are excluded from timing comparisons.</p>` +
+    `<p class="muted">${report.skipped?.length || 0} tracks skipped; ${report.unavailable_predictions?.length || 0} unavailable predictions. Export the report for per-cue errors and exclusions.</p>`;
+  if (!report.graded_songs || !rows.length) return `<div class="empty-state">No scorable reviewed targets with saved automatic predictions yet. Analyze, review and save songs first. No accuracy estimate is available.</div>` + notes;
+  return `<h3>Scored on ${report.graded_songs} reviewed song${report.graded_songs === 1 ? "" : "s"} (within one beat)</h3>` + notes +
+    `<table class="variant-table"><thead><tr><th>Experiment</th><th>Positioned targets</th><th>Explicit empty targets</th><th>Vocal positioned</th><th>Drop positioned</th><th>Map correct</th><th>Fixes vs rules</th><th>Breaks vs rules</th></tr></thead><tbody>` +
+    rows.map(([id, row]) => {
+      return `<tr><th><i class="variant-dot" data-variant="${escapeHtml(id)}"></i>${escapeHtml(row.label)}</th><td>${pct({right:row.positioned_right,total:row.positioned_total})} <small>(${row.positioned_right}/${row.positioned_total})</small></td><td>${row.empty_right}/${row.empty_total}</td><td>${positionedPct(row.by_map?.VOCAL)}</td><td>${positionedPct(row.by_map?.DROP)}</td><td>${pct(report.map_comparison?.[id])}</td><td>${id === "baseline" ? "–" : row.wins}</td><td>${id === "baseline" ? "–" : row.losses}</td></tr>`;
+    }).join("") + `</tbody></table><p class="muted">Recorded new Gemini cost on these saved runs: $${Number(report.gemini_cost?.new_cost_usd || 0).toFixed(4)}; ${report.gemini_cost?.unknown_cost_tracks || 0} tracks with unknown cost. Not lifetime/provider billing.</p>`;
 }
 $("#experiments-open").onclick = () => openExperiments().catch(error => toast(error.message));
 $("#experiments-save").onclick = async () => {

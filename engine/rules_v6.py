@@ -7,6 +7,7 @@ import os
 import sys
 
 from synced_lyrics import align_synced_lyrics
+from timing import bar_to_time, time_to_bar
 import cue_maps as cue_map_settings
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +26,7 @@ DEFAULT_CONFIG = {
     },
     "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco", "dubstep", "drum and bass", "dnb", "bass music", "electro", "garage"],
     "drop_bpm_range": [118, 150],
-    "drop_min_confidence": 0.65,
+    "drop_min_confidence": 0.65, "vocal_led_ratio": 0.5, "late_drop_fraction": 0.5,
     "drop_phrase_bars": 8,
     "drop_recovery_ratio": 1.8,
     "genres": {
@@ -55,16 +56,16 @@ def _section_bars(section, grid):
     if section.get("j0") is not None:
         start = int(round(section["j0"]))
     else:
-        start = int(round((float(section.get("start", section.get("start_s", 0))) - grid["t1"]) / grid["bar_s"]))
+        start = int(round(time_to_bar(section.get("start", section.get("start_s", 0)), grid)))
     if section.get("j1") is not None:
         end = int(round(section["j1"]))
     else:
-        end = int(round((float(section.get("end", section.get("end_s", 0))) - grid["t1"]) / grid["bar_s"]))
+        end = int(round(time_to_bar(section.get("end", section.get("end_s", 0)), grid)))
     return start, end
 
 
 def _bar_time(bar, grid):
-    return round(grid["t1"] + bar * grid["bar_s"] - grid.get("offset_ms", 0) / 1000, 3)
+    return round(bar_to_time(bar, grid), 3)
 
 
 def _cue(name, bar, confidence, reason, flags=None, grid=None):
@@ -81,19 +82,25 @@ def _cue(name, bar, confidence, reason, flags=None, grid=None):
 def _bar_mean(values, hop_s, grid, bar, count=1):
     if bar < 0 or hop_s <= 0:
         return None
-    start = max(0, int((grid["t1"] + bar * grid["bar_s"]) / hop_s))
-    end = max(start, int((grid["t1"] + (bar + count) * grid["bar_s"]) / hop_s))
+    start = max(0, int(bar_to_time(bar, grid) / hop_s))
+    end = max(start, int(bar_to_time(bar + count, grid) / hop_s))
     chunk = values[start:end]
     return sum(chunk) / len(chunk) if chunk else None
 
 
-def detect_drops(stems, low_energy, hop_s, grid, duration_s, phrase_bars=8, recovery_ratio=1.8):
-    """Find downbeat-aligned low-end returns after a sustained breakdown."""
+def detect_drops(stems, low_energy, hop_s, grid, duration_s, phrase_bars=8, recovery_ratio=1.8, relaxed=False):
+    """Find downbeat-aligned low-end returns after a sustained breakdown.
+
+    `relaxed` accepts shallower breakdowns and smaller rises, for tracks where the strict pass finds too few drops.
+    """
+    baseline_limit, low_ratio_min, confidence_cap = (0.85, 1.1, 0.66) if relaxed else (0.65, 1.25, 0.95)
+    if relaxed:
+        recovery_ratio = min(recovery_ratio, 1.4)
     drums, bass = stems.get("drums"), stems.get("bass")
     if not drums or not bass or not low_energy:
         return []
-    bar_count = max(0, int(math.ceil((duration_s - grid["t1"]) / grid["bar_s"])))
-    first = max(0, int(math.ceil(-grid["t1"] / grid["bar_s"] - 1e-6)))
+    bar_count = max(0, int(math.ceil(time_to_bar(duration_s, grid))))
+    first = max(0, int(math.ceil(time_to_bar(0, grid) - 1e-6)))
     bars = []
     for bar in range(first, bar_count):
         values = [_bar_mean(stems[key], hop_s, grid, bar) for key in ("drums", "bass")]
@@ -119,18 +126,18 @@ def detect_drops(stems, low_energy, hop_s, grid, duration_s, phrase_bars=8, reco
         low_reference = sorted(x[1] for x in reference_window)[len(reference_window) // 2]
         if min(baseline, low_baseline, reference, low_reference) <= 0:
             continue
-        if baseline > reference * 0.65 or low_baseline > low_reference * 0.65:
+        if baseline > reference * baseline_limit or low_baseline > low_reference * baseline_limit:
             continue
         ratio = current / baseline
         low_ratio = low / low_baseline
-        if ratio < recovery_ratio or low_ratio < 1.25:
+        if ratio < recovery_ratio or low_ratio < low_ratio_min:
             continue
-        confidence = min(0.95, 0.55 + min(ratio - recovery_ratio, 1.0) * 0.15
-                         + min(low_ratio - 1.25, 1.0) * 0.1)
+        confidence = min(confidence_cap, 0.55 + min(ratio - recovery_ratio, 1.0) * 0.15
+                         + min(low_ratio - low_ratio_min, 1.0) * 0.1)
         breakdown_start = bar - 4
         for previous in range(max(first, bar - lookback), bar - 3):
             value = by_bar.get(previous)
-            if value and value[0] <= reference * 0.65 and value[1] <= low_reference * 0.65:
+            if value and value[0] <= reference * baseline_limit and value[1] <= low_reference * baseline_limit:
                 breakdown_start = previous
                 break
         candidates.append({
@@ -148,17 +155,35 @@ def detect_drops(stems, low_energy, hop_s, grid, duration_s, phrase_bars=8, reco
                 kept[-1] = candidate
         else:
             kept.append(candidate)
+    if relaxed:
+        for candidate in kept:
+            candidate["reason"] = "softer kick/bass return after a shallow breakdown"
     return kept
+
+
+def detect_drops_with_fallback(stems, low_energy, hop_s, grid, duration_s, phrase_bars=8, min_confidence=0.65,
+                               recovery_ratio=1.8):
+    """Strict detection, plus later shallow-breakdown returns when it finds exactly one confident drop."""
+    drops = detect_drops(stems, low_energy, hop_s, grid, duration_s, phrase_bars, recovery_ratio)
+    confident = [drop for drop in drops if drop["confidence"] >= min_confidence]
+    # Shallow returns only supplement a confident drop; they never create a DROP map on their own.
+    if len(confident) != 1:
+        return drops
+    for candidate in detect_drops(stems, low_energy, hop_s, grid, duration_s, phrase_bars, recovery_ratio,
+                                   relaxed=True):
+        if candidate["bar"] > confident[0]["bar"] and candidate["confidence"] >= min_confidence and all(abs(candidate["bar"] - drop["bar"]) >= 16 for drop in drops):
+            drops.append(candidate)
+    return sorted(drops, key=lambda drop: drop["bar"])
 
 
 def _energy_choruses(energy, fps, grid, start_bar, end_bar, duration_s):
     if not energy or fps <= 0:
         return []
-    bar_count = max(0, int(math.ceil((duration_s - grid["t1"]) / grid["bar_s"])))
+    bar_count = max(0, int(math.ceil(time_to_bar(duration_s, grid))))
     means = {}
     for bar in range(start_bar + 4, bar_count):
-        first = max(0, int((grid["t1"] + bar * grid["bar_s"]) * fps))
-        last = min(len(energy), int((grid["t1"] + (bar + 1) * grid["bar_s"]) * fps))
+        first = max(0, int(bar_to_time(bar, grid) * fps))
+        last = min(len(energy), int(bar_to_time(bar + 1, grid) * fps))
         if last > first:
             means[bar] = sum(energy[first:last]) / (last - first)
     candidates = []
@@ -176,8 +201,8 @@ def _choruses(analysis, grid, lyric_alignment, start_bar, end_bar, energy=None, 
     spans = []
     if lyric_alignment and lyric_alignment.get("status") == "aligned":
         for span in lyric_alignment.get("choruses", []):
-            first = int(round((span["start_s"] - grid["t1"]) / grid["bar_s"]))
-            last = int(round((span["end_s"] - grid["t1"]) / grid["bar_s"]))
+            first = int(round(time_to_bar(span["start_s"], grid)))
+            last = int(round(time_to_bar(span["end_s"], grid)))
             first = _snap_phrase(first, start_bar)
             last = _snap_phrase(last, start_bar)
             if first >= start_bar + 4 and (end_bar is None or first < end_bar):
@@ -213,20 +238,20 @@ def _detect_fade_outro(energy, fps, grid, duration_s, start_bar, phrase_bars, vo
     """Find a sustained end-of-track fade in the final 32 bars, aligned to a phrase."""
     if energy is None or len(energy) == 0 or fps <= 0 or grid["bar_s"] <= 0:
         return None
-    bar_count = max(0, int(math.ceil((duration_s - grid["t1"]) / grid["bar_s"])))
+    bar_count = max(0, int(math.ceil(time_to_bar(duration_s, grid))))
     first_candidate = max(start_bar, bar_count - 32)
     means = {}
     for bar in range(first_candidate, bar_count):
-        left = max(0, int((grid["t1"] + bar * grid["bar_s"]) * fps))
-        right = min(len(energy), int((grid["t1"] + (bar + 1) * grid["bar_s"]) * fps))
+        left = max(0, int(bar_to_time(bar, grid) * fps))
+        right = min(len(energy), int(bar_to_time(bar + 1, grid) * fps))
         if right > left:
             values = energy[left:right]
             means[bar] = math.sqrt(sum(float(value) ** 2 for value in values) / len(values))
     vocal_means = {}
     if vocal_energy is not None and len(vocal_energy) and vocal_hop_s > 0:
         for bar in range(first_candidate, bar_count):
-            left = max(0, int((grid["t1"] + bar * grid["bar_s"]) / vocal_hop_s))
-            right = min(len(vocal_energy), int((grid["t1"] + (bar + 1) * grid["bar_s"]) / vocal_hop_s))
+            left = max(0, int(bar_to_time(bar, grid) / vocal_hop_s))
+            right = min(len(vocal_energy), int(bar_to_time(bar + 1, grid) / vocal_hop_s))
             if right > left:
                 values = vocal_energy[left:right]
                 vocal_means[bar] = math.sqrt(sum(float(value) ** 2 for value in values) / len(values))
@@ -292,42 +317,95 @@ def _genre_bucket(genre):
 
 def _first_bar(grid, bar_s, energy, fps):
     """First bar index. A full bar of audible music before the first detected beat counts as a bar."""
-    first = int(math.ceil(-grid["t1"] / bar_s - 1e-6))
-    if first >= 0 or energy is None or len(energy) == 0 or fps <= 0:
+    first = int(math.ceil(time_to_bar(0, grid) - 1e-6))
+    if first >= 0:
+        return first
+    if energy is None or len(energy) == 0 or fps <= 0:
         return 0
     typical = sorted(energy)[len(energy) // 2]
     while first < 0:
-        start = max(0, int((grid["t1"] + first * bar_s) * fps))
-        chunk = energy[start:int((grid["t1"] + (first + 1) * bar_s) * fps)]
+        start = max(0, int(bar_to_time(first, grid) * fps))
+        chunk = energy[start:int(bar_to_time(first + 1, grid) * fps)]
         if chunk and typical > 0 and sum(chunk) / len(chunk) >= 0.5 * typical:
             break
         first += 1
     return first
 
 
-def _snap_intro(bar, first_bar, bar_count):
-    """Dance intros are 16 or 32 bars: snap a detected entry to whichever is closer."""
-    length = 32 if bar - first_bar > 24 else 16
-    return min(first_bar + length, max(first_bar, bar_count - 2))
+def _vocal_ratio(stems, hop_s, grid, start, bar_count):
+    """Share of bars from START to the end with clearly audible vocals, or None without a vocal stem."""
+    vocals = (stems or {}).get("vocals")
+    if not vocals or start >= bar_count:
+        return None
+    means = [_bar_mean(vocals, hop_s, grid, bar) for bar in range(max(0, start), bar_count)]
+    means = [value for value in means if value is not None]
+    return sum(value >= 0.04 for value in means) / len(means) if means else None
 
 
-def _electronic_start(energy, fps, vocals, hop_s, grid, first_bar, bar_count, minimum=16, maximum=32):
-    """START for dance music: the first clear energy or vocal entry 16-32 bars into the track, else bar 32."""
-    if not energy or fps <= 0:
+def _electronic_start(energy, fps, vocals, hop_s, grid, first_bar, bar_count, maximum=32):
+    """Find an observed entry when no existing START or opening intro boundary is available."""
+    if (not energy or fps <= 0) and not vocals:
         return None
     def mean(values, step, bar, count=1):
-        return _bar_mean(values, step, grid, bar, count) if values else None
-    for bar in range(first_bar + minimum, first_bar + maximum + 1):
+        return _bar_mean(values, step, grid, bar, count) if values and step > 0 else None
+    for bar in range(first_bar + 1, min(first_bar + maximum, bar_count - 2) + 1):
         if bar + 2 > bar_count:
             break
-        before, after = mean(energy, 1 / fps, bar - 4, 4), mean(energy, 1 / fps, bar, 2)
-        if before and after and after >= 1.25 * before:
-            return _snap_intro(bar, first_bar, bar_count), "energy rises after the intro"
-        v_before, v_after = mean(vocals, hop_s, bar - 4, 4), mean(vocals, hop_s, bar, 2)
-        if v_before is not None and v_after is not None and v_before < 0.02 and v_after >= 0.04:
-            return _snap_intro(bar, first_bar, bar_count), "vocals enter after the intro"
-    fallback = first_bar + maximum
-    return (fallback, "no clear entry; dance intros are usually 32 bars") if fallback + 2 <= bar_count else None
+        lookback = min(4, bar - first_bar)
+        energy_hop = 1 / fps if fps > 0 else 0
+        before = mean(energy, energy_hop, bar - lookback, lookback)
+        current, after = mean(energy, energy_hop, bar), mean(energy, energy_hop, bar, 2)
+        if before and current and after and min(current, after) >= 1.25 * before:
+            return bar, "energy rises after the intro"
+        v_before = mean(vocals, hop_s, bar - lookback, lookback)
+        v_current, v_after = mean(vocals, hop_s, bar), mean(vocals, hop_s, bar, 2)
+        if (v_before is not None and v_current is not None and v_after is not None
+                and v_before < 0.02 and min(v_current, v_after) >= 0.04):
+            return bar, "vocals enter after the intro"
+    return None
+
+
+def _outro_vocal_evidence(vocals, hop_s, duration_s, words):
+    evidence = {"status": "unverified", "last_vocal_end_s": None, "ignored_words": 0}
+    if vocals is None or not len(vocals) or not math.isfinite(hop_s) or hop_s <= 0:
+        evidence["reason"] = "vocal stem unavailable or invalid"
+        return evidence
+    if any(not math.isfinite(value) or value < 0 for value in vocals):
+        evidence["reason"] = "vocal stem contains invalid energy values"
+        return evidence
+    evidence["coverage_s"] = len(vocals) * hop_s
+    if evidence["coverage_s"] < duration_s - 1e-6:
+        evidence["reason"] = "vocal stem coverage is incomplete"
+        return evidence
+    values = list(vocals[:math.ceil(duration_s / hop_s)])
+    ordered = sorted(values)
+    reference = max(ordered[int((len(ordered) - 1) * 0.95)], max(values) * 0.1)
+    # Scale down for quiet stems, but never raise the previous absolute audibility ceiling.
+    threshold = max(1e-5, min(0.04, reference * 0.15))
+    active = [index for index, value in enumerate(values) if value >= threshold]
+    last_end = min(duration_s, (active[-1] + 1) * hop_s) if active else 0.0
+    if active and active[-1] == len(values) - 1:
+        last_end = duration_s
+    evidence.update(status="analyzed", threshold=threshold, last_stem_activity_s=last_end)
+    for word in words or []:
+        if not isinstance(word, dict):
+            evidence["ignored_words"] += 1
+            continue
+        start, end = word.get("start"), word.get("end")
+        valid = (isinstance(start, (int, float)) and not isinstance(start, bool)
+                 and isinstance(end, (int, float)) and not isinstance(end, bool)
+                 and math.isfinite(start) and math.isfinite(end) and 0 <= start < end <= duration_s)
+        if valid:
+            left = max(0, math.floor(max(start, end - 0.25) / hop_s))
+            right = min(len(values), math.ceil(end / hop_s))
+            valid = any(value >= threshold for value in values[left:right])
+        if not valid:
+            evidence["ignored_words"] += 1
+            continue
+        last_end = max(last_end, end)
+    evidence["last_vocal_end_s"] = last_end
+    evidence["reason"] = "whole-track stem activity; leakage and reverb may extend the detected boundary"
+    return evidence
 
 
 def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synced_lyrics=None,
@@ -336,15 +414,28 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     config = {**DEFAULT_CONFIG, **(config or {})}
     config["switches"] = {**DEFAULT_CONFIG["switches"], **config.get("switches", {})}
     grid = analysis["grid"]
+    if not math.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("Track duration must be finite and positive.")
     bar_s = float(grid["bar_s"])
     first_bar = _first_bar(grid, bar_s, energy, fps)
-    bar_count = max(first_bar, int(math.ceil((duration_s - grid["t1"]) / bar_s)))
+    bar_count = max(first_bar, int(math.ceil(time_to_bar(duration_s, grid))))
     old_cues = plan.get("cues", {})
     start = old_cues.get("B", {}).get("bar")
+    start_reason = "retained existing START on the beat grid"
+    start_has_evidence = start is not None and first_bar <= start < bar_count
+    if not start_has_evidence:
+        start = None
     if start is None:
-        intro_ends = [_section_bars(section, grid)[1] for section in analysis.get("segments", [])
-                      if "intro" in _normal_label(section)]
+        intro_ends = [
+            end for section in analysis.get("segments", analysis.get("sections", []))
+            for begin, end in [_section_bars(section, grid)]
+            if "intro" in _normal_label(section) and begin <= first_bar + 1
+            and first_bar < end < bar_count
+        ]
         start = intro_ends[0] if intro_ends else first_bar
+        start_has_evidence = bool(intro_ends)
+        start_reason = ("opening intro section ends" if intro_ends
+                        else "START uncertain: no opening intro boundary; using the first playable bar")
     start = first_bar if start is None else int(start)
     old_exit = old_cues.get("H", {}).get("bar")
     bpm = float(grid.get("bpm") or 240 / bar_s)
@@ -366,22 +457,34 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
 
     drops = list(detected_drops or [])
     if not drops and config["switches"]["drop_detection"] and stems and low_energy:
-        drops = detect_drops(stems, low_energy, hop_s, grid, duration_s,
-                             config["drop_phrase_bars"], config["drop_recovery_ratio"])
+        drops = detect_drops_with_fallback(stems, low_energy, hop_s, grid, duration_s,
+                                           config["drop_phrase_bars"], config["drop_min_confidence"],
+                                           config["drop_recovery_ratio"])
+    drops.sort(key=lambda drop: drop["bar"])
     drop_confident = [drop for drop in drops if drop["confidence"] >= config["drop_min_confidence"]]
     genre_matches, genre_reason = _genre_is_drop(genre, bpm, config)
     cue_maps = cue_map_settings.normalize_cue_maps(cue_maps)
-    start_reason = "retained v5 START on the existing downbeat grid"
     tagged_dance = any(token in (genre or "").casefold() for token in config["drop_genres"])
-    if config["switches"]["genre_map"] and (tagged_dance or genre_bucket == "house_edm"):
+    if (not start_has_evidence and config["switches"]["genre_map"]
+            and (tagged_dance or genre_bucket == "house_edm")):
         found = _electronic_start(energy, fps, (stems or {}).get("vocals"), hop_s, grid, first_bar, bar_count)
-        if found and start - first_bar < 16:
-            start, start_reason = found[0], "dance-music intro of at least 16 bars: " + found[1]
+        if found:
+            start, start_reason = found
+            start_has_evidence = True
     is_drop = bool(drop_confident and (genre_matches if config["switches"]["genre_map"] else True))
+    vocal_ratio = _vocal_ratio(stems, hop_s, grid, start, bar_count)
+    map_reason = "manual map choice"
     if cue_maps["mode"] == "DROP":
         is_drop = True
     elif cue_maps["mode"] == "VOCAL":
         is_drop = False
+    else:
+        map_reason = "confident drop and dance genre/BPM" if is_drop else "no confident drop"
+        if is_drop and vocal_ratio is not None and vocal_ratio >= config["vocal_led_ratio"] and \
+                min(drop["bar"] for drop in drop_confident) >= config["late_drop_fraction"] * bar_count:
+            is_drop = False
+            map_reason = (f"vocals in {vocal_ratio:.0%} of bars and the only drop is in the last half of the "
+                          "track, so it reads as vocal-led")
     map_type = "DROP" if is_drop else "VOCAL"
     outro = next((section for section in analysis.get("segments", analysis.get("sections", []))
                   if "outro" in _normal_label(section)), None)
@@ -395,18 +498,43 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             (stems or {}).get("vocals"), hop_s,
         )
         fallback_outro = outro_start is not None
+    outro_vocal_flags = []
+    vocal_free_bar = None
+    vocals = (stems or {}).get("vocals")
+    vocal_evidence = _outro_vocal_evidence(vocals, hop_s, duration_s, words)
+    if vocal_evidence["status"] == "analyzed":
+        last_vocal_end = vocal_evidence["last_vocal_end_s"]
+        if vocal_evidence["ignored_words"]:
+            outro_vocal_flags.append("ignored invalid or stem-unsupported word timings at the vocal boundary")
+        outro_vocal_flags.append("vocal boundary uses stem activity; leakage/reverb require listening review")
+        vocal_free_bar = int(math.ceil(time_to_bar(last_vocal_end, grid) - 1e-9))
+        if outro_start is None and last_vocal_end > 0:
+            outro_start = max(start, vocal_free_bar)
+            fallback_outro = True
+            outro_vocal_flags.append("outro inferred after the final detected vocal")
+        if outro_start is not None and vocal_free_bar > outro_start:
+            outro_start = vocal_free_bar
+            outro_vocal_flags.append("outro moved after the final detected vocal; no later vocal returns allowed")
+        if (outro_start is not None
+                and bar_to_time(outro_start + 1, grid) > duration_s):
+            outro_start = None
+            outro_vocal_flags.append("no full vocal-free outro bar remains")
+    else:
+        outro_vocal_flags.append("vocal-free outro unverified: " + vocal_evidence["reason"])
     lyric_choruses = []
     if lyric_alignment and lyric_alignment.get("status") == "aligned":
         for span in lyric_alignment.get("choruses", []):
             lyric_choruses.append({
-                "start_bar": _snap_phrase(int(round((span["start_s"] - grid["t1"]) / bar_s)), start),
-                "end_bar": _snap_phrase(int(round((span["end_s"] - grid["t1"]) / bar_s)), start),
+                "start_bar": _snap_phrase(int(round(time_to_bar(span["start_s"], grid))), start),
+                "end_bar": _snap_phrase(int(round(time_to_bar(span["end_s"], grid))), start),
                 "confidence": span["confidence"],
                 "source": "aligned_synced_lyrics",
             })
     chorus_spans, chorus_source = _choruses(analysis, grid, lyric_alignment, start, old_exit,
                                             energy, fps, duration_s)
-    flags = []
+    flags = list(outro_vocal_flags)
+    if not start_has_evidence:
+        flags.append(start_reason)
     if lyric_alignment and lyric_alignment["status"] == "rejected":
         flags.append("synced lyric alignment rejected: " + lyric_alignment["reason"])
     if not config["switches"]["genre_map"]:
@@ -415,6 +543,8 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         flags.append("genre tag unavailable; used BPM and default phrase settings")
     if is_drop and not genre_matches:
         flags.append("DROP selected from confident audio drop only")
+    if map_reason.startswith("vocals in"):
+        flags.append("vocal-led track with only a late drop; used the VOCAL map (switch to DROP if this is wrong)")
     if len(drop_confident) == 1:
         flags.append("single drop: last-drop slots repeat first-drop slots")
     if not chorus_spans and not is_drop:
@@ -423,21 +553,17 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         flags.append("outro inferred from sustained end-of-track energy/vocal fade; review recommended")
 
     cues = {}
-    intro_start = first_bar
-    for section in analysis.get("segments", analysis.get("sections", [])):
-        if "intro" in _normal_label(section):
-            intro_start, _ = _section_bars(section, grid)
-            intro_start = first_bar if intro_start <= 0 else max(first_bar, intro_start)
-            break
-    intro_bars = max(0, start - intro_start)
+    intro = cue_map_settings.intro_candidate(start, first_bar, cue_maps["mix_lengths"]["intro"])
+    intro_start = intro["bar"]
+    intro_bars = 0 if intro_start is None else start - intro_start
     first_chorus = chorus_spans[0] if chorus_spans else None
     last_chorus = chorus_spans[-1] if chorus_spans else None
     intro_name = f"INTRO -{intro_bars}"
-    cues["A"] = _cue(intro_name, intro_start if intro_bars else None, 0.7,
-                     f"intro begins {intro_bars} bars before START" if intro_bars else "no measured intro before START",
-                     [] if intro_bars else ["intro shorter than one bar"], grid)
-    cues["B"] = _cue("START", start, old_cues.get("B", {}).get("confidence", 0.6),
-                     start_reason, grid=grid)
+    cues["A"] = _cue(intro_name, intro_start, intro["confidence"],
+                     intro["reason"], intro["flags"], grid)
+    cues["B"] = _cue("START", start,
+                     old_cues.get("B", {}).get("confidence", 0.6) if start_has_evidence else 0.35,
+                     start_reason, [] if start_has_evidence else [start_reason], grid=grid)
 
     if is_drop:
         if drop_confident:
@@ -486,19 +612,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             cues[slot] = _cue(f"EXIT -{bars}", cue_bar, chorus_conf,
                               f"{bars} bars before EXIT/JUMP", cue_flags, grid)
 
-    go = None if outro_start is None else outro_start - 32
-    go_flags = []
-    if go is not None and go < first_bar:
-        go_flags.append("GO -32 falls before the track's first downbeat")
-        flags.append("GO -32 falls before the track's first downbeat")
-        go = None
-    if fallback_outro:
-        go_flags.append("outro inferred from energy/vocal fade")
-    cues["G"] = _cue("GO -32", go, 0.38 if fallback_outro and go is not None else
-                     0.6 if go is not None else 0.0,
-                     "32 bars before the inferred energy/vocal fade" if fallback_outro else
-                     "32 bars before the detected outro" if outro_start is not None else "outro section unavailable",
-                     go_flags, grid)
+    cues["G"] = _cue("GO", None, 0.0, "resolved from cue map mix preferences", [], grid)
     outro_bars = max(0, bar_count - outro_start) if outro_start is not None else 0
     cues["H"] = _cue(f"OUTRO {outro_bars}", outro_start,
                      0.42 if fallback_outro else 0.65 if outro_start is not None else 0.0,
@@ -523,18 +637,28 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
              if first_bar <= candidate < bar_count}
         ) if slot in anchors else ([] if bar is None else [bar])
 
+    cues["H"]["flags"] = list(dict.fromkeys(cues["H"]["flags"] + outro_vocal_flags))
+    if vocal_free_bar is None and cues["H"]["bar"] is not None:
+        cues["H"]["confidence"] = min(cues["H"]["confidence"], 0.4)
     result = {
         "track_id": track_id,
         "schema_version": 2,
-        "engine": {"name": "sound-and-service-autocue", "rules_version": "v6"},
-        "version": "v6",
+        "engine": {"name": "sound-and-service-autocue", "rules_version": "v7"},
+        "version": "v7",
         "map_type": map_type,
+        "map_choice": {"mode": cue_maps["mode"], "reason": map_reason,
+                       "vocal_ratio": None if vocal_ratio is None else round(vocal_ratio, 2)},
         "genre": genre,
         "genre_bucket": genre_bucket,
         "genre_phrase_bars": genre_phrase_bars,
         "outro_bars": outro_bars,
         "bar_count": bar_count,
-        "grid": {key: grid[key] for key in ("t1", "bar_s") if key in grid}
+        "mix_end_bar": time_to_bar(duration_s, grid),
+        "outro_vocal_free_bar": vocal_free_bar,
+        "outro_vocal_evidence": vocal_evidence,
+        "no_vocal_free_outro": vocal_free_bar is not None and outro_start is None,
+        "grid": {key: grid[key] for key in ("t1", "bar_s", "source", "fit", "provenance") if key in grid}
+                | {"bpm": bpm}
                 | {"offset_ms": grid.get("offset_ms", 0), "first_bar": first_bar},
         "drops": drops,
         "breakdowns": [{"bar": drop.get("breakdown_start_bar", drop["bar"] - 4), "confidence": drop["confidence"],
@@ -585,7 +709,9 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         "last_drop_start": {
             "bar": drop_confident[-1]["bar"] if drop_confident else None,
             "confidence": drop_confident[-1]["confidence"] if drop_confident else 0.0,
-            "reason": drop_confident[-1]["reason"] if drop_confident else "no confident last drop detected",
+            "reason": (("single detected drop: shared first/last event; " if len(drop_confident) == 1 else "")
+                       + drop_confident[-1]["reason"]) if drop_confident else "no confident last drop detected",
+            "flags": ["single drop: shares the first-drop event"] if len(drop_confident) == 1 else [],
         },
         "outro_start": cues["H"],
     }

@@ -22,6 +22,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "engine") not in sys.path:
+    sys.path.insert(0, str(ROOT / "engine"))
+from timing import bar_to_time, grid_origin, time_to_bar
+from serato_tags import (
+    FLAC_KEY, MP4_KEY, VORBIS_HEADER,
+    marker2_entries as _marker2_entries, vorbis_decode as _vorbis_decode,
+)
+
 WEB = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("AUTOCUE_WEB_DATA", ROOT / "web-data")).expanduser().resolve()
 UPLOADS = DATA / "audio"
@@ -35,6 +43,9 @@ DROP_SLOT_NAMES = {
     "A": "INTRO", "B": "START", "C": "-32 DROP", "D": "FIRST DROP",
     "E": "-32 LAST DROP", "F": "LAST DROP", "G": "GO -32", "H": "OUTRO",
 }
+EVENT_TYPES = {"drop", "build", "breakdown", "chorus", "other"}
+EVENT_CERTAINTIES = {"certain", "uncertain"}
+EVENT_REVIEW_STATES = {"pending", "in_progress", "complete", "uncertain", "skipped"}
 LEGACY_CUE_NAMES = {"CHORUS", "LAST CHORUS"}
 worker_queue = queue.Queue()
 paused_jobs = set()
@@ -59,10 +70,45 @@ def _cue_maps_module():
     return cue_maps
 
 
+def _staged_audio_directory():
+    audio_dir = DATA.resolve() / "audio"
+    if UPLOADS.is_symlink() or UPLOADS.resolve() != audio_dir:
+        raise ValueError("The staged audio directory must be inside this library, not a symlink.")
+    return audio_dir
+
+
+def staged_audio_path(row, *, missing_ok=False):
+    """Resolve only hash-named copies inside this library, including legacy absolute paths."""
+    file_hash = row["hash"]
+    if len(file_hash) != 64 or any(char not in "0123456789abcdef" for char in file_hash):
+        raise ValueError("Invalid staged audio hash.")
+    audio_dir = _staged_audio_directory()
+    stored = Path(row["audio_path"])
+    if (stored.suffix.lower() not in ALLOWED or stored.stem != file_hash
+            or (not stored.is_absolute() and stored.parts != ("audio", stored.name))):
+        raise ValueError("Invalid staged audio path; expected audio/<hash>.<extension>.")
+    preferred = audio_dir / stored.name
+    candidates = [preferred]
+    if not preferred.exists() and not preferred.is_symlink():
+        candidates.extend(sorted(path for path in audio_dir.glob(file_hash + ".*")
+                                 if path != preferred and path.suffix.lower() in ALLOWED))
+    for path in candidates:
+        if path.is_symlink():
+            raise ValueError("Staged audio must not be a symlink: " + path.name)
+        if path.is_file():
+            return path
+        if path.exists():
+            raise ValueError("Staged audio is not a regular file: " + path.name)
+    if missing_ok:
+        return preferred
+    raise FileNotFoundError("Staged audio is missing from this library: " + preferred.name)
+
+
 def initialize():
     global SESSION_TOKEN
     DATA.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
+    _staged_audio_directory()
     token_path = DATA / ".session-token"
     if not token_path.exists():
         token_path.write_text(uuid.uuid4().hex + uuid.uuid4().hex, encoding="ascii")
@@ -106,6 +152,29 @@ def initialize():
                 status TEXT NOT NULL,
                 manifest_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS event_reviews (
+                track_hash TEXT PRIMARY KEY REFERENCES tracks(hash) ON DELETE CASCADE,
+                state TEXT NOT NULL CHECK(state IN ('pending','in_progress','complete','uncertain','skipped')),
+                note TEXT NOT NULL DEFAULT '',
+                grid_json TEXT NOT NULL DEFAULT '{}',
+                source TEXT NOT NULL DEFAULT 'human_review',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS event_annotations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_hash TEXT NOT NULL REFERENCES tracks(hash) ON DELETE CASCADE,
+                event_type TEXT NOT NULL CHECK(event_type IN ('drop','build','breakdown','chorus','other')),
+                certainty TEXT NOT NULL CHECK(certainty IN ('certain','uncertain')),
+                time_s REAL NOT NULL CHECK(time_s >= 0),
+                bar REAL,
+                note TEXT NOT NULL DEFAULT '',
+                grid_json TEXT NOT NULL DEFAULT '{}',
+                source TEXT NOT NULL DEFAULT 'human_review',
+                created_at TEXT NOT NULL,
+                retracted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS event_annotations_track_idx
+                ON event_annotations(track_hash, id);
         """)
         columns = {row["name"] for row in db.execute("PRAGMA table_info(tracks)")}
         for name, declaration in (
@@ -116,6 +185,21 @@ def initialize():
             if name not in columns:
                 db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {declaration}")
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
+        for row in db.execute("SELECT hash,audio_path,error FROM tracks").fetchall():
+            previous = "\n".join(line for line in (row["error"] or "").splitlines()
+                                 if not line.startswith("Staged audio unavailable:"))
+            try:
+                path = staged_audio_path(row)
+            except (ValueError, OSError) as error:
+                message = "Staged audio unavailable: " + str(error)
+                current = (previous + "\n" if previous else "") + message
+                if current != row["error"]:
+                    db.execute("UPDATE tracks SET error=? WHERE hash=?", (current, row["hash"]))
+            else:
+                relative = path.relative_to(DATA.resolve()).as_posix()
+                if relative != row["audio_path"] or (previous or None) != row["error"]:
+                    db.execute("UPDATE tracks SET audio_path=?,error=? WHERE hash=?",
+                               (relative, previous or None, row["hash"]))
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES('gemini', 'false')")
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES('strictness', 'standard')")
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES('cue_maps', ?)",
@@ -138,10 +222,16 @@ def track_record(row):
         "error": row["error"],
         "bpm": plan.get("bpm") or plan.get("grid", {}).get("bpm"),
         "map_type": plan.get("map_type", "VOCAL"),
+        "map_override": plan.get("map_override"),
+        "map_choice": plan.get("map_choice"),
+        "gemini": plan.get("gemini"),
+        "outro_vocal_evidence": plan.get("outro_vocal_evidence"),
+        "no_vocal_free_outro": plan.get("no_vocal_free_outro", False),
         "genre": plan.get("genre", ""),
         "confidence": _mean_confidence(cues),
         "t1": plan.get("grid", {}).get("t1"),
         "bar_s": plan.get("grid", {}).get("bar_s"),
+        "offset_ms": plan.get("grid", {}).get("offset_ms", 0),
         "cues": {
             slot: {
                 "name": _cue_name(cues.get(slot, {}).get("name"), slot, names,
@@ -149,6 +239,7 @@ def track_record(row):
                 "bar": cues.get(slot, {}).get("bar"),
                 "confidence": cues.get(slot, {}).get("confidence"),
                 "reason": cues.get(slot, {}).get("reason", ""),
+                "flags": cues.get(slot, {}).get("flags", []),
                 "meaning": cues.get(slot, {}).get("meaning"),
                 "color_id": cues.get(slot, {}).get("color_id") or
                             _cue_maps_module().DEFAULT_CUE_MAPS["maps"][plan.get("map_type", "VOCAL")][slot]["color"],
@@ -161,6 +252,51 @@ def track_record(row):
         "variants": plan.get("variants") or {},
         "url": "/media/" + row["hash"],
     }
+
+
+def _event_review_payload(db, file_hash):
+    review = db.execute("SELECT * FROM event_reviews WHERE track_hash=?", (file_hash,)).fetchone()
+    annotations = db.execute(
+        """SELECT id,event_type,certainty,time_s,bar,note,grid_json,source,created_at
+           FROM event_annotations WHERE track_hash=? AND retracted_at IS NULL ORDER BY time_s,id""",
+        (file_hash,),
+    ).fetchall()
+    return {
+        "track_hash": file_hash,
+        "review": {
+            "state": review["state"] if review else "pending",
+            "note": review["note"] if review else "",
+            "source": review["source"] if review else None,
+            "grid": json.loads(review["grid_json"]) if review else {},
+            "updated_at": review["updated_at"] if review else None,
+        },
+        "annotations": [{
+            "id": row["id"], "event_type": row["event_type"], "certainty": row["certainty"],
+            "time_s": row["time_s"], "bar": row["bar"], "note": row["note"],
+            "grid": json.loads(row["grid_json"]), "source": row["source"],
+            "created_at": row["created_at"],
+        } for row in annotations],
+    }
+
+
+def _event_grid(plan_json):
+    plan = json.loads(plan_json) if plan_json else {}
+    grid = plan.get("grid", {})
+    if not isinstance(grid, dict):
+        raise ValueError("Track has malformed grid metadata.")
+    if grid and grid.get("t1") is not None and grid.get("bar_s") is not None:
+        grid_origin(grid)
+        return grid
+    return {}
+
+
+def _valid_track_hash(file_hash):
+    return isinstance(file_hash, str) and len(file_hash) == 64 \
+        and all(character in "0123456789abcdef" for character in file_hash)
+
+
+def _utc_timestamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _slot_names(map_type):
@@ -329,47 +465,13 @@ def _archive_entry_sha256(archive, name):
     return digest.hexdigest()
 
 
-def _marker2_entries(data):
-    if not data:
-        return []
-    encoded = data[2:].replace(b"\n", b"").split(b"\x00", 1)[0]
-    encoded += b"=" * (-len(encoded) % 4)
-    try:
-        decoded = base64.b64decode(encoded, validate=False)
-    except ValueError as error:
-        raise ValueError("Could not decode the existing Serato Markers2 tag.") from error
-    if not decoded.startswith(b"\x01\x01"):
-        raise ValueError("Existing Serato Markers2 tag has an unsupported header.")
-    entries, offset = [], 2
-    while offset < len(decoded):
-        if decoded[offset:] == b"\x00" or not decoded[offset:].strip(b"\x00"):
-            break
-        end_name = decoded.find(b"\x00", offset)
-        if end_name < 0 or end_name + 5 > len(decoded):
-            raise ValueError("Existing Serato Markers2 entry is malformed; refusing to overwrite it.")
-        try:
-            name = decoded[offset:end_name].decode("ascii")
-        except UnicodeDecodeError as error:
-            raise ValueError("Existing Serato Markers2 entry has an unknown encoding.") from error
-        length = int.from_bytes(decoded[end_name + 1:end_name + 5], "big")
-        end = end_name + 5 + length
-        if end > len(decoded):
-            raise ValueError("Existing Serato Markers2 entry length is invalid.")
-        payload = decoded[end_name + 5:end]
-        entries.append((name, payload))
-        offset = end
-    return entries
-
-
 def _cue_binary(cues, plan, existing_data=None):
     entries = _marker2_entries(existing_data)
     entries = [(name, payload) for name, payload in entries
                if name != "CUE" or len(payload) < 2 or payload[1] not in range(8)]
     names = _slot_names(plan.get("map_type", "VOCAL"))
-    t1 = float(plan.get("grid", {}).get("t1", 0))
-    bar_s = float(plan.get("grid", {}).get("bar_s", 0))
-    if not math.isfinite(t1) or not math.isfinite(bar_s) or bar_s <= 0:
-        raise ValueError("A valid v6 beat grid is required before writing cues.")
+    grid = plan.get("grid", {})
+    grid_origin(grid)
     for index, slot in enumerate("ABCDEFGH"):
         cue = cues.get(slot, {})
         bar = cue.get("bar")
@@ -378,7 +480,7 @@ def _cue_binary(cues, plan, existing_data=None):
         bar_position = float(bar)
         if not math.isfinite(bar_position):
             raise ValueError(f"Cue {slot} has a non-finite bar position.")
-        position = max(0, int(round((t1 + bar_position * bar_s) * 1000)))
+        position = max(0, int(round(bar_to_time(bar_position, grid) * 1000)))
         if position >= 0xFFFFFFFF:
             raise ValueError(f"Cue {slot} exceeds Serato's supported timestamp.")
         palette = _cue_maps_module().PALETTE_BY_ID
@@ -398,9 +500,6 @@ def _cue_binary(cues, plan, existing_data=None):
 
 
 WRITABLE = {".mp3": "mp3", ".aiff": "aiff", ".aif": "aiff", ".flac": "flac", ".m4a": "m4a"}
-VORBIS_HEADER = b"application/octet-stream\x00\x00Serato Markers2\x00"
-MP4_KEY = "----:com.serato.dj:markersv2"
-FLAC_KEY = "SERATO_MARKERS_V2"
 
 
 def write_format(path):
@@ -501,15 +600,6 @@ def _audio_hash(path):
 def _vorbis_encode(data):
     raw = base64.b64encode(VORBIS_HEADER + data).rstrip(b"=")
     return b"\n".join(raw[index:index + 72] for index in range(0, len(raw), 72)).decode("ascii")
-
-
-def _vorbis_decode(text):
-    raw = "".join(text.split()).encode("ascii")
-    raw += b"=" * (-len(raw) % 4)
-    decoded = base64.b64decode(raw)
-    if not decoded.startswith(VORBIS_HEADER):
-        raise ValueError("Existing Serato Markers2 tag has an unsupported header.")
-    return decoded[len(VORBIS_HEADER):]
 
 
 def _existing_markers(path, kind):
@@ -896,6 +986,7 @@ def copy_import(source, name, relative_path="", source_path=""):
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED:
         raise ValueError("Unsupported audio file type: " + (suffix or "(no extension)"))
+    _staged_audio_directory()
     digest = hashlib.sha256()
     temporary = UPLOADS / (uuid.uuid4().hex + ".tmp")
     try:
@@ -907,7 +998,8 @@ def copy_import(source, name, relative_path="", source_path=""):
                 digest.update(block)
                 staged.write(block)
         file_hash = digest.hexdigest()
-        destination = UPLOADS / (file_hash + suffix)
+        destination = staged_audio_path(
+            {"hash": file_hash, "audio_path": "audio/" + file_hash + suffix}, missing_ok=True)
         if destination.exists():
             temporary.unlink()
         else:
@@ -928,7 +1020,7 @@ def copy_import(source, name, relative_path="", source_path=""):
             db.execute(
                 "INSERT INTO tracks(hash,name,relative_path,audio_path,source_path,source_size,source_mtime,imported_at) "
                 "VALUES(?,?,?,?,?,?,?,?)",
-                (file_hash, Path(name).name, relative_path, str(destination), source_path,
+                (file_hash, Path(name).name, relative_path, destination.relative_to(DATA.resolve()).as_posix(), source_path,
                  stat.st_size if stat else 0, stat.st_mtime if stat else 0, time.time()),
             )
         except sqlite3.IntegrityError:
@@ -1021,34 +1113,39 @@ def waveform_peaks(file_hash, points=900):
     return {"peaks": [round(float(value) / top, 3) for value in trimmed], "duration": len(peak) / 50}
 
 
-def process_builtin(row, settings):
+def process_builtin(row, settings, map_override=None):
     analyze = _analysis_import()
     _live_reset(row)
-    artist, title, genre = _tags(row["audio_path"])
+    audio_path = str(staged_audio_path(row))
+    artist, title, genre = _tags(audio_path)
     cue_maps = _cue_maps_module().normalize_cue_maps(
         json.loads(settings["cue_maps"]) if settings.get("cue_maps") else None
     )
+    if map_override in ("DROP", "VOCAL"):
+        cue_maps["mode"] = map_override
 
     def progress(step, state, detail):
         LIVE["steps"][step] = state
         LIVE["detail"] = detail or LIVE["detail"]
 
-    plan = analyze.analyze(row["audio_path"], artist, title, genre, progress, cue_maps=cue_maps,
-                           experiments=_enabled_experiments(settings))
+    plan = analyze.analyze(audio_path, artist, title, genre, progress, cue_maps=cue_maps,
+                           experiments=_enabled_experiments(settings),
+                           gemini=settings.get("gemini") == "true")
     LIVE["cues_found"] = [slot for slot, cue in plan["cues"].items() if cue.get("bar") is not None]
     return plan
 
 
 def _store_plan(file_hash, plan, status):
     """Save a new plan. A reviewed song keeps its reviewed cues as the answer key for scoring."""
+    experiments = _experiments_module()
+    plan["variants"] = experiments.scoring_variants(plan)
     with connect() as db:
         old = db.execute("SELECT plan_json,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         if old and old["plan_json"]:
             previous = json.loads(old["plan_json"])
             key = previous.get("answer_key")
-            if old["reviewed"]:
-                key = {"grid": previous.get("grid", {}),
-                       "cues": {slot: {"bar": cue.get("bar")} for slot, cue in previous.get("cues", {}).items()}}
+            if old["reviewed"] and not key:
+                key = experiments.review_answer(previous)
             if key:
                 plan["answer_key"] = key
         db.execute("UPDATE tracks SET plan_json=?, status=?, error=NULL, reviewed=0, edited=0 WHERE hash=?",
@@ -1059,10 +1156,16 @@ def process_track(file_hash):
     with connect() as db:
         row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         settings = {item["key"]: item["value"] for item in db.execute("SELECT * FROM settings")}
+    if not row:
+        raise ValueError("Track not found.")
     command = os.environ.get("AUTOCUE_PROCESSOR")
     if not command:
         try:
-            plan = process_builtin(row, settings)
+            previous = json.loads(row["plan_json"]) if row["plan_json"] else {}
+            override = previous.get("map_override")
+            plan = process_builtin(row, settings, override)
+            if override:
+                plan["map_override"] = override
         except Exception as error:
             if type(error).__name__ == "AnalyzerMissing":
                 raise RuntimeError(str(error)) from error
@@ -1076,7 +1179,7 @@ def process_track(file_hash):
     output = DATA / "results" / (file_hash + ".json")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.unlink(missing_ok=True)
-    placeholders = {"{input}": row["audio_path"], "{output}": str(output), "{hash}": file_hash}
+    placeholders = {"{input}": str(staged_audio_path(row)), "{output}": str(output), "{hash}": file_hash}
     argv = [next_value for part in shlex.split(command)
             for next_value in [part.replace("{input}", placeholders["{input}"])
                                   .replace("{output}", placeholders["{output}"])
@@ -1103,6 +1206,30 @@ def process_track(file_hash):
         settings.get("strictness", "standard"), 0.6)
     low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
     _store_plan(file_hash, plan, "Needs a look" if low else "Cues ready")
+
+
+def remove_tracks(hashes):
+    """Remove tracks and their app-local annotations; never delete source audio."""
+    with connect() as db:
+        if db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running','paused') LIMIT 1").fetchone():
+            raise RuntimeError("Wait for the running batch to finish (or cancel it) before removing tracks.")
+        rows = db.execute("SELECT hash,audio_path FROM tracks").fetchall()
+        wanted = None if hashes is None else set(hashes)
+        doomed = [row for row in rows if wanted is None or row["hash"] in wanted]
+        paths = [(row, staged_audio_path(row, missing_ok=True)) for row in doomed]
+        removed, failures = 0, []
+        for row, path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                failures.append(path.name + ": " + str(error))
+            else:
+                db.execute("DELETE FROM tracks WHERE hash=?", (row["hash"],))
+                removed += 1
+    if failures:
+        raise RuntimeError(f"Removed {removed} tracks; could not delete staged audio for "
+                           f"{len(failures)} tracks (kept in library): " + "; ".join(failures))
+    return {"removed": removed}
 
 
 def worker():
@@ -1222,12 +1349,68 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(WEB / "index.html", "text/html; charset=utf-8")
         if parsed.path == "/app.js":
             return self._static(WEB / "app.js", "text/javascript; charset=utf-8")
+        if parsed.path == "/timing.js":
+            return self._static(WEB / "timing.js", "text/javascript; charset=utf-8")
         if parsed.path == "/style.css":
             return self._static(WEB / "style.css", "text/css; charset=utf-8")
         if parsed.path == "/api/library":
             with connect() as db:
                 rows = db.execute("SELECT * FROM tracks ORDER BY imported_at DESC").fetchall()
             return json_response(self, {"tracks": [track_record(row) for row in rows]})
+        if parsed.path.startswith("/api/tracks/") and parsed.path.endswith("/event-review"):
+            file_hash = parsed.path.split("/")[-2]
+            if not _valid_track_hash(file_hash):
+                return json_response(self, {"error": "Invalid track hash."}, 400)
+            with connect() as db:
+                track = db.execute("SELECT hash FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                if not track:
+                    return json_response(self, {"error": "Track not found."}, 404)
+                return json_response(self, _event_review_payload(db, file_hash))
+        if parsed.path == "/api/event-reviews/export":
+            with connect() as db:
+                reviews = db.execute(
+                    """SELECT r.*,t.name FROM event_reviews r
+                       JOIN tracks t ON t.hash=r.track_hash ORDER BY r.updated_at,r.track_hash"""
+                ).fetchall()
+                exported = []
+                for review in reviews:
+                    annotations = db.execute(
+                        """SELECT id,event_type,certainty,time_s,bar,note,grid_json,source,
+                                  created_at,retracted_at
+                           FROM event_annotations WHERE track_hash=? ORDER BY id""",
+                        (review["track_hash"],),
+                    ).fetchall()
+                    exported.append({
+                        "track_hash": review["track_hash"], "track_name": review["name"],
+                        "state": review["state"], "note": review["note"],
+                        "grid": json.loads(review["grid_json"]), "source": review["source"],
+                        "updated_at": review["updated_at"],
+                        "annotations": [{
+                            "id": row["id"], "event_type": row["event_type"],
+                            "certainty": row["certainty"], "time_s": row["time_s"],
+                            "bar": row["bar"], "note": row["note"],
+                            "grid": json.loads(row["grid_json"]), "source": row["source"],
+                            "created_at": row["created_at"],
+                            "active": row["retracted_at"] is None,
+                            "retracted_at": row["retracted_at"],
+                        } for row in annotations],
+                    })
+            document = {
+                "schema_version": 1, "exported_at": _utc_timestamp(),
+                "taxonomy": sorted(EVENT_TYPES),
+                "provenance_policy": "Manual local human review; imported cues are not labels.",
+                "reviews": exported,
+            }
+            body = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="autocue-event-labels.json"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/jobs":
             with connect() as db:
                 rows = db.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 20").fetchall()
@@ -1244,12 +1427,19 @@ class Handler(BaseHTTPRequestHandler):
             experiments = _experiments_module()
             settings["experiments"] = _enabled_experiments(settings)
             settings["experiment_catalog"] = experiments.CATALOG
+            import gemini_assist
+            settings["gemini_status"] = gemini_assist.configuration_status(_analysis_import().cache_root() / "gemini")
             return json_response(self, settings)
         if parsed.path == "/api/experiments/report":
             return json_response(self, _experiments_module().score_tracks(_graded_tracks()))
         if parsed.path == "/api/experiments/export":
             tracks = _graded_tracks()
-            export = {"exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            experiments = _experiments_module()
+            export = {"schema_version": 2, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                      "answer_keys": [
+                          {"hash": track["hash"], "name": track["name"],
+                           "answer": track["plan"].get("answer_key") or experiments.review_answer(track["plan"])}
+                          for track in tracks],
                       "report": _experiments_module().score_tracks(tracks), "tracks": tracks}
             body = json.dumps(export, ensure_ascii=False, indent=1).encode("utf-8")
             self.send_response(200)
@@ -1269,6 +1459,23 @@ class Handler(BaseHTTPRequestHandler):
                 "write_platform_supported": sys.platform == "darwin",
             })
         if parsed.path.startswith("/api/waveform/"):
+            if urllib.parse.parse_qs(parsed.query).get("detail") == ["1"]:
+                try:
+                    file_hash = parsed.path.removeprefix("/api/waveform/")
+                    with connect() as db:
+                        row = db.execute("SELECT hash,audio_path FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                    if not row:
+                        return json_response(self, {"error": "Track not found"}, 404)
+                    analyze = _analysis_import()
+                    import waveform
+                    query = urllib.parse.parse_qs(parsed.query)
+                    data = waveform.query(staged_audio_path(row), analyze.cache_root() / file_hash / "waveform",
+                                          start=float(query.get("start", [0])[0]),
+                                          end=float(query["end"][0]) if "end" in query else None,
+                                          points=int(query.get("points", [1600])[0]))
+                    return json_response(self, data)
+                except (ValueError, OSError, RuntimeError, ImportError) as error:
+                    return json_response(self, {"error": str(error)}, 400)
             try:
                 found = waveform_peaks(parsed.path.removeprefix("/api/waveform/"))
             except ImportError:
@@ -1297,10 +1504,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/media/"):
             file_hash = parsed.path.removeprefix("/media/")
             with connect() as db:
-                row = db.execute("SELECT audio_path FROM tracks WHERE hash=?", (file_hash,)).fetchone()
-            if not row or not Path(row["audio_path"]).is_file():
+                row = db.execute("SELECT hash,audio_path FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+            if not row:
                 return json_response(self, {"error": "Audio not found"}, 404)
-            path = Path(row["audio_path"])
+            try:
+                path = staged_audio_path(row)
+            except FileNotFoundError as error:
+                return json_response(self, {"error": str(error)}, 404)
+            except (ValueError, OSError) as error:
+                return json_response(self, {"error": str(error)}, 400)
             self.send_response(200)
             self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
             self.send_header("Content-Length", str(path.stat().st_size))
@@ -1316,6 +1528,102 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path.startswith("/api/event-reviews/"):
+                file_hash = parsed.path.removeprefix("/api/event-reviews/")
+                if not _valid_track_hash(file_hash):
+                    raise ValueError("Invalid track hash.")
+                body = self._body_json()
+                if not isinstance(body, dict):
+                    raise ValueError("Event review body must be a JSON object.")
+                state = body.get("state")
+                if not isinstance(state, str) or state not in EVENT_REVIEW_STATES:
+                    raise ValueError("Event review state must be pending, in_progress, complete, uncertain, or skipped.")
+                note = body.get("note", "")
+                if not isinstance(note, str) or len(note) > 500:
+                    raise ValueError("Event review note must be text no longer than 500 characters.")
+                updated_at = _utc_timestamp()
+                with connect() as db:
+                    track = db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                    if not track:
+                        return json_response(self, {"error": "Track not found."}, 404)
+                    grid = _event_grid(track["plan_json"])
+                    db.execute(
+                        """INSERT INTO event_reviews(track_hash,state,note,grid_json,source,updated_at)
+                           VALUES(?,?,?,?,?,?)
+                           ON CONFLICT(track_hash) DO UPDATE SET state=excluded.state,
+                             note=excluded.note,grid_json=excluded.grid_json,source=excluded.source,
+                             updated_at=excluded.updated_at""",
+                        (file_hash, state, note.strip(), json.dumps(grid, allow_nan=False),
+                         "human_review", updated_at),
+                    )
+                    result = _event_review_payload(db, file_hash)
+                return json_response(self, result)
+            if parsed.path.startswith("/api/event-annotations/") and parsed.path.endswith("/retract"):
+                annotation_id = parsed.path.split("/")[-2]
+                if not annotation_id.isdecimal() or len(annotation_id) > 19 \
+                        or int(annotation_id) > 9223372036854775807:
+                    raise ValueError("Invalid event annotation id.")
+                retracted_at = _utc_timestamp()
+                with connect() as db:
+                    row = db.execute(
+                        "SELECT track_hash FROM event_annotations WHERE id=? AND retracted_at IS NULL",
+                        (int(annotation_id),),
+                    ).fetchone()
+                    if not row:
+                        return json_response(self, {"error": "Active event annotation not found."}, 404)
+                    db.execute("UPDATE event_annotations SET retracted_at=? WHERE id=?",
+                               (retracted_at, int(annotation_id)))
+                    db.execute(
+                        """INSERT INTO event_reviews(track_hash,state,note,grid_json,source,updated_at)
+                           VALUES(?,'in_progress','', '{}','human_review',?)
+                           ON CONFLICT(track_hash) DO UPDATE SET state='in_progress',
+                             updated_at=excluded.updated_at""",
+                        (row["track_hash"], retracted_at),
+                    )
+                    result = _event_review_payload(db, row["track_hash"])
+                return json_response(self, result)
+            if parsed.path.startswith("/api/event-annotations/"):
+                file_hash = parsed.path.removeprefix("/api/event-annotations/")
+                if not _valid_track_hash(file_hash):
+                    raise ValueError("Invalid track hash.")
+                body = self._body_json()
+                if not isinstance(body, dict):
+                    raise ValueError("Event annotation body must be a JSON object.")
+                event_type = body.get("event_type")
+                certainty = body.get("certainty")
+                time_s = body.get("time_s")
+                note = body.get("note", "")
+                if not isinstance(event_type, str) or event_type not in EVENT_TYPES:
+                    raise ValueError("Event type must be drop, build, breakdown, chorus, or other.")
+                if not isinstance(certainty, str) or certainty not in EVENT_CERTAINTIES:
+                    raise ValueError("Event certainty must be certain or uncertain.")
+                if type(time_s) not in (int, float) or not math.isfinite(time_s) or time_s < 0:
+                    raise ValueError("Event time must be a finite non-negative number of seconds.")
+                if not isinstance(note, str) or len(note) > 500:
+                    raise ValueError("Event note must be text no longer than 500 characters.")
+                created_at = _utc_timestamp()
+                with connect() as db:
+                    track = db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                    if not track:
+                        return json_response(self, {"error": "Track not found."}, 404)
+                    grid = _event_grid(track["plan_json"])
+                    bar = time_to_bar(time_s, grid) if grid else None
+                    db.execute(
+                        """INSERT INTO event_annotations
+                           (track_hash,event_type,certainty,time_s,bar,note,grid_json,source,created_at)
+                           VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (file_hash, event_type, certainty, float(time_s), bar, note.strip(),
+                         json.dumps(grid, allow_nan=False), "human_review", created_at),
+                    )
+                    db.execute(
+                        """INSERT INTO event_reviews(track_hash,state,note,grid_json,source,updated_at)
+                           VALUES(?,'in_progress','',?,'human_review',?)
+                           ON CONFLICT(track_hash) DO UPDATE SET state='in_progress',
+                             grid_json=excluded.grid_json,source=excluded.source,updated_at=excluded.updated_at""",
+                        (file_hash, json.dumps(grid, allow_nan=False), created_at),
+                    )
+                    result = _event_review_payload(db, file_hash)
+                return json_response(self, result)
             if parsed.path.startswith("/api/finder/"):
                 file_hash = parsed.path.rsplit("/", 1)[-1]
                 with connect() as db:
@@ -1333,7 +1641,7 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0:
                     raise ValueError("Uploaded file is empty.")
-                temp = UPLOADS / (uuid.uuid4().hex + ".incoming")
+                temp = _staged_audio_directory() / (uuid.uuid4().hex + ".incoming")
                 try:
                     remaining = length
                     with open(temp, "wb") as destination:
@@ -1431,6 +1739,26 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     write_lock.release()
                 return json_response(self, result)
+            if parsed.path.startswith("/api/tracks/") and parsed.path.endswith("/map"):
+                file_hash = parsed.path.split("/")[-2]
+                choice = str(self._body_json().get("map_type", "")).upper()
+                if choice not in ("AUTO", "DROP", "VOCAL"):
+                    raise ValueError("Map must be Auto, Drop, or Vocal.")
+                with connect() as db:
+                    row = db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                    if not row:
+                        raise ValueError("Track not found.")
+                    plan = json.loads(row["plan_json"]) if row["plan_json"] else {}
+                    if choice == "AUTO":
+                        plan.pop("map_override", None)
+                    else:
+                        plan["map_override"] = choice
+                    db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan, ensure_ascii=False), file_hash))
+                job_id, _ = create_job([file_hash], force=True)
+                return json_response(self, {"job_id": job_id})
+            if parsed.path == "/api/tracks/remove":
+                body = self._body_json()
+                return json_response(self, remove_tracks(None if body.get("all") else body.get("hashes", [])))
             if parsed.path.startswith("/api/backups/") and parsed.path.endswith("/undo"):
                 backup_id = parsed.path.split("/")[-2]
                 if _serato_open():
@@ -1492,7 +1820,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self._body_json()
             with connect() as db:
-                row = db.execute("SELECT plan_json,audio_path FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                row = db.execute("SELECT plan_json,audio_path,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
                 if not row:
                     return json_response(self, {"error": "Track not found"}, 404)
                 plan = json.loads(row["plan_json"]) if row["plan_json"] else {
@@ -1502,6 +1830,12 @@ class Handler(BaseHTTPRequestHandler):
                 grid = plan.get("grid", {})
                 if grid.get("t1") is None or not grid.get("bar_s"):
                     raise ValueError("Analyze this track and build its beat grid before saving a cue review.")
+                grid_origin(grid)
+                experiments = _experiments_module()
+                previous_answer = plan.get("answer_key")
+                if not previous_answer and row["reviewed"]:
+                    previous_answer = experiments.review_answer(plan)
+                plan["variants"] = experiments.scoring_variants(plan, allow_current=not row["reviewed"])
                 changed = False
                 events = []
                 t1, bar_s = grid.get("t1"), grid.get("bar_s")
@@ -1510,9 +1844,10 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Unknown cue slot: " + slot)
                     cue = plan.setdefault("cues", {}).setdefault(slot, {})
                     old_name, old_bar = cue.get("name"), cue.get("bar")
-                    new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names)[:80]
+                    new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names,
+                                         preserve_custom=bool(plan.get("cue_map")))[:80]
                     new_bar = float(edit["bar"]) if edit.get("bar") not in (None, "") else None
-                    earliest = min(0, math.ceil(-t1 / bar_s - 1e-6)) if t1 and bar_s else 0
+                    earliest = min(0, math.ceil(time_to_bar(0, grid) - 1e-6))
                     if new_bar is not None and (not math.isfinite(new_bar) or new_bar < earliest):
                         raise ValueError(f"Cue {slot} bar must be a finite number on or after bar {earliest}.")
                     cue_changed = cue.get("name") != new_name or cue.get("bar") != new_bar
@@ -1520,6 +1855,7 @@ class Handler(BaseHTTPRequestHandler):
                     cue.update({
                         "name": new_name,
                         "bar": new_bar,
+                        "time_s": None if new_bar is None else round(bar_to_time(new_bar, grid), 3),
                         "confidence": cue.get("confidence"),
                         "reason": "Edited by you" if cue_changed else cue.get("reason", ""),
                     })
@@ -1531,16 +1867,14 @@ class Handler(BaseHTTPRequestHandler):
                             "correct" if old_bar == new_bar else "set_here",
                         "from_beat": None if old_bar is None else float(old_bar) * 4,
                         "to_beat": None if new_bar is None else new_bar * 4,
-                        "from_time": None if old_bar is None or t1 is None or bar_s is None
-                            else round(float(t1) + float(old_bar) * float(bar_s), 3),
-                        "to_time": None if new_bar is None or t1 is None or bar_s is None
-                            else round(float(t1) + new_bar * float(bar_s), 3),
+                        "from_time": None if old_bar is None else round(bar_to_time(old_bar, grid), 3),
+                        "to_time": None if new_bar is None else round(bar_to_time(new_bar, grid), 3),
                         "original_source": cue.get("source", "suggest"),
                         "original_beat": None if old_bar is None else float(old_bar) * 4,
-                        "bar_s": bar_s, "t1": t1,
+                        "bar_s": bar_s, "t1": t1, "offset_ms": grid.get("offset_ms", 0),
                         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     })
-                plan.pop("answer_key", None)
+                plan["answer_key"] = experiments.merge_review_answer(plan, previous_answer, body.get("cues", {}))
                 status = "Edited by you" if changed else "Cues ready"
                 db.execute("UPDATE tracks SET plan_json=?,status=?,edited=?,reviewed=1 WHERE hash=?",
                            (json.dumps(plan, ensure_ascii=False), status, int(changed), file_hash))
@@ -1554,7 +1888,7 @@ class Handler(BaseHTTPRequestHandler):
                 temporary.write_text(json.dumps(corrections, ensure_ascii=False, indent=2), encoding="utf-8")
                 os.replace(temporary, correction_path)
             return json_response(self, {"ok": True})
-        except (ValueError, TypeError, json.JSONDecodeError) as error:
+        except (ValueError, TypeError, OSError, json.JSONDecodeError) as error:
             return json_response(self, {"error": str(error)}, 400)
 
     def _body_json(self):

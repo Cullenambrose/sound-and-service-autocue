@@ -3,16 +3,18 @@
 An experiment prepares overrides for rules_v6.build_plan. It never edits the baseline plan, so the review page
 can show every variant's cues side by side and the report can score them against the cues you grade.
 """
+import copy
 import math
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from timing import bar_to_time, grid_origin, time_to_bar
 
 BASELINE = "baseline"
 
 CATALOG = [
-    {"id": "baseline", "label": "Baseline v6", "default": True, "heavy": False,
+    {"id": "baseline", "label": "Rules-only v7", "default": True, "heavy": False,
      "summary": "The current engine, unchanged."},
     {"id": "phrase_changes", "label": "Phrase changes", "default": True, "heavy": False,
      "summary": "Adds drops wherever the full mix gets clearly louder at a phrase boundary, not only after a long breakdown."},
@@ -66,6 +68,8 @@ def _fuzzy_lyrics(context):
 
 
 def _kick_grid(context):
+    if context["analysis"]["grid"].get("source") == "serato_beatgrid":
+        raise Unavailable("imported Serato beatgrid retained; kick-grid experiment cannot replace it")
     import numpy as np
     low, fps = context.get("low_energy_raw"), float(context.get("fps") or 50)
     downbeats = context["analysis"].get("downbeats") or []
@@ -110,7 +114,7 @@ def _stem_energy(context):
 
 def detect_energy_jumps(rms, low, fps, grid, duration_s, first_bar=0, phrase_bars=8, minimum_jump=1.3):
     """Phrase-aligned small-to-big changes in the full mix (drops) from per-bar loudness and low end."""
-    bar_s, t1 = float(grid["bar_s"]), float(grid["t1"])
+    bar_s, t1 = float(grid["bar_s"]), grid_origin(grid)
     count = max(0, int((duration_s - t1) / bar_s))
 
     def bar_mean(values, bar):
@@ -230,6 +234,7 @@ def summarize(plan, label, detail=""):
     return {
         "label": label, "status": "ok", "detail": detail, "map_type": plan.get("map_type"),
         "t1": grid.get("t1"), "bar_s": grid.get("bar_s"),
+        "offset_ms": grid.get("offset_ms", 0),
         "flags": plan.get("flags", []),
         "cues": {slot: {key: cue.get(key) for key in ("name", "bar", "time_s", "confidence", "reason", "meaning")}
                  for slot, cue in plan.get("cues", {}).items()},
@@ -238,7 +243,10 @@ def summarize(plan, label, detail=""):
 
 def run_variants(base_kwargs, context, baseline_plan, enabled, build_plan):
     """Return {id: summary}. `base_kwargs` are the exact build_plan arguments used for the baseline."""
-    variants = {BASELINE: summarize(baseline_plan, "Baseline v6")}
+    rules_plan = (baseline_plan.get("gemini") or {}).get("baseline") or baseline_plan
+    variants = {BASELINE: summarize(rules_plan, "Rules-only v7")}
+    if baseline_plan.get("gemini", {}).get("used"):
+        variants["gemini"] = summarize(baseline_plan, "Gemini-assisted v7")
     labels = {item["id"]: item["label"] for item in CATALOG}
     context = {**context, "detected_drops": baseline_plan.get("drops") or []}
     for variant in enabled:
@@ -261,18 +269,18 @@ def bar_energy_table(stems, low_energy_raw, rms, hop_s, fps, grid, duration_s):
     """Per-bar energies saved with each song so later analysis does not need the audio again."""
     if not rms or grid["bar_s"] <= 0:
         return []
-    bar_count = max(0, int(math.ceil((duration_s - grid["t1"]) / grid["bar_s"])))
+    bar_count = max(0, int(math.ceil(time_to_bar(duration_s, grid))))
     table = []
 
     def mean(values, step, bar):
         if not values:
             return None
-        left = max(0, int((grid["t1"] + bar * grid["bar_s"]) / step))
-        right = max(left + 1, int((grid["t1"] + (bar + 1) * grid["bar_s"]) / step))
+        left = max(0, int(bar_to_time(bar, grid) / step))
+        right = max(left + 1, int(bar_to_time(bar + 1, grid) / step))
         chunk = values[left:right]
         return round(float(sum(chunk) / len(chunk)), 5) if chunk else None
 
-    for bar in range(max(0, int(math.ceil(-grid["t1"] / grid["bar_s"]))), bar_count):
+    for bar in range(max(0, int(math.ceil(time_to_bar(0, grid) - 1e-6))), bar_count):
         table.append({
             "bar": bar,
             "rms": mean(rms, 1 / fps, bar),
@@ -287,53 +295,205 @@ def bar_energy_table(stems, low_energy_raw, rms, hop_s, fps, grid, duration_s):
 def _truth_time(cue, grid):
     if cue.get("bar") is None or grid.get("t1") is None:
         return None
-    return float(grid["t1"]) + float(cue["bar"]) * float(grid["bar_s"])
+    return bar_to_time(cue["bar"], grid)
+
+
+def review_answer(plan, slots=None):
+    selected = slots if slots is not None else plan.get("reviewed_slots", list(plan.get("cues", {})))
+    return {
+        "source": "human_review", "map_type": plan.get("map_type"),
+        "grid": copy.deepcopy(plan.get("grid", {})),
+        "cues": {slot: {**{key: cue.get(key) for key in ("bar", "name", "meaning")},
+                        "map_type": plan.get("map_type")}
+                 for slot, cue in plan.get("cues", {}).items() if slot in selected},
+    }
+
+
+def merge_review_answer(plan, previous, slots):
+    answer = review_answer(plan, slots)
+    for slot, cue in (previous or {}).get("cues", {}).items():
+        if slot in answer["cues"]:
+            continue
+        retained = copy.deepcopy(cue)
+        if retained.get("bar") is not None:
+            retained["bar"] = time_to_bar(bar_to_time(retained["bar"], previous["grid"]), plan["grid"])
+        retained.setdefault("map_type", previous.get("map_type"))
+        answer["cues"][slot] = retained
+    return answer
+
+
+def scoring_variants(plan, *, allow_current=True):
+    variants = copy.deepcopy(plan.get("variants") or {})
+    gemini = plan.get("gemini") or {}
+    if gemini.get("used"):
+        if gemini.get("baseline"):
+            variants[BASELINE] = summarize(gemini["baseline"], "Rules-only v7")
+        else:
+            # Old assisted baselines cannot be relabelled as unassisted evidence.
+            variants[BASELINE] = {"status": "unavailable", "label": "Rules-only v7", "cues": {},
+                                  "detail": "Historical assisted plan has no independent rules-only snapshot."}
+        variants.setdefault("gemini", summarize(plan, "Gemini-assisted v7") if allow_current else {
+            "status": "unavailable", "label": "Gemini-assisted v7", "cues": {},
+            "detail": "Historical reviewed plan has no saved pre-review assisted prediction."})
+    elif BASELINE not in variants:
+        variants[BASELINE] = summarize(plan, "Rules-only v7") if allow_current else {
+            "status": "unavailable", "label": "Rules-only v7", "cues": {},
+            "detail": "Historical reviewed plan has no saved pre-review automatic prediction."}
+    return variants
+
+
+def _variant_time(cue, variant, fallback_grid):
+    if cue.get("bar") is None:
+        if cue.get("time_s") is not None:
+            raise ValueError("empty prediction has a timestamp")
+        return None
+    if type(cue["bar"]) not in (int, float) or not math.isfinite(cue["bar"]):
+        raise ValueError("prediction position is not finite")
+    time_s = cue.get("time_s")
+    if time_s is not None:
+        if type(time_s) not in (int, float) or not math.isfinite(time_s):
+            raise ValueError("prediction timestamp is not finite")
+        return time_s
+    grid = variant.get("grid") or {
+        key: variant.get(key, fallback_grid.get(key)) for key in ("t1", "bar_s")}
+    if not variant.get("grid"):
+        grid["offset_ms"] = variant.get("offset_ms", fallback_grid.get("offset_ms", 0))
+    return bar_to_time(cue["bar"], grid)
 
 
 def score_tracks(tracks):
-    """Score every variant against the cues you reviewed.
-
-    `tracks` is a list of dicts: {"name", "plan"} where plan["cues"] holds the saved (graded) cues and
-    plan["variants"] holds each experiment's cues. A variant cue is right when it is within one beat of the
-    saved cue, or when both are empty.
-    """
-    results, per_track = {}, []
+    """Score frozen predictions against explicit human targets; omitted targets remain unknown."""
+    results, per_track, skipped, unavailable, map_comparison = {}, [], [], [], {}
+    cost = {"requests": 0, "cache_hits": 0, "new_cost_usd": 0.0, "unknown_cost_tracks": 0,
+            "scope": "Saved analyzed runs on scored tracks, not a provider billing ledger."}
     for track in tracks:
         plan = track["plan"]
-        answer = plan.get("answer_key") or {"grid": plan.get("grid", {}), "cues": plan.get("cues", {})}
+        answer = plan.get("answer_key")
+        if not answer and track.get("reviewed"):
+            answer = review_answer(plan)
+        if not answer:
+            skipped.append({"hash": track.get("hash"), "name": track["name"], "reason": "no human-reviewed answer key"})
+            continue
         grid = plan.get("grid", {})
         key_grid = answer.get("grid") or grid
         variants = plan.get("variants") or {}
-        if not grid.get("bar_s") or not key_grid.get("bar_s") or not variants:
+        try:
+            beat = (bar_to_time(1, key_grid) - bar_to_time(0, key_grid)) / 4
+        except ValueError as error:
+            skipped.append({"hash": track.get("hash"), "name": track["name"], "reason": str(error)})
             continue
-        beat = float(grid["bar_s"]) / 4
-        row = {"name": track["name"], "map_type": plan.get("map_type"), "slots": {}}
+        if not variants:
+            skipped.append({"hash": track.get("hash"), "name": track["name"], "reason": "no saved automatic predictions"})
+            continue
+        unavailable.extend({"hash": track.get("hash"), "name": track["name"], "variant": key,
+                            "reason": variant.get("detail") or variant.get("status", "unknown status")}
+                           for key, variant in variants.items() if variant.get("status") != "ok")
+        key_map = answer.get("map_type") or plan.get("map_type")
+        row = {"hash": track.get("hash"), "name": track["name"], "map_type": key_map, "slots": {}}
         for slot in "ABCDEFGH":
-            truth = _truth_time(answer["cues"].get(slot, {}), key_grid)
+            if slot not in answer.get("cues", {}):
+                continue
+            target = answer["cues"][slot]
+            if "bar" not in target:
+                row["slots"][slot] = {"error": "review target has no explicit position/empty decision", "variants": {}}
+                continue
+            try:
+                truth = _truth_time(target, key_grid)
+            except ValueError as error:
+                row["slots"][slot] = {"error": "invalid review target: " + str(error), "variants": {}}
+                continue
             row["slots"][slot] = {"truth": truth, "variants": {}}
             for key, variant in variants.items():
                 if variant.get("status") != "ok":
                     continue
-                cue = variant["cues"].get(slot, {})
-                time_s = cue.get("time_s") if cue.get("bar") is not None else None
-                right = (time_s is None and truth is None) or (
-                    time_s is not None and truth is not None and abs(time_s - truth) <= beat + 1e-6)
-                row["slots"][slot]["variants"][key] = {"time_s": time_s, "right": right}
+                cue = variant.get("cues", {}).get(slot)
+                meaning = (cue or {}).get("meaning")
+                target_map = target.get("map_type") or key_map
+                incompatible = (bool(target.get("meaning") and meaning and target["meaning"] != meaning)
+                                or (not (target.get("meaning") and meaning) and slot in "CDEF"
+                                    and variant.get("map_type") is not None and target_map is not None
+                                    and variant["map_type"] != target_map))
+                if incompatible:
+                    row["slots"][slot]["variants"][key] = {
+                        "time_s": None, "right": None, "failure": "incompatible cue meaning/map"}
+                    continue
+                failure = None
+                time_s = None
+                try:
+                    if cue is None:
+                        raise ValueError("automatic prediction missing this slot")
+                    time_s = _variant_time(cue, variant, grid)
+                except ValueError as error:
+                    failure = str(error)
+                error_s = abs(time_s - truth) if time_s is not None and truth is not None else None
+                right = not failure and ((time_s is None and truth is None) or (
+                    error_s is not None and error_s <= beat + 1e-6))
+                if not right and not failure:
+                    failure = ("false positive" if truth is None else "missing cue" if time_s is None else "timing error")
+                row["slots"][slot]["variants"][key] = {
+                    "time_s": time_s, "right": right, "error_s": error_s, "failure": failure}
                 entry = results.setdefault(key, {"label": variant.get("label", key), "right": 0, "total": 0,
-                                                 "by_slot": {}, "by_map": {}, "wins": 0, "losses": 0})
+                                                 "positioned_right": 0, "positioned_total": 0,
+                                                 "empty_right": 0, "empty_total": 0,
+                                                 "within_bar": 0, "missing": 0, "false_positives": 0,
+                                                 "by_slot": {}, "by_map": {}, "wins": 0, "losses": 0,
+                                                 "timing_errors_s": []})
                 entry["total"] += 1
                 entry["right"] += int(right)
+                entry["positioned_total" if truth is not None else "empty_total"] += 1
+                entry["positioned_right" if truth is not None else "empty_right"] += int(right)
+                entry["missing"] += int(truth is not None and time_s is None)
+                entry["false_positives"] += int(truth is None and time_s is not None)
+                entry["within_bar"] += int(error_s is not None and error_s <= beat * 4 + 1e-6)
+                if error_s is not None:
+                    entry["timing_errors_s"].append(error_s)
                 slot_entry = entry["by_slot"].setdefault(slot, {"right": 0, "total": 0})
                 slot_entry["total"] += 1
                 slot_entry["right"] += int(right)
-                map_entry = entry["by_map"].setdefault(str(plan.get("map_type")), {"right": 0, "total": 0})
+                map_entry = entry["by_map"].setdefault(str(target_map), {
+                    "right": 0, "total": 0, "positioned_right": 0, "positioned_total": 0})
                 map_entry["total"] += 1
                 map_entry["right"] += int(right)
+                if truth is not None:
+                    map_entry["positioned_total"] += 1
+                    map_entry["positioned_right"] += int(right)
             base = row["slots"][slot]["variants"].get(BASELINE)
             for key, value in row["slots"][slot]["variants"].items():
-                if base and key != BASELINE and value["right"] != base["right"]:
+                if (base and base["right"] is not None and value["right"] is not None
+                        and key != BASELINE and value["right"] != base["right"]):
                     results[key]["wins" if value["right"] else "losses"] += 1
-        per_track.append(row)
+        if any(slot.get("variants") for slot in row["slots"].values()):
+            per_track.append(row)
+            if key_map in ("VOCAL", "DROP"):
+                for key, variant in variants.items():
+                    if variant.get("status") == "ok" and variant.get("map_type") in ("VOCAL", "DROP"):
+                        comparison = map_comparison.setdefault(key, {"right": 0, "total": 0})
+                        comparison["total"] += 1
+                        comparison["right"] += int(variant["map_type"] == key_map)
+            gemini = plan.get("gemini") or {}
+            if gemini.get("used"):
+                cost["requests"] += int(not gemini.get("cached", False))
+                cost["cache_hits"] += int(gemini.get("cached", False))
+                new_cost = gemini.get("new_cost_usd")
+                if type(new_cost) in (int, float) and math.isfinite(new_cost) and new_cost >= 0:
+                    cost["new_cost_usd"] += new_cost
+                else:
+                    cost["unknown_cost_tracks"] += 1
+        else:
+            skipped.append({"hash": track.get("hash"), "name": track["name"],
+                            "reason": "no valid reviewed targets with saved predictions",
+                            "cue_errors": {slot: details["error"] for slot, details in row["slots"].items()
+                                           if details.get("error")}})
     for entry in results.values():
         entry["accuracy"] = round(entry["right"] / entry["total"], 3) if entry["total"] else None
-    return {"variants": results, "tracks": per_track, "graded_songs": len(per_track)}
+        entry["positioned_accuracy"] = (round(entry["positioned_right"] / entry["positioned_total"], 3)
+                                        if entry["positioned_total"] else None)
+        errors = sorted(entry.pop("timing_errors_s"))
+        entry["mean_error_s"] = round(sum(errors) / len(errors), 4) if errors else None
+        entry["median_error_s"] = round((errors[(len(errors) - 1) // 2] + errors[len(errors) // 2]) / 2, 4) if errors else None
+    cost["new_cost_usd"] = round(cost["new_cost_usd"], 6)
+    return {"schema_version": 2, "variants": results, "tracks": per_track,
+            "graded_songs": len(per_track), "skipped": skipped, "gemini_cost": cost,
+            "unavailable_predictions": unavailable,
+            "map_comparison": map_comparison,
+            "policy": "Human review only; omitted targets unknown; explicit empty targets scored separately; incompatible meanings excluded."}

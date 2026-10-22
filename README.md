@@ -35,7 +35,8 @@ config/           Learned profiles + genre bucket params (no keys)
 ## How to run (high level)
 
 1. Install analyzers per `docs/INSTALL.md` and `docs/SONGFORMER-ON-MAC.md` (SongFormer needs disk space on the Mac).
-2. Set `GEMINI_API_KEY` in the environment when you want AI suggestions on low-confidence cues. Never commit the key.
+2. For optional Gemini assistance, configure `GEMINI_API_KEY` in the environment or a local
+   `.env.local` file (copy `.env.example`). Never commit the key. See [Gemini configuration](#gemini-configuration-and-local-spending-controls).
 3. Source `engine/env.sh` (adjust `PROOF` to your checkout) and run the pipeline scripts under `engine/` (e.g. feature extract → `rules_v5.py` / build → review).
 4. Start the local web library and review interface:
 
@@ -44,6 +45,16 @@ config/           Learned profiles + genre bucket params (no keys)
 ```
 
 Open `http://127.0.0.1:8770`. The app keeps its SQLite library, staged audio copies, jobs, and corrections in the ignored `web-data/` directory. It binds only to loopback. Music is not uploaded; dragged/picked files are copied to the local app for analysis and their originals are left in place. Paste a local folder path or use the crate picker to link originals for Finder access and Serato writes.
+
+To move the local library, stop the server and copy the **whole** `web-data/` directory,
+then set `AUTOCUE_WEB_DATA` to its new location before restarting. Staged audio is stored as
+library-relative `audio/<hash>.<extension>` paths; startup migrates legacy absolute paths to
+the staged copy in the current library, even if an old copy still exists elsewhere.
+Missing or invalid staged files are reported in the track row. Original/source links remain
+separate absolute paths: moving the library does not relocate your music or retarget Serato
+writes. Playback, analysis and removal never fall back to the original. Symlinked staged files
+or staged audio directories are rejected. Removal reports deletion failures and retains
+failed entries; a partial batch error states how many entries were removed.
 
 Install the small Serato-tag dependency once to enable backed-up writes:
 
@@ -60,6 +71,283 @@ Corrections stay local in `web-data/corrections.json` (the standalone review UI'
 ## Ground truth
 
 **Do not** treat the old Serato Markers2 on the 20-song test set as Cullen’s hand cues — those lined up with Mixed In Key energy cues. Scoring and learning use **Cullen’s review-page marks** (`corrections.json` → `learner_marks.py` → `config/learned_profile_marks.json`). See `docs/STATUS.md`.
+
+### Current v7 evaluation
+
+Open **Experiments** after analyzing and saving human reviews. Automatic predictions are frozen
+before editing. The rules-only baseline and optional Gemini-assisted result remain separate,
+including after partial reviews or reanalysis. Reviews retain cue meanings, custom names, grid
+offsets and explicit empty decisions. Omitted review targets are unknown, not correct empty cues.
+
+The report separates positioned-target accuracy (within one reviewed beat) from empty-target
+correctness. Timing comparisons exclude different cue meanings/maps; map classification is
+reported separately when known. Exports include answer keys, saved predictions, per-cue errors,
+exclusions, skipped tracks and recorded new Gemini cost for those runs—not lifetime billing.
+Old assisted plans without an independent rules-only snapshot cannot supply an unassisted baseline.
+No reviewed targets means no accuracy estimate. These are development/review metrics, not a
+held-out musical-accuracy benchmark.
+
+Use **Export all data** in Experiments to download the JSON, then score it locally:
+
+```bash
+.venv/bin/python engine/score_v6.py --library-export "/path/to/autocue-experiments.json" --report "/path/to/evaluation.md"
+```
+
+The legacy `--v6-dir` / `--marks` scoring mode remains available. Current web plans still use
+some historical `_v6` module filenames.
+
+## Read-only library inventory
+
+Before importing or processing a large library, inventory **explicitly selected** directories:
+
+```bash
+.venv/bin/python engine/library_inventory.py --database web-data/inventory.sqlite3 scan --root "/path/to/sample-music" --limit 10
+.venv/bin/python engine/library_inventory.py --database web-data/inventory.sqlite3 list
+.venv/bin/python engine/library_inventory.py --database web-data/inventory.sqlite3 resume SCAN_ID --limit 100
+.venv/bin/python engine/library_inventory.py --database web-data/inventory.sqlite3 status SCAN_ID
+```
+
+Repeat `--root` for disjoint directories. The dedicated inventory database must be **outside**
+every source root. It is separate from the web library; this command does not import songs.
+Mutagen reads tags/audio headers only: no audio copying, decoding, models, network requests,
+cue generation or tag writes. The existing `web/requirements.txt` supplies Mutagen.
+
+JSON progress includes the scan ID, per-kind/state counts, discovered audio bytes and up to
+20 file/directory errors (with an explicit truncation flag). Imported-annotation errors and
+unsupported fields have separate counts and up to 20 concise diagnostics, also with a truncation
+flag; raw payloads never appear in progress output. All entry details remain in the
+local SQLite `entries` table. `--limit` counts attempted audio files, including failures; it
+does not limit directory enumeration. Ctrl-C pauses at a durable checkpoint. Resume skips
+finished entries; `list` recovers scan IDs after a crash. Concurrent writers are rejected.
+Exit codes: 0 for complete/paused, 2 for complete with entry or annotation errors, 1 for a failed operation,
+130 for Ctrl-C. Invalid CLI arguments also use argparse's exit code 2.
+
+Symlinks and nonregular files are skipped. Queued paths cannot follow substituted directory
+symlinks; missing/replaced roots fail visibly. Files changed during discovery/read are errors,
+not trustworthy metadata. A scan observes each entry at its read time, not one atomic library
+snapshot. Start a **new scan** to observe later edits, additions/removals, changed files or
+previous entry errors; only interrupted/unfinished work resumes. Counts are paths, not unique
+recordings.
+
+After a scan completes, create a reproducible dataset snapshot with local file hashing:
+
+```bash
+.venv/bin/python engine/dataset_splits.py --database web-data/inventory.sqlite3 \
+  freeze SCAN_ID --out "/path/outside-source-roots/dataset-v1.json" \
+  --seed "benchmark-v1" --ratios 0.7,0.15,0.15
+```
+
+This reads each completed audio file to compute its SHA-256; it does not decode, copy, upload,
+or modify audio, tags, or inventory rows. Byte-identical copies become one track record with all
+source paths retained. Distinct files with the same normalized artist/title (after recognized
+mix/version suffixes) are grouped so they cannot leak across splits. The deterministic hash-based
+assignment is reproducible for the same metadata, files, seed and ratios; actual split percentages
+can vary with group sizes. The output path must be new and outside every scanned root.
+
+Metadata-based groups are candidates, not verified song identity. Inspect the JSON `groups`
+before using the split for evaluation; the manifest marks these groups as requiring review.
+Start from a new completed inventory scan to capture library changes, and use a new output path
+for each frozen snapshot.
+
+### Versioned beat/bar feature cache
+
+After selecting and checking the dataset split, extract local per-bar energy features using either
+a constant-tempo imported Serato grid or an explicit grid JSON keyed by track SHA-256:
+
+```json
+{
+  "<64-character-audio-sha256>": {
+    "t1": 0.25,
+    "bar_s": 1.875,
+    "offset_ms": 0,
+    "source": "beat_this_downbeats",
+    "confidence": 0.9,
+    "human_verified": false
+  }
+}
+```
+
+`t1` and `bar_s` are in seconds; the effective grid origin is `t1 - offset_ms / 1000`.
+The JSON grid overrides imported grids for matching tracks. Without an override, only a
+constant-tempo Serato BeatGrid with a supported tempo can be used, and it remains explicitly
+unverified. Missing, conflicting, malformed or variable-tempo grids are skipped with a quality
+flag instead of guessed.
+
+```bash
+.venv/bin/python engine/feature_cache.py \
+  --database web-data/inventory.sqlite3 \
+  --cache-dir "/path/outside-source-roots/features-v1" \
+  run --dataset "/path/outside-source-roots/dataset-v1.json" \
+  --grids "/path/outside-source-roots/grids.json" --limit 20
+.venv/bin/python engine/feature_cache.py \
+  --database web-data/inventory.sqlite3 \
+  --cache-dir "/path/outside-source-roots/features-v1" status
+```
+
+Extraction decodes locally through FFmpeg and reuses the existing 50 fps RMS, peak and
+low/mid/high-band feature calculation. Each compressed NPZ artifact contains bar indices, start
+times, frame coverage and per-bar mean energy/peak values, plus its grid, extractor, FFmpeg and
+base-feature version and quality metadata. A locked SQLite checkpoint tracks
+queued/running/done/skipped/error states; rerunning the same command resumes unfinished tracks,
+while `--retry-errors` explicitly retries failures. `--limit` bounds attempted tracks.
+Input-manifest, grid, extractor settings and FFmpeg version
+are pinned to the cache directory; changed inputs require a new directory. Feature caches are
+local only, do not modify audio/tags/inventory, and are never uploaded. This is a deterministic
+feature extraction layer, not a musical event classifier or a benchmark result.
+
+### Existing cue/grid evidence
+
+New scans retain `metadata_json.imported_anchors` in each audio entry:
+
+- Native ID3 GEOB fields in MP3/AIFF/WAV: Serato Markers2 v1.1 cues/loops and BeatGrid v1.0
+  markers, including variable-tempo grids. FLAC `SERATO_MARKERS_V2` and M4A
+  `----:com.serato.dj:markersv2` wrappers also expose Markers2 cues/loops.
+- Cue indices, seconds, names, colours and loop endpoints are preserved, **not** mapped to
+  AutoCue pad meanings. An unset timestamp stays null, not a cue at song end.
+- Every source records its container/field, extractor version, original payload and SHA-256.
+  Unknown marker entries are preserved. Unsupported legacy `Serato Markers_` and CuePoints JSON
+  (raw or base64) remain visible as unsupported evidence. CuePoints schema/units are not guessed.
+- All imported authorship remains `unknown`, with `human_verified: false`, even when a label
+  says “Mixed In Key” or “DROP.” A Serato field identifies storage format, not who set the cue.
+  Imported cues are neither training answer keys nor replacements for generated/reviewed cues.
+- Malformed versions, truncated tags, conflicting duplicate fields/indices and out-of-duration
+  markers report annotation errors without discarding the readable track metadata or original tag.
+  Tags above 1 MiB report an error and retain only size/hash, not the oversized raw payload.
+
+This is a **local inventory**, not yet a web-editor imported-cue overlay or trained detector.
+Metadata extractor v2 adds this evidence without changing the SQLite schema. Finished v1 inventory
+entries are not retroactively reread; start a new scan to collect their annotations. The importer is
+verified against generated container/tag fixtures, not yet against your actual Serato/MIK library.
+
+### Switchable imported-anchor candidate experiment
+
+`engine/anchor_detector.py` compares a deterministic audio-only candidate pool with that pool
+augmented by imported Serato Markers2 cue positions. It reads a frozen dataset and completed B04
+feature cache; it does not decode audio again, alter tags, infer event types from marker labels, or
+train a model. The audio baseline scores boundaries with four preceding bars and two following
+bars; it uses RMS and low-band energy ratios with a fixed threshold of 1.3. Incomplete bar coverage
+is skipped. Imported cue times are retained exactly and accompanied by the nearest grid bar and
+their local audio evidence, when available. Identical candidate positions merge while retaining
+audio and all imported-marker provenance. Imported loops and unsupported formats are not
+classified as cues.
+
+```bash
+.venv/bin/python engine/anchor_detector.py \
+  --database web-data/inventory.sqlite3 \
+  --dataset "/path/outside-source-roots/dataset-v1.json" \
+  --cache-dir "/path/outside-source-roots/features-v1" \
+  --reviews "/path/autocue-experiments.json" \
+  --detector both \
+  --out "/path/outside-source-roots/candidate-report.json"
+```
+
+`--detector` accepts `audio-only`, `anchor-assisted`, or `both` (the default). `--reviews` is
+optional and accepts the schema-2 **Export all data** experiment export. Only explicit
+`human_review` answer keys are used, and review tracks are joined to the frozen manifest by
+full-file SHA-256; files must have identical bytes for the hashes to match. Candidate recall
+defaults to within four beats of a positioned reviewed cue and can be changed with
+`--tolerance-beats`. The report also compares coverage of targets changed from the saved baseline
+(meaning differs, position differs by more than one beat, or baseline position is absent).
+Exports without a saved baseline mark correction status as unknown rather than treating targets
+as uncorrected.
+
+These are candidate-coverage diagnostics, not event classification, measured reductions in review
+work, held-out accuracy, or proof that review targets were independent of imported markers.
+Imported labels are preserved as provenance only. No real-library run is included in validation;
+actual sample compatibility, grid quality, and musical benefit still require human review.
+
+### Human-reviewed event labels
+
+In the local library, open **Review** for a track and use the waveform/playhead to add one of
+`drop`, `build`, `breakdown`, `chorus`, or `other`. Each point records its exact time in seconds,
+optional bar position, a snapshot of the active grid/offset, certain/uncertain certainty, a note,
+human-review provenance, and a UTC timestamp. Labels are independent of cue edits and imported
+Serato markers. They remain local in the library database.
+
+Track review states are **Not reviewed**, **In progress**, **Complete**, **Uncertain**, and
+**Skip this track**. Complete means the reviewer listened through the track; zero labels is an
+explicit decision that no target event was found. Uncertain and skipped tracks remain explicit
+states, not negative examples. Retracted annotations are hidden from active review but retained in
+export history with their retraction timestamp. The **Export labels** link downloads a versioned
+JSON snapshot suitable for later dataset building; it never uploads audio or labels. Removing a
+track from the local library deletes its annotations too, so export first if they should be kept.
+
+### Held-out event benchmark
+
+After collecting completed event reviews on the test portion of a frozen B03 dataset, export the
+event labels from the local app and create a B05 candidate report with `--detector both`. Then run:
+
+```bash
+.venv/bin/python engine/event_benchmark.py \
+  --dataset "/path/to/frozen-dataset-v1.json" \
+  --reviews "/path/to/autocue-event-labels.json" \
+  --candidates "/path/to/candidate-report.json" \
+  --pools audio_only,anchor_assisted \
+  --out "/path/to/event-benchmark.json"
+```
+
+The benchmark joins only by exact full-file SHA-256 and scores only tracks assigned to the frozen
+test split whose event-review state is **Complete**. Related-mix group membership is retained and
+reported; the manifest still flags metadata-derived groups for human review. It excludes uncertain
+event labels from positive targets and excludes candidate points near those uncertain labels from
+false-positive counts. A completed review with no certain labels is explicit and contributes
+unmatched candidates as false positives; incomplete, skipped, and uncertain tracks are excluded,
+not treated as negatives. Timing tolerance defaults to four beats from the review grid, or two
+seconds for gridless reviews, and both settings are recorded in the report.
+
+This measures generic candidate coverage, timing error, and unmatched candidates—not event-type
+classification or model promotion. Candidate pools must not be tuned against the held-out test
+results. A software fixture passing is not evidence of musical accuracy; without completed
+human-reviewed test tracks, the report explicitly has no benchmark estimate.
+
+## Gemini configuration and local spending controls
+
+Gemini remains opt-in and sends structured text only, never music/audio. Both the built-in
+pipeline and `engine/gemini_v6.py --enable` use the same credential resolver and request ledger.
+Precedence is shell environment, then `.env.local`, then `.env` in the repository root.
+`AUTOCUE_ENV_FILE=/absolute/path/to/local.conf` selects an explicit file instead of the two defaults.
+Only `GEMINI_API_KEY` and `GEM_MODEL` are read; files are parsed as data, never sourced or executed.
+The normal `./run.sh` launch needs no shell `source` step. Settings shows configuration source,
+model and spending status, never the key. Configured does not mean valid or live-tested.
+
+Check status **without a network request**:
+
+```bash
+.venv/bin/python engine/gemini_assist.py --status
+```
+
+The current supported request/pricing profile is `gemini-3.1-pro-preview`: standard input
+$2/million and output (including thinking) $12/million for these bounded short prompts.
+Pricing was checked against [Google's model-specific pricing](https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-pro-preview)
+on October 21, 2026; verification expires December 1, 2026. Unknown models or expired pricing
+disable requests rather than silently assuming the same prices. This is not a claim that this
+preview model remains available to every account.
+
+Assistance runs only for eligible uncertainty or map ambiguity. Requests include cue meanings,
+beat/bar units, grid, mix preferences, vocal-boundary evidence and compact energy neighborhoods.
+They use low thinking, bounded output, a structured response schema and a versioned cache.
+Rules-only plans are retained for comparisons; a cache hit reports zero newly incurred cost.
+
+The default $3 limit is **local lifetime spending per cache directory**, not per song or batch.
+Built-in state is under `~/Library/Application Support/AutoCue/cache/gemini` (or
+`AUTOCUE_CACHE_DIR/gemini`). A process lock serializes requests and a durable ledger reserves
+input/output/reasoning cost before a call. Actual usage is recorded even for invalid JSON;
+overruns block further paid work. Missing/corrupt accounting, uncertain transport failures and
+interrupted writes fail closed. No automatic paid retries occur. External programs, other
+cache directories, changed provider prices and provider billing remain outside this limit.
+Set provider-side billing controls too; the application is not a billing guarantee.
+
+After a failed/uncertain request, check provider usage before releasing its reservation:
+
+```bash
+.venv/bin/python engine/gemini_assist.py --status --cache-dir "/path/to/cache/gemini"
+.venv/bin/python engine/gemini_assist.py --reconcile-cost 0.012 --cache-dir "/path/to/cache/gemini"
+```
+
+Use the **verified cost**, not the example amount. Zero is valid only if no charge was confirmed.
+The reconciliation is retained in the ledger. Actual-cost/pricing overruns remain blocked for
+investigation; never delete accounting files to get around a spend limit.
+No live request is part of these status/reconciliation commands.
 
 
 ## v5 (switchable improvements)

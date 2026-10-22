@@ -4,25 +4,66 @@ import csv
 import json
 import os
 import sys
+import threading
+from collections import OrderedDict
 import torch
+
+# PyTorch >= 2.6 defaults to weights_only=True, which rejects the pyannote VAD checkpoint that
+# WhisperX bundles. This module only loads those trusted model files.
+_torch_load = torch.load
+def _trusted_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _torch_load(*args, **kwargs)
+torch.load = _trusted_load
 import whisperx
 
 torch.set_num_threads(4)
 
+_model = None
+_aligners = OrderedDict()
+_transcription_lock = threading.Lock()
+
+
+def transcribe_local(wav, language=None):
+    global _model
+    with _transcription_lock:
+        if _model is None:
+            _model = whisperx.load_model("small", "cpu", compute_type="int8")
+        record = transcribe(wav, _model, language, _aligners)
+        lang = record["language"]
+        if lang in _aligners:
+            _aligners.move_to_end(lang)
+        while len(_aligners) > 2:
+            _aligners.popitem(last=False)
+        return record
+
+
+def vocal_window(audio, rate=16000, seconds=30):
+    """The loudest `seconds`-long stretch of a vocal stem; the first 30s are often an instrumental intro."""
+    per_second = [float((audio[i:i + rate] ** 2).mean()) for i in range(0, max(1, len(audio) - rate + 1), rate)]
+    if len(per_second) <= seconds:
+        return audio
+    totals = [sum(per_second[i:i + seconds]) for i in range(len(per_second) - seconds + 1)]
+    start = totals.index(max(totals)) * rate
+    return audio[start:start + seconds * rate]
+
 
 def transcribe(wav, model, language=None, aligner_cache=None):
     audio = whisperx.load_audio(wav)
+    if not language:
+        language = model.transcribe(vocal_window(audio), batch_size=4).get("language")
     options = {"language": language} if language else {}
     result = model.transcribe(audio, batch_size=4, **options)
     lang = result.get("language", language or "en")
     align_error = None
-    if lang not in aligner_cache:
+    aligner_cache = {} if aligner_cache is None else aligner_cache
+    aligned = aligner_cache.get(lang)
+    if aligned is None:
         try:
-            aligner_cache[lang] = whisperx.load_align_model(language_code=lang, device="cpu")
+            aligned = whisperx.load_align_model(language_code=lang, device="cpu")
+            aligner_cache[lang] = aligned
         except Exception as error:
             align_error = str(error)
-            aligner_cache[lang] = None
-    aligned = aligner_cache[lang]
     if aligned is None and align_error is None:
         align_error = "word alignment model is unavailable for language " + lang
     if aligned is not None:
@@ -66,8 +107,11 @@ def transcribe_manifest(manifest, vocal_dir, words_dir, language=None):
         output = os.path.join(words_dir, source_id + ".json")
         audio = os.path.join(vocal_dir, source_id + ".wav")
         if os.path.exists(output):
-            counts["skipped"] += 1
-            continue
+            with open(output, encoding="utf-8") as cached:
+                record = json.load(cached)
+            if not record.get("alignment_error"):
+                counts["skipped"] += 1
+                continue
         if not os.path.isfile(audio):
             counts["missing_audio"] += 1
             print(f"{source_id}: missing vocal stem: {audio}", file=sys.stderr, flush=True)
@@ -75,10 +119,8 @@ def transcribe_manifest(manifest, vocal_dir, words_dir, language=None):
         pending.append((source_id, audio, output))
     if not pending:
         return counts
-    model = whisperx.load_model("small", "cpu", compute_type="int8")
-    aligner_cache = {}
     for source_id, audio, output in pending:
-        record = transcribe(audio, model, language, aligner_cache)
+        record = transcribe_local(audio, language)
         _save_record(output, record)
         counts["transcribed"] += 1
         print(f"{source_id}: {len(record['words'])} timed words", flush=True)
@@ -106,8 +148,7 @@ def main():
         return
     if not args.wav or not args.out:
         parser.error("provide WAV and output paths, or use --manifest")
-    model = whisperx.load_model("small", "cpu", compute_type="int8")
-    record = transcribe(args.wav, model, language, {})
+    record = transcribe_local(args.wav, language)
     _save_record(args.out, record)
     if record["alignment_error"]:
         print("word alignment failed: " + record["alignment_error"], file=sys.stderr)

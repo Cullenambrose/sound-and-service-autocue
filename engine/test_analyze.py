@@ -6,8 +6,9 @@ import sys
 import tempfile
 import unittest
 import wave
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -101,6 +102,39 @@ class AnalyzeTests(unittest.TestCase):
         self.assertAlmostEqual(grid["t1"], 1.0, places=3)
         with self.assertRaises(RuntimeError):
             analyze.fit_grid([1, 2])
+
+    def test_stem_envelopes_keep_final_partial_frame_for_outro_validation(self):
+        paths = analyze.Paths(self.cache / "tail")
+        decoded = paths.work / "decoded.wav"
+        stem_dir = paths.work / "demix" / "htdemucs" / decoded.stem
+        stem_dir.mkdir(parents=True)
+        (stem_dir / "vocals.wav").touch()
+        samples = np.concatenate((np.zeros(analyze.STEM_HOP, dtype=np.float32),
+                                  np.full(17, 0.2, dtype=np.float32)))
+        with patch.object(analyze, "available", return_value=True), \
+                patch.object(analyze, "read_stem", return_value=(samples, 44100)), \
+                patch("shutil.which", return_value=None):
+            analyze._run_demucs(decoded, paths)
+        with np.load(paths.stems_env) as env:
+            for name in ("vocals", "drums", "bass", "other"):
+                self.assertEqual(len(env[name]), 2)
+                self.assertAlmostEqual(float(env[name][-1]), 0.2, places=6)
+            self.assertGreaterEqual(len(env["vocals"]) * float(env["hop_s"]), len(samples) / 44100)
+
+    def test_word_runner_reuses_successful_records_but_retries_failed_alignment(self):
+        paths = analyze.Paths(self.cache / "words")
+        paths.vocal_wav.parent.mkdir(parents=True, exist_ok=True)
+        paths.vocal_wav.touch()
+        records = [
+            {"language": "en", "words": [], "alignment_error": "temporary model error"},
+            {"language": "en", "words": [{"start": 51.125, "end": 51.375}], "alignment_error": None},
+        ]
+        module = SimpleNamespace(transcribe_local=Mock(side_effect=records))
+        with patch.object(analyze, "available", return_value=True), patch.dict(sys.modules, {"wx_one": module}):
+            self.assertIn("temporary", analyze._run_words(paths)["alignment_error"])
+            self.assertIsNone(analyze._run_words(paths)["alignment_error"])
+            self.assertEqual(analyze._run_words(paths)["words"][0]["start"], 51.125)
+        self.assertEqual(module.transcribe_local.call_count, 2)
 
     def test_grid_fit_ignores_local_false_downbeats_and_missing_bars(self):
         true_downbeats = [0.32 + 1.96 * i for i in range(120) if i not in (16, 62)]

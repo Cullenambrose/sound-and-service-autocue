@@ -1,9 +1,10 @@
 """Optional, cached low-confidence v6 tie-breaker. Sends cue candidates and timings, never audio."""
 import argparse
+import copy
 import json
 import os
-import urllib.request
-from cue_maps import MEANINGS, refresh_dynamic_labels
+from cue_maps import MEANINGS, apply_cue_map, intro_candidate, refresh_dynamic_labels
+from timing import bar_to_time
 
 MODEL = "gemini-3.1-pro-preview"
 PRICE_INPUT_PER_MILLION = 2.0
@@ -12,54 +13,118 @@ MAX_OUTPUT_TOKENS = 500
 DEFAULT_CONFIG = os.path.join(os.path.dirname(__file__), "..", "config", "genre_params_v6.json")
 
 
-def _request(plan, api_key):
-    cues = {
-        slot: {
-            "label": cue["name"],
-            "bar_candidates": cue.get("candidate_bars", []),
-            "confidence": cue.get("confidence"),
-            "reason": cue.get("reason"),
-        }
-        for slot, cue in plan["cues"].items()
-    }
-    context = {
-        "map_type": plan["map_type"],
-        "genre": plan.get("genre"),
-        "drops": [{"bar": drop["bar"], "confidence": drop["confidence"]} for drop in plan.get("drops", [])],
-        "aligned_lyric_chorus_spans": plan.get("lyric_choruses", []),
-        "cues": cues,
-    }
-    prompt = (
-        "Review these DJ cue candidates. For each cue with at least two candidate bars, select only a listed bar "
-        "or null when the evidence is insufficient. Do not change cue labels or invent bars. Return JSON with "
-        "cue keys and {pick: integer|null, why: short string}. Input: " + json.dumps(context, separators=(",", ":"))
-    )
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0,
-                             "maxOutputTokens": MAX_OUTPUT_TOKENS},
-    }
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        result = json.load(response)
-    usage = result.get("usageMetadata", {})
-    text = "".join(part.get("text", "") for part in result["candidates"][0]["content"]["parts"])
-    answer = json.loads(text)
-    cost = (usage.get("promptTokenCount", 0) * PRICE_INPUT_PER_MILLION
-            + usage.get("candidatesTokenCount", 0) * PRICE_OUTPUT_PER_MILLION) / 1_000_000
-    return answer, cost, usage
+def _apply_mapped(plan, answer, confidence_threshold):
+    trial = copy.deepcopy(plan)
+    mapping = trial["cue_map"]
+    events = mapping["candidates"]
+    grid = trial["grid"]
+    first_bar = grid.get("first_bar", 0)
+    changes, picks = {}, {}
+
+    def reject(reason):
+        plan.setdefault("flags", []).append("Gemini cue picks rejected: " + reason)
+        return {}
+
+    for slot, response in answer.items():
+        cue = trial["cues"].get(slot)
+        spec = mapping["resolved"].get(slot)
+        if cue is None or spec is None or not isinstance(response, dict):
+            continue
+        meaning = MEANINGS[spec["meaning"]]
+        if (meaning["source"] == "intro_start" or meaning["offset"] != 0
+                or not spec["enabled"] or spec.get("end_fallback")
+                or len(cue.get("candidate_bars", [])) < 2
+                or (cue.get("confidence") or 0) >= min(0.85, confidence_threshold)):
+            continue
+        pick = response.get("pick")
+        if type(pick) is not int or pick not in cue["candidate_bars"]:
+            continue
+        source = meaning["source"]
+        if source in changes and changes[source] != pick:
+            return reject("conflicting selections for " + source)
+        changes[source] = pick
+        picks[slot] = {"bar": pick, "why": str(response.get("why") or "")[:300]}
+    if not picks:
+        return {}
+
+    # One detected event may supply both first/last pads.
+    for first, last in (("first_drop_start", "last_drop_start"),
+                        ("first_chorus_start", "last_chorus_start"),
+                        ("first_chorus_end", "last_chorus_end")):
+        if events.get(first, {}).get("bar") == events.get(last, {}).get("bar"):
+            if first in changes and last in changes and changes[first] != changes[last]:
+                return reject("conflicting selections for a shared first/last event")
+            if first in changes:
+                changes[last] = changes[first]
+            elif last in changes:
+                changes[first] = changes[last]
+
+    for source, bar in changes.items():
+        if source not in events or not first_bar <= bar < trial["bar_count"]:
+            return reject("event outside the track")
+        if (source == "outro_start" and trial.get("outro_vocal_free_bar") is not None
+                and bar < trial["outro_vocal_free_bar"]):
+            return reject("outro would precede the last detected vocal")
+        events[source]["bar"] = bar
+        events[source]["reason"] = (events[source].get("reason", "")
+                                     + "; Gemini low-confidence tie-breaker")
+        events[source]["flags"] = list(events[source].get("flags") or []) + [
+            "Gemini suggestion; verify in review"]
+
+    for first, last in (("first_drop_start", "last_drop_start"),
+                        ("first_chorus_start", "last_chorus_start"),
+                        ("first_chorus_end", "last_chorus_end"),
+                        ("first_chorus_start", "first_chorus_end"),
+                        ("last_chorus_start", "last_chorus_end")):
+        left, right = events.get(first, {}).get("bar"), events.get(last, {}).get("bar")
+        if (first in changes or last in changes) and left is not None and right is not None:
+            if left > right or (left == right and first.endswith("_start") and last.endswith("_end")):
+                return reject(first + " must precede " + last)
+
+    for source in ("first_drop_start", "last_drop_start"):
+        if source not in changes:
+            continue
+        original = plan["cue_map"]["candidates"][source]["bar"]
+        for old_drop, drop in zip(plan.get("drops", []), trial.get("drops", [])):
+            if old_drop["bar"] == original:
+                drop["bar"] = changes[source]
+                drop["time_s"] = round(bar_to_time(drop["bar"], grid), 3)
+    for source, index, field in (("first_chorus_start", 0, "start_bar"),
+                                 ("first_chorus_end", 0, "end_bar"),
+                                 ("last_chorus_start", -1, "start_bar"),
+                                 ("last_chorus_end", -1, "end_bar")):
+        if source in changes and trial.get("chorus_spans"):
+            trial["chorus_spans"][index][field] = changes[source]
+    if "outro_start" in changes:
+        trial["outro_bars"] = max(0, trial["bar_count"] - changes["outro_start"])
+
+    settings = {"version": mapping["version"], "mode": mapping["mode"],
+                "mix_lengths": mapping.get("mix_lengths", {}),
+                "end_of_song_fallback": mapping.get("end_of_song_fallback", True),
+                "maps": {trial["map_type"]: mapping["settings"]}}
+    try:
+        apply_cue_map(trial, settings, events, first_bar)
+    except ValueError as error:
+        return reject(str(error))
+    if any(trial["cues"][slot]["bar"] != pick["bar"] for slot, pick in picks.items()):
+        return reject("selection conflicts with cue-map constraints")
+    for slot, pick in picks.items():
+        if pick["why"]:
+            trial["cues"][slot]["reason"] += ": " + pick["why"]
+    plan.update(trial)
+    return picks
 
 
 def apply(plan, answer, confidence_threshold=0.6):
+    if plan.get("cue_map"):
+        return _apply_mapped(plan, answer, confidence_threshold)
     picks = {}
     for slot, response in answer.items():
         if slot not in plan["cues"] or not isinstance(response, dict):
             continue
         cue = plan["cues"][slot]
+        if cue.get("meaning") == "intro_start" or (slot == "A" and not plan.get("cue_map")):
+            continue
         if len(cue.get("candidate_bars", [])) < 2:
             continue
         pick = response.get("pick")
@@ -70,7 +135,7 @@ def apply(plan, answer, confidence_threshold=0.6):
         cue["bar"] = pick
         grid = plan.get("grid", {})
         if grid:
-            cue["time_s"] = round(grid["t1"] + pick * grid["bar_s"] - grid.get("offset_ms", 0) / 1000, 3)
+            cue["time_s"] = round(bar_to_time(pick, grid), 3)
         cue["reason"] = (cue.get("reason", "") + "; Gemini low-confidence tie-breaker: "
                          + str(response.get("why") or "selected a listed candidate"))
         cue.setdefault("flags", []).append("Gemini suggestion; verify in review")
@@ -81,7 +146,7 @@ def apply(plan, answer, confidence_threshold=0.6):
         cue = plan["cues"][slot]
         cue["bar"] = bar
         cue["time_s"] = (None if bar is None or not grid else
-                         round(grid["t1"] + bar * grid["bar_s"] - grid.get("offset_ms", 0) / 1000, 3))
+                         round(bar_to_time(bar, grid), 3))
         if label is not None and not plan.get("cue_map"):
             cue["name"] = label
     if not plan.get("cue_map") and plan.get("map_type") == "DROP":
@@ -90,8 +155,7 @@ def apply(plan, answer, confidence_threshold=0.6):
             if plan.get("drops"):
                 plan["drops"][0]["bar"] = first_drop
                 plan["drops"][0]["time_s"] = (None if not grid else
-                                               round(grid["t1"] + first_drop * grid["bar_s"]
-                                                     - grid.get("offset_ms", 0) / 1000, 3))
+                                               round(bar_to_time(first_drop, grid), 3))
             first_before = first_drop - 32
             set_bar("C", first_before if first_before >= grid.get("first_bar", 0) else None, "-32 DROP")
             plan["cues"]["C"]["candidate_bars"] = [] if plan["cues"]["C"]["bar"] is None else [plan["cues"]["C"]["bar"]]
@@ -107,8 +171,7 @@ def apply(plan, answer, confidence_threshold=0.6):
             if plan.get("drops"):
                 plan["drops"][-1]["bar"] = last_drop
                 plan["drops"][-1]["time_s"] = (None if not grid else
-                                                round(grid["t1"] + last_drop * grid["bar_s"]
-                                                      - grid.get("offset_ms", 0) / 1000, 3))
+                                                round(bar_to_time(last_drop, grid), 3))
             last_before = last_drop - 32
             set_bar("E", last_before if last_before >= grid.get("first_bar", 0) else None, "-32 LAST DROP")
             plan["cues"]["E"]["candidate_bars"] = [] if plan["cues"]["E"]["bar"] is None else [plan["cues"]["E"]["bar"]]
@@ -126,10 +189,10 @@ def apply(plan, answer, confidence_threshold=0.6):
                 if plan["cues"][slot]["bar"] is None:
                     plan["cues"][slot].setdefault("flags", []).append(f"EXIT -{bars} lands before START")
     if not plan.get("cue_map") and "B" in picks:
-        intro = plan["cues"]["A"]["bar"]
         start = plan["cues"]["B"]["bar"]
+        intro = intro_candidate(start, grid.get("first_bar", 0))["bar"]
         count = start - intro if intro is not None else 0
-        set_bar("A", intro if count > 0 else None, f"INTRO -{max(0, count)}")
+        set_bar("A", intro, f"INTRO -{count}")
         if count <= 0:
             plan["cues"]["A"].setdefault("flags", []).append("no intro bar remains before START")
         if plan.get("map_type") == "VOCAL":
@@ -145,65 +208,6 @@ def apply(plan, answer, confidence_threshold=0.6):
         set_bar("H", outro_start, f"OUTRO -{outro_bars}")
         go = None if outro_start is None or outro_start - 32 < grid.get("first_bar", 0) else outro_start - 32
         set_bar("G", go, "GO -32")
-    if plan.get("cue_map"):
-        resolved = plan["cue_map"]["resolved"]
-        events = plan["cue_map"].get("candidates", {})
-        changed_events = {}
-        for slot in sorted(picks):
-            spec = resolved.get(slot)
-            if not spec:
-                continue
-            meaning = MEANINGS[spec["meaning"]]
-            event_bar = plan["cues"][slot]["bar"] - meaning["offset"]
-            if meaning["source"] in changed_events:
-                continue
-            if not 0 <= event_bar < plan.get("bar_count", event_bar + 1):
-                continue
-            changed_events[meaning["source"]] = event_bar
-
-        if len(plan.get("drops", [])) == 1:
-            if "first_drop_start" in changed_events:
-                changed_events.setdefault("last_drop_start", changed_events["first_drop_start"])
-            elif "last_drop_start" in changed_events:
-                changed_events.setdefault("first_drop_start", changed_events["last_drop_start"])
-
-        first_bar = grid.get("first_bar", 0)
-        for event_name, event_bar in changed_events.items():
-            if event_name in events:
-                events[event_name]["bar"] = event_bar
-            if grid:
-                event_time = round(grid["t1"] + event_bar * grid["bar_s"]
-                                   - grid.get("offset_ms", 0) / 1000, 3)
-            else:
-                event_time = None
-            if event_name == "first_drop_start" and plan.get("drops"):
-                plan["drops"][0]["bar"] = event_bar
-                plan["drops"][0]["time_s"] = event_time
-                if len(plan["drops"]) == 1:
-                    if "last_drop_start" in events:
-                        events["last_drop_start"]["bar"] = event_bar
-            elif event_name == "last_drop_start" and plan.get("drops"):
-                plan["drops"][-1]["bar"] = event_bar
-                plan["drops"][-1]["time_s"] = event_time
-                if len(plan["drops"]) == 1:
-                    if "first_drop_start" in events:
-                        events["first_drop_start"]["bar"] = event_bar
-            elif event_name == "outro_start":
-                plan["outro_bars"] = max(0, plan.get("bar_count", event_bar) - event_bar)
-
-            for slot, spec in resolved.items():
-                meaning = MEANINGS[spec["meaning"]]
-                if meaning["source"] != event_name or slot in picks:
-                    continue
-                bar = event_bar + meaning["offset"]
-                if not first_bar <= bar < plan.get("bar_count", bar + 1):
-                    bar = None
-                set_bar(slot, bar)
-                plan["cues"][slot]["candidate_bars"] = [] if bar is None else [bar]
-                if bar is None:
-                    plan["cues"][slot].setdefault("flags", []).append(
-                        f"{spec['meaning'].replace('_', ' ')} falls outside the track"
-                    )
     refresh_dynamic_labels(plan)
     return picks
 
@@ -214,57 +218,32 @@ def _write_plan(path, plan):
 
 
 def run(plans_dir, cache_dir, output_dir, spend_cap, confidence_threshold):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is required when Gemini tie-breaking is explicitly enabled")
+    import gemini_assist
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
-    spent = sum(
-        json.load(open(os.path.join(cache_dir, filename), encoding="utf-8")).get("cost_usd", 0)
-        for filename in os.listdir(cache_dir) if filename.endswith(".json")
-    )
     counts = {"requested": 0, "cached": 0, "skipped_confident": 0, "skipped_no_candidates": 0,
-              "skipped_budget": 0, "cost_usd": spent}
+              "skipped_budget": 0, "failed": 0, "cost_usd": 0.0}
     for filename in sorted(os.listdir(plans_dir)):
         if not filename.endswith(".json"):
             continue
         track_id = filename[:-5]
         with open(os.path.join(plans_dir, filename), encoding="utf-8") as source:
             plan = json.load(source)
-        low_confidence = [cue for cue in plan["cues"].values()
-                          if (cue.get("confidence") or 0) < confidence_threshold]
-        uncertain = [cue for cue in low_confidence if len(cue.get("candidate_bars", [])) > 1]
-        if not uncertain:
-            counts["skipped_confident" if not low_confidence else "skipped_no_candidates"] += 1
-            _write_plan(os.path.join(output_dir, filename), plan)
-            continue
-        cache_path = os.path.join(cache_dir, filename)
-        if os.path.exists(cache_path):
-            with open(cache_path, encoding="utf-8") as source:
-                record = json.load(source)
-            counts["cached"] += 1
-        else:
-            prompt_byte_upper_bound = len(json.dumps(plan, separators=(",", ":")).encode("utf-8")) + 1024
-            reserved_cost = (prompt_byte_upper_bound * PRICE_INPUT_PER_MILLION
-                             + MAX_OUTPUT_TOKENS * PRICE_OUTPUT_PER_MILLION) / 1_000_000
-            if spent + reserved_cost > spend_cap:
+        # This CLI has no analysis inputs to rebuild maps; retain the existing map.
+        plan = gemini_assist.assist(plan, None, track_id, cache_dir, spend_cap=spend_cap,
+                                    confidence_threshold=confidence_threshold, map_forced=True)
+        result = plan["gemini"]
+        if result.get("error"):
+            counts["failed"] += 1
+            if "spend cap" in result["error"]:
                 counts["skipped_budget"] += 1
-                _write_plan(os.path.join(output_dir, filename), plan)
-                continue
-            answer, cost, usage = _request(plan, api_key)
-            record = {"track_id": track_id, "answer": answer, "cost_usd": cost, "usage": usage}
-            with open(cache_path, "w", encoding="utf-8") as target:
-                json.dump(record, target, indent=2)
-            spent += cost
-            counts["requested"] += 1
-            counts["cost_usd"] = round(spent, 6)
-            if spent > spend_cap:
-                raise RuntimeError(f"Gemini spend cap exceeded: ${spent:.4f} > ${spend_cap:.2f}")
-        suggestions = apply(plan, record.get("answer", {}), confidence_threshold)
-        plan["gemini"] = {"used": bool(suggestions), "model": MODEL, "suggestions": suggestions,
-                          "cost_usd": record.get("cost_usd", 0)}
+        elif not result.get("used"):
+            counts["skipped_confident"] += 1
+        else:
+            counts["cached" if result["cached"] else "requested"] += 1
+            counts["cost_usd"] += result["new_cost_usd"]
         _write_plan(os.path.join(output_dir, filename), plan)
-    counts["cost_usd"] = round(spent, 6)
+    counts["cost_usd"] = round(counts["cost_usd"], 6)
     return counts
 
 

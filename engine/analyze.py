@@ -248,8 +248,13 @@ def _run_demucs(source_wav, paths):
     env = {}
     for name in ("vocals", "drums", "bass", "other"):
         x, rate = read_stem(stem_dir / (name + ".wav"))
+        if rate != 44100:
+            raise RuntimeError("Demucs stem envelopes require a 44.1 kHz sample rate.")
         count = len(x) // STEM_HOP
         env[name] = np.sqrt((x[:count * STEM_HOP].reshape(count, STEM_HOP) ** 2).mean(1)).astype(np.float32)
+        tail = x[count * STEM_HOP:]
+        if len(tail):
+            env[name] = np.append(env[name], np.sqrt((tail ** 2).mean()))
     paths.stems_env.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(paths.stems_env, hop_s=np.float32(STEM_HOP / 44100), **env)
     if shutil.which("ffmpeg"):
@@ -386,14 +391,16 @@ def _run_sections(source_wav, paths):
 
 def _run_words(paths):
     if paths.words.exists():
-        return _read_json(paths.words)
+        cached = _read_json(paths.words)
+        if cached and cached.get("language_source") == "vocal_window" and not cached.get("alignment_error"):
+            return cached
     if not available("whisperx"):
         raise AnalyzerMissing("whisperx")
     if not paths.vocal_wav.exists():
         raise RuntimeError("No vocal stem is available for WhisperX.")
     import wx_one
-    model = wx_one.whisperx.load_model("small", "cpu", compute_type="int8")
-    record = wx_one.transcribe(str(paths.vocal_wav), model, None, {})
+    record = wx_one.transcribe_local(str(paths.vocal_wav))
+    record["language_source"] = "vocal_window"
     _write_json(paths.words, record)
     return record
 
@@ -414,7 +421,7 @@ def _run_lyrics(paths, artist, title):
 
 
 def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None, config_path=None,
-            switches=None, cue_maps=None, experiments=None):
+            switches=None, cue_maps=None, experiments=None, gemini=False):
     """Return a v6 plan dict for one audio file. `progress(step, state, detail)` is optional.
 
     state is one of running, done, skipped, failed. Raises AnalyzerMissing only for analyzers with no fallback.
@@ -460,6 +467,11 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
     if not beats:
         raise RuntimeError("Beat grid unavailable: " + "; ".join(notes))
     grid = fit_grid(beats["downbeats"])
+    import serato_grid
+    markers = serato_grid.read_beatgrid(source, on_diagnostic=lambda note: notes.append("beatgrid: " + note))
+    if markers:
+        grid, grid_note = serato_grid.reconcile(grid, markers)
+        notes.append("beatgrid: " + grid_note)
 
     step("vocals", lambda: _run_demucs(decoded, paths))
     segments_record = step("sections", lambda: _run_sections(decoded, paths))
@@ -495,11 +507,35 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
         stems=stems, low_energy=low_stem_step, hop_s=hop, config=config, energy=feature["rms"].tolist(),
         fps=float(feature["fps"]), cue_maps=cue_maps)
     plan = rules_v6.build_plan(**base_kwargs)
+    plan["bar_energy"] = experiments_module.bar_energy_table(
+        stems, low_raw, base_kwargs["energy"], hop, float(feature["fps"]), grid, duration)
+    if gemini:
+        import copy
+        import gemini_assist
+
+        def rebuild_maps(mode):
+            import cue_maps as cue_map_settings
+            forced = cue_map_settings.normalize_cue_maps(copy.deepcopy(base_kwargs["cue_maps"]))
+            forced["mode"] = mode
+            return forced
+
+        def rebuild(mode):
+            return rules_v6.build_plan(**{**base_kwargs, "cue_maps": rebuild_maps(mode)})
+
+        report("drops", "running", "Gemini second opinion")
+        plan = gemini_assist.assist(
+            plan, rebuild, digest, cache_root() / "gemini", artist, title,
+            spend_cap=float(config.get("gemini_spend_cap_usd", 3.0)),
+            confidence_threshold=float(config.get("gemini_confidence_threshold", 0.6)),
+            map_forced=((base_kwargs["cue_maps"] or {}).get("mode") or "AUTO") != "AUTO")
+        if (plan.get("gemini") or {}).get("switched_map"):
+            base_kwargs["cue_maps"] = rebuild_maps(plan["map_type"])
     enabled = experiments_module.normalize_enabled(experiments)
     context = {**base_kwargs, "low_energy_raw": low_raw, "paths": paths, "decoded_wav": decoded}
     plan["variants"] = experiments_module.run_variants(base_kwargs, context, plan, enabled, rules_v6.build_plan)
-    plan["bar_energy"] = experiments_module.bar_energy_table(
-        stems, low_raw, base_kwargs["energy"], hop, float(feature["fps"]), grid, duration)
+    if "bar_energy" not in plan:
+        plan["bar_energy"] = experiments_module.bar_energy_table(
+            stems, low_raw, base_kwargs["energy"], hop, float(feature["fps"]), grid, duration)
     report("drops", "done", plan.get("map_type", ""))
 
     report("cues", "running", "")
