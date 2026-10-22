@@ -53,7 +53,7 @@ held-out listening benchmark, not merely passing software tests.
 
 | ID | Story / acceptance criterion | Depends on | Status |
 |---|---|---|---|
-| C01 | Dataset builder combines weak transition labels and reviewed event labels; never treats all unmarked bars as negatives | B03, B04, B06 | Backlog |
+| C01 | Dataset builder combines weak transition labels and reviewed event labels; never treats all unmarked bars as negatives | B03, B04, B06 | Implemented + generated-cache fixtures verified; real learning dataset and label collection pending |
 | C02 | Train reproducible lightweight candidate ranker; save seeds, feature schema, parameters, metrics and model artifact | C01, B07 | Backlog |
 | C03 | Benchmark a suitably licensed pretrained audio embedding/temporal model against C02; do not train a giant model from scratch | C02 | Backlog |
 | C04 | Integrate chosen local event model behind a switch, with confidence, deterministic cue rules, fallback and rollback | C02, A08 | Backlog |
@@ -353,6 +353,30 @@ complete/uncertain/skipped review semantics, grid and fallback tolerances, one-t
 recall/precision/timing/false-positive output, malformed inputs and non-overwriting report
 writes. No actual completed test-group reviews are available yet; therefore a real benchmark
 and musical-accuracy estimate remain blocked.
+
+### Fourteenth implementation pass: positive/weak/unlabeled learning dataset
+
+- C01: `engine/event_dataset.py` combines the frozen B03 manifest, verified B04 feature artifacts,
+  and a B06 human-label export. It retains grouped train/validation assignments, input/artifact
+  hashes, extractor/grid provenance and deterministic bar RMS/low-band/coverage samples with
+  local audio evidence. Test groups are reserved without exporting their features or labels.
+- Weak audio-change/imported-anchor hints stay untyped and separate from human event targets.
+  Only certain, active annotations from complete human reviews yield event targets. Exact times,
+  notes, source annotation grids and timestamps survive feature-grid mapping. Uncertain labels
+  mask their nearest bar; incomplete labels are preserved without a target, and uncertain/skipped
+  tracks are excluded.
+- Unmarked bars remain unlabeled, including complete zero-label reviews. No negative examples
+  are inferred. Partial bars below 95% coverage are ineligible, validation rows cannot become
+  training samples, and weak labels are never validation targets. The default build is bounded
+  to 20 feature tracks; missing/deferred tracks and unmapped labels have explicit counts.
+- Output is an immutable, atomic local JSON snapshot outside source roots and the feature cache.
+  Fixture checks cover label separation, uncertainty/retraction, coverage thresholds, offset/time
+  mapping, reserved test data, train/validation isolation, bounded deterministic output, path safety,
+  and a generated-WAV inventory/cache/builder flow with artifact-tamper rejection. All 48 focused
+  dataset-builder, benchmark, anchor, feature-cache, split and import tests passed; compilation,
+  virtualenv CLI help and diff checks passed. No real library was processed or model trained.
+  C02 still needs reviewed data, a suitable positive/unlabeled or explicitly reviewed-negative
+  training protocol, and the B07 benchmark gate.
 
 ### External gates
 

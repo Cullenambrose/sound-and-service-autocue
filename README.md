@@ -300,6 +300,41 @@ classification or model promotion. Candidate pools must not be tuned against the
 results. A software fixture passing is not evidence of musical accuracy; without completed
 human-reviewed test tracks, the report explicitly has no benchmark estimate.
 
+### Local learning dataset preparation
+
+`engine/event_dataset.py` combines frozen B03 split assignments, verified B04 cached bar features,
+and a B06 event-label export. It reads existing local artifacts only: no new audio decode, models,
+uploads, or tag writes. Builds include at most 20 feature-ready tracks by default:
+
+```bash
+.venv/bin/python engine/event_dataset.py \
+  --database web-data/inventory.sqlite3 \
+  --dataset "/path/to/frozen-dataset-v1.json" \
+  --cache-dir "/path/to/features-v1" \
+  --reviews "/path/to/autocue-event-labels.json" \
+  --out "/path/outside-source-roots/learning-dataset-v1.json" \
+  --limit 20
+```
+
+The immutable JSON snapshot records input/artifact hashes, builder/feature versions, grouped
+train/validation assignments, grid quality, RMS/low-band energy/coverage and local energy-change
+evidence. Test tracks are reserved: their features, labels and imported markers are not included.
+`--limit` bounds included feature tracks; deferred and unavailable tracks are explicitly counted.
+Larger runs still need a measured storage/compute budget.
+
+Each bar has separate weak and human label records. Audio energy changes and imported markers
+are **weak, untyped candidates**, never automatic drop labels. Only certain, active annotations
+from completed human reviews produce `event_target` values; original seconds, notes, timestamps
+and annotation grids remain intact when mapped to the feature grid. Uncertain annotations mask
+their nearest bar, incomplete reviews are preserved without a target, and skipped/uncertain
+tracks are excluded. Partial bars below 95% frame coverage cannot be learning/evaluation samples.
+
+Training and validation eligibility are separate; weak labels cannot become validation targets.
+Unmarked bars always have `event_target: null`, even on a completed zero-label review. **No
+negative examples are generated.** This is positive/weak/unlabeled dataset preparation, not a
+trained ranker or an accuracy result. A later training method must explicitly handle unlabeled
+examples rather than treating them as reviewed negatives.
+
 ## Gemini configuration and local spending controls
 
 Gemini remains opt-in and sends structured text only, never music/audio. Both the built-in
