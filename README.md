@@ -331,9 +331,37 @@ tracks are excluded. Partial bars below 95% frame coverage cannot be learning/ev
 
 Training and validation eligibility are separate; weak labels cannot become validation targets.
 Unmarked bars always have `event_target: null`, even on a completed zero-label review. **No
-negative examples are generated.** This is positive/weak/unlabeled dataset preparation, not a
-trained ranker or an accuracy result. A later training method must explicitly handle unlabeled
-examples rather than treating them as reviewed negatives.
+negative examples are generated.** This is positive/weak/unlabeled dataset preparation, not an accuracy result. The C02 ranker below
+uses only explicit positives and treats all other bars as unknown, not reviewed negatives.
+
+### Positive-only event candidate ranker
+
+`engine/event_ranker.py` trains a deterministic, lightweight class-wise prototype ranker using
+only eligible, certain human-positive training labels. Weak candidates, unlabeled bars and
+validation/test labels do not fit the prototypes. Training writes a new immutable JSON artifact;
+validation diagnostics rank weak candidate points against positive targets:
+
+```bash
+.venv/bin/python engine/event_ranker.py train \
+  --dataset "/path/to/event-learning-v1.json" \
+  --seed "event-ranker-v1" \
+  --out "/path/to/event-ranker-v1.json"
+
+.venv/bin/python engine/event_ranker.py rank \
+  --dataset "/path/to/event-learning-v1.json" \
+  --model "/path/to/event-ranker-v1.json" \
+  --split validation --top-k 20 \
+  --out "/path/to/event-candidates-v1.json"
+```
+
+The model records the dataset hash, feature schema, parameters, training groups and group-count
+sufficiency warnings. Its log-energy features use robust training-positive scaling; class
+prototypes are diagonal positive-only distributions. Similarity values are uncalibrated ranking
+scores—not probabilities, event classifications or confidence—and the ranking report intentionally
+does not emit event predictions. Validation recall@k is a development diagnostic, not held-out
+accuracy. Ranking requires the exact dataset snapshot used for training, and test groups remain
+reserved and feature-free. No model promotion or musical-accuracy claim is supported until
+completed human reviews exist for a held-out B07 benchmark.
 
 ## Gemini configuration and local spending controls
 

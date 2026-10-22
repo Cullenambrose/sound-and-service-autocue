@@ -54,7 +54,7 @@ held-out listening benchmark, not merely passing software tests.
 | ID | Story / acceptance criterion | Depends on | Status |
 |---|---|---|---|
 | C01 | Dataset builder combines weak transition labels and reviewed event labels; never treats all unmarked bars as negatives | B03, B04, B06 | Implemented + generated-cache fixtures verified; real learning dataset and label collection pending |
-| C02 | Train reproducible lightweight candidate ranker; save seeds, feature schema, parameters, metrics and model artifact | C01, B07 | Backlog |
+| C02 | Train reproducible lightweight candidate ranker; save seeds, feature schema, parameters, metrics and model artifact | C01, B07 | Implemented + synthetic tests passed; real training/benchmark blocked by reviewed data |
 | C03 | Benchmark a suitably licensed pretrained audio embedding/temporal model against C02; do not train a giant model from scratch | C02 | Backlog |
 | C04 | Integrate chosen local event model behind a switch, with confidence, deterministic cue rules, fallback and rollback | C02, A08 | Backlog |
 | C05 | Active-learning queue prioritizes disagreement, uncertainty and genre gaps; reviewed examples feed versioned retraining | C04, B06 | Backlog |
@@ -375,8 +375,25 @@ and musical-accuracy estimate remain blocked.
   and a generated-WAV inventory/cache/builder flow with artifact-tamper rejection. All 48 focused
   dataset-builder, benchmark, anchor, feature-cache, split and import tests passed; compilation,
   virtualenv CLI help and diff checks passed. No real library was processed or model trained.
-  C02 still needs reviewed data, a suitable positive/unlabeled or explicitly reviewed-negative
-  training protocol, and the B07 benchmark gate.
+  No real library was processed or model trained.
+
+### Fifteenth implementation pass: positive-only event candidate ranker
+
+- C02: `engine/event_ranker.py` fits deterministic diagonal positive prototypes from eligible,
+  certain human-positive training labels only. Weak candidates and unlabeled bars do not enter
+  fitting and are never treated as negatives. The versioned artifact records the exact dataset
+  hash, seed, feature schema, normalization/variance parameters, training groups and sufficiency
+  warnings.
+- Validation diagnostics rank weak candidate bars and report recall@k and hit ranks against
+  certain validation targets. A separate `rank` command emits uncalibrated similarity-ranked
+  candidates only; it does not emit event predictions or probabilities. The rank command requires
+  the exact training dataset snapshot and cannot access the reserved test split. Model and report
+  writes are immutable and protect their inputs.
+- Synthetic tests cover positive-only fitting, ignored weak/unlabeled rows, deterministic output,
+  validation ranking, group-split and test-data leakage rejection, insufficient positives,
+  malformed artifacts, immutable writes and snapshot matching. These tests verify software
+  behavior only. No real learning data, completed reviewed test groups, benchmark result or
+  model-promotion evidence is available; the B07 held-out gate remains pending.
 
 ### External gates
 
