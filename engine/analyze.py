@@ -1,6 +1,6 @@
-"""Fresh-audio pipeline: one audio file in, a v6 cue plan out.
+"""Fresh-audio pipeline: one audio file in, a v7 review-candidate cue plan out.
 
-Runs the analyzers a v6 plan needs and caches every result by content hash in the v5 cache layout,
+Runs the analyzers a v7 plan needs and caches every result by content hash in the v5 cache layout,
 so `rules_v6` consumes it unchanged. The audio file is only read. Nothing but text lookups
 (LRCLIB artist/title) leaves the machine.
 
@@ -422,7 +422,7 @@ def _run_lyrics(paths, artist, title):
 
 def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None, config_path=None,
             switches=None, cue_maps=None, experiments=None, gemini=False):
-    """Return a v6 plan dict for one audio file. `progress(step, state, detail)` is optional.
+    """Return a v7 review-candidate plan dict. `progress(step, state, detail)` is optional.
 
     state is one of running, done, skipped, failed. Raises AnalyzerMissing only for analyzers with no fallback.
     """

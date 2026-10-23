@@ -97,6 +97,30 @@ class SeratoGridTests(unittest.TestCase):
             self.assertEqual(plan["grid"]["provenance"]["marker_count"], 1)
             self.assertFalse(plan["grid"]["provenance"]["user_verified"])
 
+    def test_m4a_serato_beatgrid_is_read_without_modifying_file(self):
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        payload = b"application/octet-stream\x00\x00Serato BeatGrid\x00" + frame([{"pos": 0.5, "bpm": 88.5}])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tagged.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(base64.b64encode(payload).rstrip(b"="))]
+            audio.save()
+            original = path.read_bytes()
+            self.assertEqual(serato_grid.read_beatgrid(path), [{"pos": 0.5, "bpm": 88.5}])
+            self.assertEqual(path.read_bytes(), original)
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(base64.b64encode(b"wrong header"))]
+            audio.save()
+            messages = []
+            self.assertIsNone(serato_grid.read_beatgrid(path, messages.append))
+            self.assertTrue(any("Malformed" in message for message in messages))
+
     def test_unsupported_format_has_explicit_diagnostic(self):
         messages = []
         self.assertIsNone(serato_grid.read_beatgrid("track.flac", messages.append))

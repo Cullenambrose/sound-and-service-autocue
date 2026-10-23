@@ -1,5 +1,9 @@
 # Sound & Service AutoCue
 
+Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
+still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)
+for the measured sample, remaining gates, and local review instructions.
+
 Library-prep engine that analyzes DJ tracks and suggests Serato cue points (A–H layout) plus two clean 4-bar loop ideas. It is a **prep app**, not a booth player: run it on the library before a gig, review the picks, then (later) write approved cues into Serato.
 
 A native Mac app (Xcode) is planned once the logic is proven. Per-song analysis JSON (see `docs/ANALYSIS-FORMAT.md`) is designed so **Booth Buddy** can read the same results later without coupling the two codebases.

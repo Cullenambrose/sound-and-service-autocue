@@ -5,10 +5,11 @@ import json
 import math
 
 from serato_grid import parse_beatgrid
-from serato_tags import FLAC_KEY, MP4_KEY, marker2_entries, vorbis_decode
+from serato_tags import (FLAC_KEY, MP4_BEATGRID_KEY, MP4_KEY, MP4_TEMPOMAP_KEY,
+                         marker2_entries, vorbis_decode)
 
 MAX_TAG_BYTES = 1024 * 1024
-ID3_FIELDS = {"Serato Markers2", "Serato Markers_", "Serato BeatGrid", "CuePoints"}
+ID3_FIELDS = {"Serato Markers2", "Serato Markers_", "Serato BeatGrid", "Serato Tempo Map", "CuePoints"}
 
 
 def _label(payload, offset):
@@ -88,15 +89,16 @@ def read_annotations(audio, duration_s):
     tags = audio.tags
     fields = []
     if tags is not None and hasattr(tags, "getall"):
-        fields = [(frame.desc, bytes(frame.data), False)
+        fields = [(frame.desc, bytes(frame.data), None)
                   for frame in tags.getall("GEOB") if frame.desc in ID3_FIELDS]
     elif tags is not None:
-        for key in (FLAC_KEY, MP4_KEY):
+        for key, envelope in ((FLAC_KEY, "Serato Markers2"), (MP4_KEY, "Serato Markers2"),
+                              (MP4_BEATGRID_KEY, "Serato BeatGrid"), (MP4_TEMPOMAP_KEY, None)):
             for value in tags.get(key, []):
-                fields.append((key, value.encode("utf-8") if isinstance(value, str) else bytes(value), True))
+                fields.append((key, value.encode("utf-8") if isinstance(value, str) else bytes(value), envelope))
     sources = []
     counts = {}
-    for field, raw, wrapped in fields:
+    for field, raw, envelope in fields:
         counts[field] = counts.get(field, 0) + 1
         source = {
             "field": field, "occurrence": counts[field], "container": type(audio).__name__,
@@ -110,15 +112,15 @@ def read_annotations(audio, duration_s):
             continue
         source["raw_b64"] = base64.b64encode(raw).decode("ascii")
         try:
-            if wrapped:
+            if envelope:
                 encoded = b"".join(raw.split())
                 base64.b64decode(encoded + b"=" * (-len(encoded) % 4), validate=True)
-                data = vorbis_decode(raw.decode("ascii"))
+                data = vorbis_decode(raw.decode("ascii"), envelope)
             else:
                 data = raw
             if field in {"Serato Markers2", FLAC_KEY, MP4_KEY}:
                 source.update(format="serato_markers2_v1.1", records=_markers(data, duration_s))
-            elif field == "Serato BeatGrid":
+            elif field in {"Serato BeatGrid", MP4_BEATGRID_KEY}:
                 markers = parse_beatgrid(data)
                 if markers is None:
                     raise ValueError("Malformed or unsupported Serato BeatGrid.")
@@ -128,6 +130,10 @@ def read_annotations(audio, duration_s):
             elif field == "CuePoints":
                 source.update(format="cuepoints_json_unknown_schema", document=_cuepoints(data),
                               status="unsupported", diagnostic="Preserved JSON; cue schema/units and producer unverified.")
+            elif field in {"Serato Tempo Map", MP4_TEMPOMAP_KEY}:
+                source.update(status="unsupported", diagnostic=(
+                    "Serato Tempo Map preserved, not decoded; on real files it does not match "
+                    "the legacy BeatGrid closely enough to infer its schema."))
             else:
                 source.update(status="unsupported", diagnostic="Legacy Serato Markers_ preserved, not decoded.")
         except (ValueError, UnicodeError, RecursionError) as error:
@@ -135,6 +141,6 @@ def read_annotations(audio, duration_s):
     for source in sources:
         if counts[source["field"]] > 1:
             source.update(status="error", error="Multiple annotation fields conflict; no source was selected.")
-    return {"schema_version": 1, "extractor": "imported_anchors_v1", "sources": sources,
+    return {"schema_version": 1, "extractor": "imported_anchors_v2", "sources": sources,
             "error_count": sum(source["status"] == "error" for source in sources),
             "unsupported_count": sum(source["status"] == "unsupported" for source in sources)}

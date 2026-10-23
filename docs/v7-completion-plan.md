@@ -27,27 +27,27 @@ held-out listening benchmark, not merely passing software tests.
 | A05 | Recover credential configuration; show safe credential/model status in Settings and CLI | None | Status/configuration implemented; historical credential recovery blocked |
 | A06 | Add request eligibility, richer evidence, versioned caches, bounded spending and usage reconciliation | A03, A04, A05 | Implemented + offline tests passed; live validation blocked by A05 |
 | A07 | Unify timing/offsets across browser, export, corrections and scoring | None | Done: automated + browser verified |
-| A08 | Strengthen outro evidence, insufficient-window handling and final automatic-plan validation | A01, A02, A07 | Implemented + regression verified; real-audio calibration/listening pending |
+| A08 | Strengthen outro evidence, insufficient-window handling and final automatic-plan validation | A01, A02, A07 | Partial real-audio evidence: 24 plans; 23 low-confidence EXIT cues; listening calibration pending |
 | A09 | Protect unsaved reviews; make save/navigation safe; fix stale waveform decode races | None | Done: automated + browser verified |
 | A10 | Add true multiresolution waveform caching, matching overview colours and browser regression tests | A09 | Done: automated + generated-audio browser verified |
-| A11 | Harden Serato grids, retain provenance, protect imported grids in experiments | None | Implemented + fixture tests passed; real Serato sample validation pending |
+| A11 | Harden Serato grids, retain provenance, protect imported grids in experiments | None | 31 real grids imported; 17 detector comparisons (target 20 unmet); M4A parse gap fixed; Serato UI check pending |
 | A12 | Implement section-wise remix lyric alignment with rejection tests | None | Done: local-match and planner integration regressions verified |
-| A13 | Benchmark and optimize WhisperX without weakening vocal/outro verification | A08 | Model reuse + timing/failure fixtures verified; real-model runtime/quality benchmark pending |
+| A13 | Benchmark and optimize WhisperX without weakening vocal/outro verification | A08 | Preliminary 24-plan lyrics-step timings: median 58.47 s, range 30.61–1263.94 s; one unavailable-word result; quality review pending |
 | A14 | Migrate staged audio to centrally resolved relative paths | None | Done: migration, moved-library playback and processing/removal regressions verified |
 | A15 | Adapt library scoring, baseline/AI comparison and answer-key export | A03, A07 | Done: regression, export CLI and synthetic-metadata browser checks verified |
-| A16 | Update docs/version labels; fresh-audio, browser, backup/restore and Serato end-marker checks | A01–A15 | Backlog |
+| A16 | Update docs/version labels; fresh-audio, browser, backup/restore and Serato end-marker checks | A01–A15 | v7 labels/docs, isolated review browser check and exact-byte MP3/M4A copy restores verified; real Serato playback/end-marker check pending |
 
 ### Milestone B: library intelligence and imported anchors
 
 | ID | Story / acceptance criterion | Depends on | Status |
 |---|---|---|---|
-| B01 | Read-only, resumable metadata inventory: explicit roots, progress, errors, counts; no audio/model jobs during scan | None | Done: CLI + generated metadata/header fixtures verified; actual library scan not started |
-| B02 | Import existing cues and grids with format/version tests and known/unknown provenance; never mutate tags | B01, A11 | Implemented: read-only container/version fixtures; CuePoints schema and real Serato/MIK samples still need validation |
+| B01 | Read-only, resumable metadata inventory: explicit roots, progress, errors, counts; no audio/model jobs during scan | None | 45-song real sample scanned: 41 MP3/4 M4A, 0 audio read errors; full library not scanned |
+| B02 | Import existing cues and grids with format/version tests and known/unknown provenance; never mutate tags | B01, A11 | Real sample: 43 Markers2 tracks, 314 cues/2 loops, 31 grids; M4A envelope fixed; Tempo Map/CuePoints remain unsupported evidence |
 | B03 | Deduplicate recordings and group alternate mixes; freeze reproducible track-level dataset splits | B01 | Implemented + generated-audio tests passed; metadata grouping remains a review candidate |
-| B04 | Cache beat/bar-aligned features with extractor versions and quality flags; checkpoint interrupted jobs | B02 | Implemented + synthetic/FFmpeg tests passed; real-library extraction pending approved budget and grid review |
-| B05 | Switchable imported-anchor-assisted detector; compare candidate recall and review corrections to audio-only | B02, A08, A15 | Implemented + synthetic paired-review tests passed; real-library evaluation pending |
-| B06 | Build reviewed event-label UI (drop/build/breakdown/chorus/other), annotation provenance and uncertain/skip states | B02, A09 | Implemented + generated API/UI regression tests passed; real reviewed labels not yet collected |
-| B07 | Establish held-out human-reviewed benchmark; group related mixes; report coverage, timing and false positives | B03, B06, A15 | Offline benchmark workflow + fixtures implemented; real benchmark blocked on completed human-reviewed test groups |
+| B04 | Cache beat/bar-aligned features with extractor versions and quality flags; checkpoint interrupted jobs | B02 | Real sample: 38 feature-ready tracks, 7 skipped for no usable grid, 0 extraction errors; grids unverified |
+| B05 | Switchable imported-anchor-assisted detector; compare candidate recall and review corrections to audio-only | B02, A08, A15 | Compared 38 tracks: 317 audio-only/592 assisted candidates; 275 imported hints; human recall/corrections unmeasured |
+| B06 | Build reviewed event-label UI (drop/build/breakdown/chorus/other), annotation provenance and uncertain/skip states | B02, A09 | Isolated 40-song local queue prepared and browser checked; 24 plans; no human labels collected |
+| B07 | Establish held-out human-reviewed benchmark; group related mixes; report coverage, timing and false positives | B03, B06, A15 | 10 test songs frozen from 45 unique tracks; included in review queue; accuracy gate blocked on human review |
 
 ### Milestone C: our local model
 
@@ -394,6 +394,81 @@ and musical-accuracy estimate remain blocked.
   malformed artifacts, immutable writes and snapshot matching. These tests verify software
   behavior only. No real learning data, completed reviewed test groups, benchmark result or
   model-promotion evidence is available; the B07 held-out gate remains pending.
+
+### Real-library evidence pass: October 22, 2026 (stopped early by request)
+
+Cullen approved stopping the expensive batch rather than waiting several more hours.
+Final saved results are **26 attempted, 24 successful plans, 2 grid failures**; 19 sample
+tracks have no saved analysis result. A plan completing does not imply every analyzer succeeded.
+The successful plans include 16 VOCAL and 8 DROP maps. This is preliminary evidence, not
+completion of the original 45-song run or a human accuracy benchmark.
+
+- Safety: the 45-song sample (41 MP3/4 M4A) and Serato data were read-only. All 48
+  manifest files still match sizes/SHA-256 after validation. No audio upload or Gemini
+  calls were enabled. All outputs, caches, dataset and review copies are outside Git,
+  under `~/Library/Application Support/AutoCue/v7-evidence-2026-10-22/`.
+- Crates: Disco Dance Party has 20/224 entries present; SILENTDisco has 25/427 present,
+  398 outside the sample and 4 outside the mapped prefix. Missing sample coverage is not
+  an importer error. No separate original ten-song set was identifiable.
+- Importer: 43 Markers2 tracks contain 314 cues/2 loops; 31 legacy BeatGrids parse
+  (30 MP3, 1 M4A). The real M4A envelope gap was fixed with generated-file regression
+  tests. Serato Tempo Map exists on all 45 tracks but remains unsupported: observed
+  disagreement with legacy grids makes guessed decoding unsafe. MIK records remain
+  hints, not labels. Independent CuePoints comparisons agreed within 60 ms for 274/312
+  cue times; several constant-shift outliers need review.
+- Grid comparison: 17 tracks, 16 Serato grids adopted, one half/double-tempo discrepancy;
+  10 beat-phase differences exceed 30 ms and 4 estimated downbeat phases differ.
+  These compare embedded tags against detected grids, not the Serato UI.
+  The requested 20-track target and real Serato playback check remain unmet.
+- Runtime: successful-plan wall median 742.55 s (12.38 min), max 5112.06 s (85.20 min).
+  Lyrics-step median 58.47 s, range 30.61–1263.94 s. These are step timings, not a claim
+  of 24 valid transcripts: one plan flags unavailable words and one unavailable sections.
+  M2 Air/8 GB memory pressure and heavy swapping make this unsuitable as a routine workflow.
+- Failures: Don Toliver / Body and Timbaland / Say Something fail the detected-grid
+  fit before imported-grid reconciliation, despite having Serato grids. Preserve these
+  failures; a fallback policy needs deliberate follow-up, not a silent workaround.
+- Outro: 23/24 canonical H cues have confidence below 0.6; 22 plans infer an outro from
+  fade and 5 report no vocal-free outro. These are review flags, not measured errors.
+- B05: lightweight FFmpeg/bar extraction took about 182 s; candidate comparison about
+  0.2 s. Of 275 imported hints on 38 ready tracks, 61 have an audio-only candidate
+  within one bar; median nearest audio candidate distance is 13.23 s. The assisted
+  pool includes hints by construction. This is hint agreement, NOT musical recall or
+  evidence that assisted candidates are correct. Seven tracks lack a usable grid.
+- Copy-only write test: MP3 and M4A audio hashes stayed unchanged; undo restored exact
+  bytes and full restore recovered copied audio/Serato folders exactly. A legacy
+  Markers_ MP3 correctly refused writing. Test START/EXIT cues replaced existing slots
+  on the disposable M4A copy, then restored; this is not cue merging or a listening test.
+- Validation: 85 focused importer/grid/inventory/web tests passed. The web library
+  loaded 40 unreviewed tracks with no source links (sample writeback unavailable).
+  Search and the existing plan/event-review editor were exercised in the browser.
+
+#### Cullen's local review
+
+The local evidence folder contains **`PM BOT READ ME.md`** with detailed handoff,
+`review-queue.json`, `steps2-3-report.json`, `anchor-comparison.json`, and
+`dataset-v7-sample.json`. Keep these private and local. The queue contains all ten
+frozen test songs, 24 analyzed plans and 16 failed/not-analyzed songs. Do not mark
+unprocessed songs as successfully analyzed.
+
+Start the isolated review app (no model jobs start automatically):
+
+```sh
+AUTOCUE_WEB_DATA="$HOME/Library/Application Support/AutoCue/v7-evidence-2026-10-22/review-web" \
+AUTOCUE_PORT=8771 .venv/bin/python web/server.py
+```
+
+Open `http://127.0.0.1:8771` (not the HTML file directly).
+Search `HELD-OUT TEST` for the ten frozen songs. Keep test labels out of training
+and candidate tuning. Search a title, click **Review**, then:
+
+1. Listen around GO/H and the last vocal return; correct EXIT or mark uncertainty,
+   especially for the five no-vocal-free-outro plans. Save actual listening decisions,
+   not imported automatic cues as answer keys.
+2. Verify grid/downbeat phase in Serato on copies for the reported mismatches.
+3. Use **Human event labels** for drop/build/breakdown/chorus/other and set the
+   review state only after the whole song is covered; uncertain/skip are valid.
+4. Export human event reviews for the held-out benchmark. Do not launch another
+   expensive analysis batch or write tags to the sample.
 
 ### External gates
 

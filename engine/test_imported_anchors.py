@@ -16,7 +16,7 @@ from mutagen.mp4 import MP4FreeForm
 
 import imported_anchors
 import library_inventory as inventory
-from serato_tags import FLAC_KEY, MP4_KEY, VORBIS_HEADER, marker2_entries
+from serato_tags import FLAC_KEY, MP4_BEATGRID_KEY, MP4_KEY, MP4_TEMPOMAP_KEY, VORBIS_HEADER, marker2_entries
 from web import fixtures
 
 
@@ -115,6 +115,38 @@ class ImportedAnchorTests(unittest.TestCase):
         for data in (b"bad!", b'{"position": NaN}', b'{"position": 1e999}', b'"scalar"'):
             self.assertEqual(imported_anchors.read_annotations(
                 id3_audio([("CuePoints", data)]), 10)["error_count"], 1)
+
+    def test_serato_tempo_map_is_preserved_as_unsupported_evidence(self):
+        data = b"\x02\x00\x00\x01" + b"\x00" * 45
+        result = imported_anchors.read_annotations(id3_audio([("Serato Tempo Map", data)]), 10)
+        source = result["sources"][0]
+        self.assertEqual(result["unsupported_count"], 1)
+        self.assertEqual(result["error_count"], 0)
+        self.assertEqual(source["records"], [])
+        self.assertEqual(base64.b64decode(source["raw_b64"]), data)
+
+    def test_m4a_serato_beatgrid_and_tempo_map_are_read_without_writing(self):
+        grid = b"\x01\x00" + struct.pack(">I", 1) + struct.pack(">ff", 0.5, 88.5) + b"\0"
+        envelope_grid = base64.b64encode(
+            b"application/octet-stream\x00\x00Serato BeatGrid\x00" + grid).rstrip(b"=")
+        tempo = base64.b64encode(b"application/octet-stream\x00\x00Serato Tempo Map\x00\x02\x00")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = File(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(envelope_grid)]
+            audio[MP4_TEMPOMAP_KEY] = [MP4FreeForm(tempo)]
+            audio.save()
+            original = path.read_bytes()
+            result = imported_anchors.read_annotations(File(path), 10)
+            self.assertEqual(path.read_bytes(), original)
+        by_field = {source["field"]: source for source in result["sources"]}
+        self.assertEqual(result["error_count"], 0)
+        self.assertEqual(by_field[MP4_BEATGRID_KEY]["format"], "serato_beatgrid_v1.0")
+        self.assertEqual(by_field[MP4_BEATGRID_KEY]["records"], [{"pos": 0.5, "bpm": 88.5}])
+        self.assertEqual(by_field[MP4_TEMPOMAP_KEY]["status"], "unsupported")
 
     def test_legacy_conflicts_and_oversized_tags_are_not_silently_dropped(self):
         result = imported_anchors.read_annotations(id3_audio([("Serato Markers_", b"old")]), 10)

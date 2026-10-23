@@ -42,21 +42,39 @@ def parse_beatgrid(data):
 
 
 def read_beatgrid(path, on_diagnostic=None):
-    """Beatgrid markers from an MP3's Serato tag, or None when the file has none (or is not an MP3)."""
+    """Beatgrid markers from an MP3/M4A's Serato tag, or None when the file has none."""
     def report(message):
         if on_diagnostic:
             on_diagnostic(message)
         else:
             logger.warning(message)
-    if Path(path).suffix.lower() != ".mp3":
-        report("Serato beatgrid import currently supports MP3 ID3 tags only; using detected grid.")
+    suffix = Path(path).suffix.lower()
+    if suffix not in (".mp3", ".m4a"):
+        report("Serato beatgrid import currently supports MP3 and M4A tags only; using detected grid.")
         return None
     try:
         from mutagen import MutagenError
         from mutagen.id3 import ID3, ID3NoHeaderError
+        from mutagen.mp4 import MP4
     except ImportError:
         report("Serato beatgrid import requires mutagen; using detected grid.")
         return None
+    if suffix == ".m4a":
+        from serato_tags import MP4_BEATGRID_KEY, vorbis_decode
+        try:
+            values = (MP4(str(path)).tags or {}).get(MP4_BEATGRID_KEY, [])
+        except (MutagenError, OSError):
+            report("Could not read Serato beatgrid tag; using detected grid.")
+            return None
+        if not values:
+            return None
+        try:
+            markers = parse_beatgrid(vorbis_decode(bytes(values[0]).decode("ascii"), "Serato BeatGrid"))
+        except (ValueError, UnicodeError):
+            markers = None
+        if markers is None:
+            report("Malformed or unsupported Serato beatgrid tag; using detected grid.")
+        return markers
     try:
         tags = ID3(str(path))
     except ID3NoHeaderError:
@@ -128,7 +146,7 @@ def reconcile(detected, markers):
     grid = dict(detected)
     grid.update({"source": "serato_beatgrid", "t1": round(t1, 4), "bar_s": round(bar_s, 5),
                  "bpm": round(240.0 / bar_s, 3), "offset_ms": 0.0,
-                 "provenance": {"format": "MP3 Serato BeatGrid", "marker_count": len(markers),
+                 "provenance": {"format": "Serato BeatGrid", "marker_count": len(markers),
                                 "user_verified": False, "detected_grid": dict(detected)}})
     shift = ((t1 - float(detected["t1"]) + bar_s / 2) % bar_s) - bar_s / 2
     return grid, f"used the Serato beatgrid (first beat {shift:+.2f}s from the detected downbeat)"

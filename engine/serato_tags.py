@@ -1,8 +1,11 @@
 """Shared Serato tag envelopes. These functions never open or write music files."""
 import base64
 
-VORBIS_HEADER = b"application/octet-stream\x00\x00Serato Markers2\x00"
+ENVELOPE_PREFIX = b"application/octet-stream\x00\x00"
+VORBIS_HEADER = ENVELOPE_PREFIX + b"Serato Markers2\x00"
 MP4_KEY = "----:com.serato.dj:markersv2"
+MP4_BEATGRID_KEY = "----:com.serato.dj:beatgrid"
+MP4_TEMPOMAP_KEY = "----:com.serato.dj:tempomap"
 FLAC_KEY = "SERATO_MARKERS_V2"
 
 
@@ -37,10 +40,11 @@ def marker2_entries(data):
     return entries
 
 
-def vorbis_decode(text):
+def vorbis_decode(text, field="Serato Markers2"):
     raw = "".join(text.split()).encode("ascii")
     raw += b"=" * (-len(raw) % 4)
     decoded = base64.b64decode(raw)
-    if not decoded.startswith(VORBIS_HEADER):
-        raise ValueError("Existing Serato Markers2 tag has an unsupported header.")
-    return decoded[len(VORBIS_HEADER):]
+    header = ENVELOPE_PREFIX + field.encode("ascii") + b"\x00"
+    if not decoded.startswith(header):
+        raise ValueError("Existing " + field + " tag has an unsupported header.")
+    return decoded[len(header):]
