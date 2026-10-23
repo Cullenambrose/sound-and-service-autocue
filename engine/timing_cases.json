@@ -1,0 +1,7 @@
+[
+  {"grid": {"t1": 0, "bar_s": 2}, "bar": 3.25, "time_s": 6.5},
+  {"grid": {"t1": 2.1, "bar_s": 2, "offset_ms": 50}, "bar": -1, "time_s": 0.05},
+  {"grid": {"t1": 0.3, "bar_s": 2, "offset_ms": 150}, "bar": 7.25, "time_s": 14.65},
+  {"grid": {"t1": 0.3, "bar_s": 2, "offset_ms": -150}, "bar": 7.25, "time_s": 14.95},
+  {"grid": {"t1": 2, "bar_s": 2, "offset_ms": 100}, "bar": 49.175, "time_s": 100.25}
+]

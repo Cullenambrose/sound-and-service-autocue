@@ -122,7 +122,23 @@ def recurrence(S, j, n=4):
 def lyric_repeat(S, j):
     if not S.words: return None
     norm = lambda x: re.sub(r"[^a-z ]", "", x.lower()).strip()
-    lines = [(math.floor((w["start"] - S.g["t1"]) / S.g["bar_s"] + 0.25), norm(w.get("text", ""))) for w in S.words.get("segments", []) if w.get("start") is not None]
+    segments = S.words.get("segments", [])
+    if segments:
+        lines = [(math.floor((w["start"] - S.g["t1"]) / S.g["bar_s"] + 0.25), norm(w.get("text", ""))) for w in segments if w.get("start") is not None]
+    else:
+        words = sorted((w for w in S.words.get("words", []) if w.get("start") is not None),
+                       key=lambda w: w["start"])
+        lines = []
+        phrase = []
+        for word in words:
+            if phrase and word["start"] - phrase[-1].get("end", phrase[-1]["start"]) > 0.8:
+                lines.append((math.floor((phrase[0]["start"] - S.g["t1"]) / S.g["bar_s"] + 0.25),
+                              norm(" ".join(w.get("word", "") for w in phrase))))
+                phrase = []
+            phrase.append(word)
+        if phrase:
+            lines.append((math.floor((phrase[0]["start"] - S.g["t1"]) / S.g["bar_s"] + 0.25),
+                          norm(" ".join(w.get("word", "") for w in phrase))))
     here = [t for b, t in lines if j <= b < j + 3 and len(t) > 6]
     if not here: return None
     jac = lambda a, b: len(set(a.split()) & set(b.split())) / max(1, len(set(a.split()) | set(b.split())))
