@@ -121,6 +121,29 @@ class AnalyzeTests(unittest.TestCase):
                 self.assertAlmostEqual(float(env[name][-1]), 0.2, places=6)
             self.assertGreaterEqual(len(env["vocals"]) * float(env["hop_s"]), len(samples) / 44100)
 
+    def test_grid_fit_supports_slow_tempos_and_preserves_the_fast_range(self):
+        for bpm in (60, 73, 80, 120, 220, 240):
+            with self.subTest(bpm=bpm):
+                downbeats = [0.04 + 240 / bpm * i for i in range(96)]
+                grid = analyze.fit_grid(downbeats)
+                self.assertAlmostEqual(grid["bpm"], bpm, places=2)
+                self.assertLess(grid["fit"], 0.001)
+        for bpm in (50, 250):
+            with self.subTest(bpm=bpm), self.assertRaises(RuntimeError):
+                analyze.fit_grid([0.04 + 240 / bpm * i for i in range(96)])
+
+    def test_slow_grid_with_local_false_downbeats_retains_serato_reconciliation(self):
+        import serato_grid
+        for bpm in (73, 80.02):
+            with self.subTest(bpm=bpm):
+                downbeats = [0.04 + 240 / bpm * i for i in range(96)]
+                downbeats += [1.24, 2.88, 91.18, 91.34]
+                detected = analyze.fit_grid(sorted(downbeats))
+                self.assertAlmostEqual(detected["bpm"], bpm, places=2)
+                grid, note = serato_grid.reconcile(detected, [{"pos": 0.02, "bpm": bpm}])
+                self.assertEqual(grid["source"], "serato_beatgrid")
+                self.assertIn("used the Serato beatgrid", note)
+
     def test_word_runner_reuses_successful_records_but_retries_failed_alignment(self):
         paths = analyze.Paths(self.cache / "words")
         paths.vocal_wav.parent.mkdir(parents=True, exist_ok=True)
@@ -131,10 +154,49 @@ class AnalyzeTests(unittest.TestCase):
         ]
         module = SimpleNamespace(transcribe_local=Mock(side_effect=records))
         with patch.object(analyze, "available", return_value=True), patch.dict(sys.modules, {"wx_one": module}):
-            self.assertIn("temporary", analyze._run_words(paths)["alignment_error"])
+            with self.assertRaisesRegex(RuntimeError, "WhisperX word alignment failed: temporary model error"):
+                analyze._run_words(paths)
+            self.assertIn("temporary", json.loads(paths.words.read_text())["alignment_error"])
             self.assertIsNone(analyze._run_words(paths)["alignment_error"])
             self.assertEqual(analyze._run_words(paths)["words"][0]["start"], 51.125)
         self.assertEqual(module.transcribe_local.call_count, 2)
+
+    def test_empty_section_result_is_cached_without_reloading_model(self):
+        paths = analyze.Paths(self.cache / "sections")
+        module = SimpleNamespace(analyze=Mock(return_value=SimpleNamespace(segments=[])))
+        with patch.object(analyze, "available", return_value=True), \
+                patch.object(analyze, "_install_allin1_compat"), \
+                patch.dict(sys.modules, {"allin1": module}):
+            first = analyze._run_sections(paths.work / "decoded.wav", paths)
+            second = analyze._run_sections(paths.work / "decoded.wav", paths)
+        self.assertEqual(first, {"engine": "allin1", "segments": []})
+        self.assertEqual(second, first)
+        self.assertEqual(module.analyze.call_count, 1)
+
+    def test_word_alignment_failure_is_visible_in_pipeline_progress_and_notes(self):
+        def vocals(_wav, paths):
+            paths.vocal_wav.parent.mkdir(parents=True, exist_ok=True)
+            paths.vocal_wav.touch()
+        events = []
+        with patch.object(analyze, "_run_demucs", vocals), \
+                patch.object(analyze, "_run_words", side_effect=RuntimeError(
+                    "WhisperX word alignment failed: No default align-model for language: la")):
+            plan = self.run_pipeline(events)
+        self.assertTrue(any(step == "lyrics" and state == "failed" and "language: la" in detail
+                            for step, state, detail in events))
+        self.assertTrue(any("WhisperX word alignment failed" in note for note in plan["pipeline"]["notes"]))
+        self.assertIn("word timings unavailable", " ".join(plan["flags"]))
+
+    def test_slow_tempo_pipeline_reaches_imported_grid_without_fallback(self):
+        beats = {"beats": [0.04 + 60 / 73 * i for i in range(100)],
+                 "downbeats": [0.04 + 240 / 73 * i for i in range(25)]}
+        with patch.object(self, "fake_beats", return_value=beats), \
+                patch("serato_grid.read_beatgrid", return_value=[{"pos": 0.02, "bpm": 73}]):
+            plan = self.run_pipeline([])
+        self.assertEqual(plan["grid"]["source"], "serato_beatgrid")
+        self.assertAlmostEqual(plan["grid"]["bpm"], 73)
+        self.assertAlmostEqual(plan["grid"]["provenance"]["detected_grid"]["bpm"], 73)
+        self.assertFalse(plan["grid"]["provenance"]["user_verified"])
 
     def test_grid_fit_ignores_local_false_downbeats_and_missing_bars(self):
         true_downbeats = [0.32 + 1.96 * i for i in range(120) if i not in (16, 62)]

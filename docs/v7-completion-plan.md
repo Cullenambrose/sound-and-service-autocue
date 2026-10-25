@@ -470,6 +470,31 @@ and candidate tuning. Search a title, click **Review**, then:
 4. Export human event reviews for the held-out benchmark. Do not launch another
    expensive analysis batch or write tags to the sample.
 
+### Follow-up: slow grids and bounded cache investigation (October 24, 2026)
+
+- Root cause of the two grid failures: detected-bar fitting imposed a three-second
+  upper bound (80 BPM), excluding the 73 BPM track and rejecting the 80 BPM track's
+  fitted 3.00085-second bar. The upper bound now covers 60 BPM; the existing fast
+  range through 240 BPM is preserved. No imported-grid fallback was added.
+- Replaying actual cached Beat This outputs now fits Body at 73.000 BPM and Say
+  Something at 79.977 BPM; both reach and adopt their existing Serato grids.
+  These are grid-stage rechecks, not newly completed full-song plans. Original
+  first-pass failure evidence and the 26/24/2 counts above remain unchanged.
+- Three non-test songs replayed entirely from private copies of successful caches
+  in 0.030–0.043 seconds, with identical cue bars and no model calls. This verifies
+  warm-cache reuse, not cold-run acceleration. Valid empty allin1 section results
+  are now cached too, avoiding unnecessary repeated model inference.
+- Donna Summer's missing words came from detected language `la` with no default
+  alignment model. Alignment errors are still saved for diagnostics/retry, but now
+  fail the lyrics progress step explicitly and enter pipeline notes. No forced
+  language or fabricated word timing was introduced.
+- Rasputin's section-analysis exception mentions a ragged NumPy array. The installed
+  madmom decoder converts heterogeneous Viterbi results with `np.asarray`; this is
+  a compatibility suspect, not a verified real-track traceback. A bounded isolated
+  reproduction is still needed before changing third-party behavior.
+- Local evidence: `grid-cache-followup.json` in the existing private evidence folder.
+  No full batch, cold analyzer run, sample write, or audio upload was performed.
+
 ### External gates
 
 - Confirm actual library roots before any 20k-song scan; begin with a representative read-only pilot.

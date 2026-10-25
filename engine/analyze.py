@@ -176,7 +176,8 @@ def fit_grid(downbeats):
         raise RuntimeError("Beat This found fewer than 4 downbeats; no reliable bar grid for this track.")
     times = np.asarray(downbeats, dtype=float)
     intervals = np.diff(times)
-    plausible = intervals[(intervals >= 1.0) & (intervals <= 3.0)]
+    min_bar_s, max_bar_s = 1.0, 240.0 / 60
+    plausible = intervals[(intervals >= min_bar_s) & (intervals <= max_bar_s)]
     if len(plausible) < 3:
         raise RuntimeError("Beat This downbeats are too irregular to fit a reliable bar grid.")
     bar_s = float(np.median(plausible))
@@ -193,7 +194,7 @@ def fit_grid(downbeats):
     bars = np.rint((times[inliers] - phase) / bar_s)
     slope, intercept = np.polyfit(bars, times[inliers], 1)
     residual = float(np.median(np.abs(times[inliers] - (slope * bars + intercept))))
-    if not 1.0 <= slope <= 3.0 or residual > tolerance:
+    if not min_bar_s - 1e-6 <= slope <= max_bar_s + 1e-6 or residual > tolerance:
         raise RuntimeError("Beat This downbeats do not form a reliable bar grid.")
     return {"source": "beat_this_downbeats", "t1": round(float(intercept), 4), "bar_s": round(float(slope), 5),
             "bpm": round(240.0 / float(slope), 3), "offset_ms": 0.0, "fit": round(residual, 4)}
@@ -385,7 +386,9 @@ def _run_sections(source_wav, paths):
                                 demix_dir=str(paths.work / "demix"), spec_dir=str(paths.work / "spec"),
                                 overwrite=True, multiprocess=False)
         segments = [{"start": s.start, "end": s.end, "label": s.label} for s in result.segments]
-        return {"engine": "allin1", "segments": segments}
+        record = {"engine": "allin1", "segments": segments}
+        _write_json(paths.sections, record)
+        return record
     raise AnalyzerMissing("allin1")
 
 
@@ -402,6 +405,8 @@ def _run_words(paths):
     record = wx_one.transcribe_local(str(paths.vocal_wav))
     record["language_source"] = "vocal_window"
     _write_json(paths.words, record)
+    if record.get("alignment_error"):
+        raise RuntimeError("WhisperX word alignment failed: " + record["alignment_error"])
     return record
 
 
