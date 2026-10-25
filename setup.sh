@@ -56,6 +56,18 @@ $PIP install --no-build-isolation madmom || echo "WARNING: madmom failed. allin1
 $PIP install "pyannote-metrics>=3.2,<4.0"
 $PIP install "numpy>=2.1,<2.3" "scipy==1.14.1"
 
+if MADMOM_ROOT=$(.venv/bin/python -c 'import importlib.util; from pathlib import Path; spec = importlib.util.find_spec("madmom"); print(Path(spec.origin).parent) if spec else exit(1)'); then
+  MADMOM_PATCH="$PWD/patches/madmom-numpy-viterbi.patch"
+  if patch --dry-run --silent -R -p1 -d "$MADMOM_ROOT" < "$MADMOM_PATCH"; then
+    echo "madmom NumPy Viterbi compatibility patch already applied."
+  else
+    patch --dry-run --forward -p1 -d "$MADMOM_ROOT" < "$MADMOM_PATCH"
+    patch --forward -p1 -d "$MADMOM_ROOT" < "$MADMOM_PATCH"
+  fi
+else
+  echo "WARNING: madmom is unavailable; its NumPy compatibility patch was not applied."
+fi
+
 echo "SongFormer is optional and not installed here. Its MuQ weights are non-commercial; see README."
 
 echo

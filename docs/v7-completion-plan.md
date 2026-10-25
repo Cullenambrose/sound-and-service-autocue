@@ -489,9 +489,17 @@ and candidate tuning. Search a title, click **Review**, then:
   fail the lyrics progress step explicitly and enter pipeline notes. No forced
   language or fabricated word timing was introduced.
 - Rasputin's section-analysis exception mentions a ragged NumPy array. The installed
-  madmom decoder converts heterogeneous Viterbi results with `np.asarray`; this is
-  a compatibility suspect, not a verified real-track traceback. A bounded isolated
-  reproduction is still needed before changing third-party behavior.
+  madmom decoder's heterogeneous Viterbi-result conversion was subsequently reproduced
+  with synthetic activations, without neural models. A one-line dependency patch now
+  selects directly from scores; setup applies it idempotently in the private `.venv`.
+  A synthetic regression checks finite ordered beats and the winning 4/4 result
+  against a single-meter decoder. See [install notes](INSTALL.md) for existing installs.
+- An offline ten-second cached-spectrogram microprofile (non-test Rasputin) completed
+  in 1.78 s after 0.56 s model loading, with about 486 MB process peak RSS. It produced
+  section labels but no beats on that short excerpt. The hard-limited process exited
+  in 5.52 s; no full song or batch was rerun. The default was already four threads,
+  so no thread policy or other speculative runtime optimization was introduced.
+  Full-track post-patch verification and long-input memory profiling remain pending.
 - Local evidence: `grid-cache-followup.json` in the existing private evidence folder.
   No full batch, cold analyzer run, sample write, or audio upload was performed.
 

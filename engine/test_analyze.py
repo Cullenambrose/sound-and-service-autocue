@@ -248,6 +248,29 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(len(record["downbeats"]), 4)
         empty_cache.assert_called_once()
 
+    @unittest.skipUnless(analyze.available("madmom") and analyze.available("natten"),
+                         "madmom and NATTEN are required for decoder compatibility tests.")
+    def test_allin1_madmom_decoder_handles_variable_length_paths(self):
+        analyze._install_allin1_compat()
+        from madmom.features.downbeats import DBNDownBeatTrackingProcessor
+
+        activations = np.full((800, 2), 0.001)
+        for frame in range(0, 800, 50):
+            if frame % 200 == 0:
+                activations[frame:frame + 3] = [0.05, 0.9]
+            else:
+                activations[frame:frame + 3] = [0.9, 0.05]
+        common = dict(fps=100, min_bpm=100, max_bpm=140, num_tempi=5)
+        processor = DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], **common)
+        actual = processor(activations)
+        self.assertEqual(actual.shape[1], 2)
+        self.assertGreater(len(actual), 8)
+        self.assertTrue(np.all(np.isfinite(actual)))
+        self.assertTrue(np.all(np.diff(actual[:, 0]) > 0))
+        self.assertEqual(set(actual[:, 1]), {1, 2, 3, 4})
+        expected = DBNDownBeatTrackingProcessor(beats_per_bar=[4], **common)(activations)
+        np.testing.assert_array_equal(actual, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

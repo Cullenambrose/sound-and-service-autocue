@@ -1,5 +1,42 @@
 # Auto-cue proof: install notes (box only, CPU)
 
+## Current Mac v7 compatibility follow-up (October 24, 2026)
+
+The historical proof environment below is separate from the current Mac `.venv`.
+With NumPy 2.2.6, madmom 0.16.1 and allin1 1.1.0, the downbeat decoder tries
+`np.asarray(results)` on `(variable-length Viterbi path, log probability)` pairs.
+This raises a ragged-array `ValueError` even with synthetic activations, after
+potentially expensive neural inference has finished.
+
+`setup.sh` now applies [the local compatibility patch](../patches/madmom-numpy-viterbi.patch)
+inside the private virtual environment. It selects the best log probability directly,
+without converting paths to an array or changing the winning-path rule. Re-running
+setup detects the applied patch; an incompatible source layout fails explicitly.
+No global NumPy monkeypatch or meter restriction is used.
+
+To patch an existing environment without reinstalling packages, from the repo root:
+
+```sh
+MADMOM_ROOT=$(.venv/bin/python -c 'import importlib.util; from pathlib import Path; print(Path(importlib.util.find_spec("madmom").origin).parent)')
+patch --dry-run --forward -p1 -d "$MADMOM_ROOT" < patches/madmom-numpy-viterbi.patch
+patch --forward -p1 -d "$MADMOM_ROOT" < patches/madmom-numpy-viterbi.patch
+PYTHONPATH=.:engine .venv/bin/python -m unittest engine.test_analyze
+```
+
+If already patched, use the reverse dry-run check from `setup.sh` rather than applying
+again. The optional installed-stack regression uses synthetic activations with 3/4
+and 4/4 candidates, checks finite ordered beat positions, and compares the selected
+output with the single-meter 4/4 decoder. No pretrained madmom model is loaded.
+
+An offline microprofile on only 10 seconds of a non-test cached Rasputin spectrogram
+took 0.56 s to load the allin1 ensemble and 1.78 s for inference/postprocessing,
+at four threads and about 486 MB peak process RSS. This is not full-track timing or
+musical validation; the short result had no detected beats. No full batch was rerun,
+no audio uploaded and no source music modified. Full-track decoder verification and
+long-input memory/runtime profiling remain open.
+
+## Historical proof environment
+
 Set up Thu Oct 8, 2026, ~2:10–2:25 PM PT. Box only. Nothing was installed on any user computer, nothing was paid for, no music was downloaded, and no Serato tags were written.
 
 Run `source env.sh` first. It points HF_HOME, TORCH_HOME, and XDG_CACHE_HOME at `./cache` so every checkpoint stays inside this folder.
