@@ -503,6 +503,42 @@ and candidate tuning. Search a title, click **Review**, then:
 - Local evidence: `grid-cache-followup.json` in the existing private evidence folder.
   No full batch, cold analyzer run, sample write, or audio upload was performed.
 
+### Full-track decoder follow-up: October 24, 2026
+
+- Ran the full non-test Rasputin cached spectrogram (186.25 s, shape
+  `4 x 18625 x 81`) offline, with a 120-second subprocess limit. The first
+  run finished inference but its evidence serializer incorrectly assumed a
+  non-null BPM. After fixing that local serializer, one bounded retry finished
+  in 116.20 s overall: 1.12 s model load, 105.61 s inference/postprocessing,
+  peak process RSS 1,597,243,392 bytes (about 1.60 GB). Both logs are retained.
+- The patched decoder returned nine ordered, finite section spans covering the
+  track, without the previous ragged-array exception. This closes the real-track
+  exception reproduction/recovery check, not musical section accuracy.
+- **Quality caveat:** allin1 returned only one beat and one downbeat (`15.6 s`),
+  with no tempo estimate. Those outputs are not usable grid evidence. Existing
+  Beat This cache contains 394 beats/99 downbeats; the planner still uses its
+  grid and does not substitute allin1's missing tempo.
+- Rebuilt a separate follow-up plan using the recovered sections and disposable
+  copies of existing audio-feature/stem/word/beat caches. No further model calls
+  occurred; the grid was unchanged and the missing-sections flag disappeared.
+  C/D/E moved from bars 12/28/44 to 15/31/47; F moved 48 to 79; G/H stayed at
+  85/93. A/B also changed (0/4 to -1/3). These are unreviewed choices, not proven
+  improvements; a negative grid-bar index alone is not a negative audio time.
+- No LRCLIB cache existed, so the follow-up explicitly disabled text lookup and
+  used no synced lyrics. Original artist/title tags were present; equivalence to
+  the first run's live text response cannot be established. This is not a fully
+  controlled section-only accuracy comparison.
+- Original results, caches and review queue remain unchanged; the 26/24/2 batch
+  counts are not rewritten. Separate local evidence files:
+  `sections-fulltrack-check.json`, `sections-fulltrack-check.log`,
+  `evidence sections-fulltrack-check-retry.log`, `rasputin-recovered-plan.json`.
+  All 48 original manifest files still match sizes and both recorded SHA-256s.
+- Next gate: Cullen should listen to the recovered chorus/START choices versus
+  the original plan, especially F's large move. Runtime remains expensive;
+  this cached-section check excludes demixing, transcription and feature extraction
+  and does not establish a cold-pipeline speedup. No additional batch is authorized
+  by these results.
+
 ### External gates
 
 - Confirm actual library roots before any 20k-song scan; begin with a representative read-only pilot.
