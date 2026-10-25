@@ -539,6 +539,53 @@ and candidate tuning. Search a title, click **Review**, then:
   and does not establish a cold-pipeline speedup. No additional batch is authorized
   by these results.
 
+### Controlled listening preparation: October 25, 2026
+
+The Rasputin section comparison now has a controlled cache-only pair: identical
+features/stems/words/beats/grid/metadata/configuration and **no synced lyrics in
+either arm**; only the section spans differ (empty versus recovered). No models
+or network lookups ran. This isolates the effect of sections on current rules,
+but is not a reconstruction of the historical live LRCLIB response or a quality score.
+The track is in the training split; held-out songs remain untouched.
+
+| Cue | Without sections | With recovered sections | Shift |
+|---|---|---|---|
+| A / INTRO | 0:02.004 | 0:00.129 | -1.875 s |
+| B / START | 0:09.505 | 0:07.630 | -1.875 s |
+| C | 0:24.507 | 0:30.132 | +5.625 s |
+| D | 0:54.510 | 1:00.136 | +5.626 s |
+| E | 1:24.514 | 1:30.139 | +5.625 s |
+| F / LAST CHORUS | 1:32.015 | 2:30.146 | +58.131 s |
+| G / GO | 2:41.398 | 2:41.398 | unchanged |
+| H / EXIT | 2:56.399 | 2:56.399 | unchanged |
+
+Local outputs in the existing private evidence folder:
+`rasputin-controlled-comparison.json`, `rasputin-listening-times.tsv`,
+and a separate `rasputin-comparison-web/` library with one unreviewed track,
+two existing-format variant lanes, and no source writeback link. Original
+input-cache hashes and original queue database hash were checked unchanged.
+No human event reviews/annotations existed in the original queue at preparation.
+
+Start this comparison separately from the 40-song queue:
+
+```sh
+AUTOCUE_WEB_DATA="$HOME/Library/Application Support/AutoCue/v7-evidence-2026-10-22/rasputin-comparison-web" \
+AUTOCUE_PORT=8772 .venv/bin/python web/server.py
+```
+
+Open `http://127.0.0.1:8772`, click **Review**, and compare the
+**Without sections (controlled)** and **With recovered sections (controlled)**
+lanes. Browser validation confirmed both columns and loaded local audio
+(186.253 s, no media error); it did not establish musical correctness.
+The temporary validation server was stopped afterward.
+
+Listen first around F's two positions, then START, then the C/D/E family and final
+vocal/EXIT window. **Comparison-table cue buttons apply that candidate to the
+editable cue; they are not audition-only buttons.** Use transport/waveform to
+audition, and save only choices actually reviewed by ear. The separate library
+keeps these edits away from the original queue. Do not treat either automatic
+variant as a human answer key or promote rules based on confidence alone.
+
 ### External gates
 
 - Confirm actual library roots before any 20k-song scan; begin with a representative read-only pilot.
