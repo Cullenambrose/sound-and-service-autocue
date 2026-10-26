@@ -12,6 +12,33 @@ Private repo: `Cullenambrose/sound-and-service-autocue`. Separate from the booki
 
 ## Cue layout (approved)
 
+### v6.1 Pop/Vocal 8-pad spec (current VOCAL default)
+
+| Pad | Slot | Name | Where | Colour |
+|-----|------|------|-------|--------|
+| 1 | A | `Intro - 8BTS` (4/2/1BTS if shorter) | Bar 0 on the `GEOB:Serato BeatGrid` ruler (`bar_time(k) = pos0 + k·240/bpm`) | `#CC0000` |
+| 2 | B | `START` | exact un-snapped lead-vocal onset (Demucs stem + WhisperX first word, refined within −1.2 s/+0.5 s of the downbeat); `start_anchor_bar` keeps the bar | `#CC8800` |
+| 3 | C | — | empty | — |
+| 4 | D | `GO-8Exit` | EXIT − 8 bars | `#CCCC00` |
+| 5 | E | `Mix-4exit` | EXIT − 4 bars | `#CC00CC` |
+| 6 | F | `EXIT 1st Chorus` | downbeat where the first chorus ends (synced-lyric repetition + 4-bar vocal/RMS drop-off) | `#00CC00` |
+| 7 | G | `GO-8OUT` | OUT − 8 bars | `#00CCCC` |
+| 8 | H | `OUT` | drum-outro edits: final full bar; fade-outs: last full-volume 4-bar phrase before RMS drops >6 dB | `#8800CC` |
+
+The Serato BeatGrid is always the bar ruler; AutoCue never shifts its phase to match legacy Mixed In Key cues. Turn the new algorithms off with the `pop_v61` switch; the older VOCAL layout is `cue_maps.legacy_v7_vocal_map()`. Code: `engine/pop_cues.py`, tests: `engine/test_v61_pop_cues.py`.
+
+**Single-track QA write (DJ MacBook Pro only, Serato closed):**
+
+```bash
+git pull origin v6
+.venv/bin/python scripts/apply_single_track_qa.py --dry-run \
+  --track "/Users/cullenambrose/Music/Master Music/Van Morrison - Into The Mystic (Re-Drum) - 5B - 84.mp3"
+# then the same command without --dry-run to write
+```
+
+The script refuses Track #1 (`Happy (N And D Chorus Intro)`), non-MP3 files and a running Serato. It makes a SHA-256-verified backup in `~/Music/AutoCue Backups/`, writes `Serato Markers2` and `Serato Markers_` together, checks that the audio stream hash is unchanged, then reads the tag back and prints all 8 pads.
+
+### Earlier approved layout (reference)
 | Slot | Name | Rule | Auto-set? |
 |------|------|------|-----------|
 | A | 8BS / 4BS / 2BS / 1BS | 8 bars (32 beats) before START; step down to 4 → 2 → 1; empty only if 1 bar will not fit | yes, conf ≥ 0.85 |
@@ -471,6 +498,6 @@ installed, with a `difflib` fallback. Genius lyrics are not included: they need 
 
 ## Serato writes
 
-Writes need a saved review, Serato closed, and a verified backup of the `_Serato_` folder and each song's original file. Supported formats: MP3, AIFF (ID3 `Serato Markers2`), FLAC (`SERATO_MARKERS_V2`) and M4A (`----:com.serato.dj:markersv2`). Other formats show "Write not supported yet". Foreign marker entries (loops, cues 9+) are preserved and the audio data is hash-checked before and after. **Undo this batch** restores one write; **Restore everything** (typed `RESTORE`) restores the song files and the `_Serato_` folder from a backup. FLAC and M4A writing follows the published Serato tag layout and is verified by read-back and audio-hash checks, but has not been opened in Serato itself.
+Writes need a saved review, Serato closed, and a verified backup of the `_Serato_` folder and each song's original file. Supported formats: MP3, AIFF (ID3 `Serato Markers2` **and** `Serato Markers_`, written in lockstep because Serato prefers `Markers_` when present), FLAC (`SERATO_MARKERS_V2`) and M4A (`----:com.serato.dj:markersv2`). Other formats show "Write not supported yet". Every existing hot cue on pads 1–8 (including Mixed In Key `Energy N` cues) is replaced; loops, cues 9+ and other foreign entries are preserved, and the audio data is hash-checked before and after. **Undo this batch** restores one write; **Restore everything** (typed `RESTORE`) restores the song files and the `_Serato_` folder from a backup. FLAC and M4A writing follows the published Serato tag layout and is verified by read-back and audio-hash checks, but has not been opened in Serato itself.
 
 Real `.crate` copies can be placed in `tests/fixtures/crates/` (gitignored); the tests parse them read-only when present.

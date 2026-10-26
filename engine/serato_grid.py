@@ -131,7 +131,11 @@ def grid_from_markers(markers):
 
 
 def reconcile(detected, markers):
-    """Return (grid, note). Adopt the Serato grid when its tempo matches the detected grid; else keep detected."""
+    """Return (grid, note). A valid constant-tempo Serato BeatGrid is always the canonical bar ruler.
+
+    Bar k starts at pos0 + k * 240 / bpm. The grid phase is never shifted toward detected downbeats or legacy
+    (e.g. Mixed In Key) cue points; detected-tempo disagreement is only reported.
+    """
     t1, bar_s, reason = grid_from_markers(markers)
     if t1 is None:
         return detected, reason
@@ -140,13 +144,15 @@ def reconcile(detected, markers):
     if not math.isfinite(detected_bar) or detected_bar <= 0 or not math.isfinite(detected_start):
         raise ValueError("Detected grid must have finite timing and a positive bar duration.")
     ratio = bar_s / detected_bar
-    if abs(ratio - 1.0) > SERATO_TEMPO_TOLERANCE:
-        return detected, (f"Serato beatgrid ({240.0 / bar_s:.1f} BPM) disagrees with the detected tempo "
-                          f"({240.0 / float(detected['bar_s']):.1f} BPM); kept the detected grid")
+    agrees = abs(ratio - 1.0) <= SERATO_TEMPO_TOLERANCE
     grid = dict(detected)
-    grid.update({"source": "serato_beatgrid", "t1": round(t1, 4), "bar_s": round(bar_s, 5),
-                 "bpm": round(240.0 / bar_s, 3), "offset_ms": 0.0,
+    grid.update({"source": "serato_beatgrid", "t1": round(t1, 6), "bar_s": round(bar_s, 8),
+                 "bpm": round(240.0 / bar_s, 4), "offset_ms": 0.0,
                  "provenance": {"format": "Serato BeatGrid", "marker_count": len(markers),
-                                "user_verified": False, "detected_grid": dict(detected)}})
+                                "user_verified": False, "detected_tempo_agrees": agrees,
+                                "detected_grid": dict(detected)}})
+    if not agrees:
+        return grid, (f"used the Serato beatgrid as the bar ruler ({240.0 / bar_s:.2f} BPM); the detected tempo "
+                      f"({240.0 / detected_bar:.1f} BPM) disagrees, so review the grid in Serato")
     shift = ((t1 - float(detected["t1"]) + bar_s / 2) % bar_s) - bar_s / 2
     return grid, f"used the Serato beatgrid (first beat {shift:+.2f}s from the detected downbeat)"

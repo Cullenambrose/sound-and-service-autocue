@@ -7,10 +7,27 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cue_maps
+import rules_v6
 from rules_v6 import build_plan, detect_drops, detect_drops_with_fallback
 from gemini_v6 import apply as apply_gemini
 from score_v6 import label_valid, labels_exact, score
 from synced_lyrics import align_synced_lyrics, parse_synced_lyrics
+
+_SAVED = {}
+
+
+def setUpModule():
+    # These regression tests pin the pre-v6.1 VOCAL layout; v6.1 pop cues are covered in test_v61_pop_cues.
+    _SAVED["vocal"] = cue_maps.DEFAULT_CUE_MAPS["maps"]["VOCAL"]
+    _SAVED["pop_v61"] = rules_v6.DEFAULT_CONFIG["switches"]["pop_v61"]
+    cue_maps.DEFAULT_CUE_MAPS["maps"]["VOCAL"] = cue_maps.legacy_v7_vocal_map()
+    rules_v6.DEFAULT_CONFIG["switches"]["pop_v61"] = False
+
+
+def tearDownModule():
+    cue_maps.DEFAULT_CUE_MAPS["maps"]["VOCAL"] = _SAVED["vocal"]
+    rules_v6.DEFAULT_CONFIG["switches"]["pop_v61"] = _SAVED["pop_v61"]
 
 
 class V6RulesTests(unittest.TestCase):

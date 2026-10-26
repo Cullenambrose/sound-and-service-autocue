@@ -36,11 +36,14 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(_section_bars({"start": 16, "end": 32}, grid), (8, 16))
 
     def test_plan_and_exact_end_use_same_offset_aware_grid(self):
+        import cue_maps
+        from unittest.mock import patch
         grid = {"t1": 2, "bar_s": 2, "offset_ms": 100}
         duration = 100.25
-        plan = build_plan("offset", {"grid": grid, "segments": [
-            {"label": "intro", "start": 1.9, "end": 17.9}]}, {"cues": {}}, duration,
-            stems={"vocals": [0.2] * 2005})
+        with patch.dict(cue_maps.DEFAULT_CUE_MAPS["maps"], {"VOCAL": cue_maps.legacy_v7_vocal_map()}):
+            plan = build_plan("offset", {"grid": grid, "segments": [
+                {"label": "intro", "start": 1.9, "end": 17.9}]}, {"cues": {}}, duration,
+                stems={"vocals": [0.2] * 2005}, config={"switches": {"pop_v61": False}})
         self.assertEqual(plan["cues"]["B"]["bar"], 8)
         self.assertAlmostEqual(plan["cues"]["B"]["time_s"], 17.9)
         self.assertAlmostEqual(plan["mix_end_bar"], 49.175)

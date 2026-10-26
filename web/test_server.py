@@ -920,7 +920,15 @@ class WebServerTests(unittest.TestCase):
                     self.assertNotEqual(song.read_bytes(), data)
                     self.assertEqual(server._audio_hash(song), before_audio)
                     existing = server._existing_markers(song, kind)
-                    self.assertEqual(len(server._marker2_entries(existing)), 2)
+                    names = [name for name, _ in server._marker2_entries(existing)]
+                    self.assertEqual((names[0], names[-1], set(names[1:-1])), ("COLOR", "BPMLOCK", {"CUE"}))
+                    if kind in ("mp3", "aiff"):
+                        pads = server.serato_tags.decode_markers2(existing)["cues"]
+                        v1 = server.serato_tags.decode_markers_v1(server._existing_v1_markers(song, kind))
+                        self.assertEqual([(entry["slot"], entry["position_ms"], entry["color"])
+                                          for entry in v1["entries"][:5] if entry["position_ms"] is not None],
+                                         [(cue["index"], cue["position_ms"], cue["color"])
+                                          for cue in pads if cue["index"] < 5])
                     server.undo_backup(result["backup_id"])
                     self.assertEqual(song.read_bytes(), data)
                     # Write again, then change the library and the Serato folder, then restore everything.
@@ -974,7 +982,7 @@ class WebServerTests(unittest.TestCase):
         saved = mutagen.flac.FLAC(path)
         self.assertEqual(saved["ARTIST"], ["Keep Me"])
         names = [name for name, _ in server._marker2_entries(server._existing_markers(path, "flac"))]
-        self.assertEqual(sorted(names), ["CUE", "LOOP"])
+        self.assertEqual(names, ["COLOR", "CUE", "LOOP", "BPMLOCK"])
 
     def test_nested_crates_unicode_names_and_external_drive_paths(self):
         root = Path(self.temporary.name)

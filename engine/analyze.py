@@ -141,6 +141,19 @@ def read_mono(path):
     return data, rate
 
 
+def fine_vocal_envelope(path, hop_s=0.001, window_s=0.01):
+    """~1 ms RMS envelope of the isolated vocal stem, used to place START on the exact millisecond."""
+    import numpy as np
+    data, rate = read_mono(path)
+    hop, window = max(1, int(round(rate * hop_s))), max(1, int(round(rate * window_s)))
+    if len(data) < window:
+        return None, None
+    power = np.concatenate(([0.0], np.cumsum(data.astype(np.float64) ** 2)))
+    starts = np.arange(0, len(data) - window + 1, hop)
+    rms = np.sqrt((power[starts + window] - power[starts]) / window)
+    return [round(float(value), 6) for value in rms], hop / rate
+
+
 def compute_features(wav_path, out_path):
     """50 fps peak, RMS and low/mid/high band energy (same format as engine/features.py)."""
     import numpy as np
@@ -506,11 +519,19 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
         config["switches"] = {**rules_v6.DEFAULT_CONFIG["switches"], **config.get("switches", {}), **switches}
     low_raw = feature["lo"].tolist()
     low_stem_step = experiments_module._resample(low_raw, 1 / float(feature["fps"]), hop).tolist()
+    onset_env, onset_hop = None, None
+    if paths.vocal_wav.exists():
+        try:
+            onset_env, onset_hop = fine_vocal_envelope(paths.vocal_wav)
+        except (EOFError, wave.Error, ValueError) as error:
+            notes.append(f"start: fine vocal envelope unavailable ({error or type(error).__name__}); "
+                         "using the coarse stem onset")
     base_kwargs = dict(
         track_id=TRACK_ID, analysis=analysis, plan={"cues": {}}, duration_s=duration, genre=genre,
         words=(words_record or {}).get("words"), synced_lyrics=(lyrics_record or {}).get("syncedLyrics"),
         stems=stems, low_energy=low_stem_step, hop_s=hop, config=config, energy=feature["rms"].tolist(),
-        fps=float(feature["fps"]), cue_maps=cue_maps)
+        fps=float(feature["fps"]), cue_maps=cue_maps,
+        vocal_onset_env=onset_env, vocal_onset_hop_s=onset_hop)
     plan = rules_v6.build_plan(**base_kwargs)
     plan["bar_energy"] = experiments_module.bar_energy_table(
         stems, low_raw, base_kwargs["energy"], hop, float(feature["fps"]), grid, duration)

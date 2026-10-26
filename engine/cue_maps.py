@@ -48,9 +48,25 @@ MEANINGS = {
     "before_outro_8": {"label": "32 beats (8 bars) before outro", "source": "outro_start", "offset": -8},
     "before_outro_16": {"label": "16 bars before outro", "source": "outro_start", "offset": -16},
     "before_outro_32": {"label": "32 bars before outro", "source": "outro_start", "offset": -32},
+    "before_first_chorus_exit_8": {"label": "8 bars (32 beats) before first chorus ends", "source": "first_chorus_end", "offset": -8},
+    "before_first_chorus_exit_4": {"label": "4 bars (16 beats) before first chorus ends", "source": "first_chorus_end", "offset": -4},
+    "out": {"label": "OUT (end of the 8-bar mix-out or last full-volume phrase)", "source": "out", "offset": 0},
+    "before_out_8": {"label": "8 bars (32 beats) before OUT", "source": "out", "offset": -8},
 }
 
+# v6.1 canonical Pop/Vocal 8-pad layout. Pad 3 (C) is intentionally empty.
 _VOCAL_DEFAULTS = {
+    "A": ("intro_start", "Intro - {bars}BTS", "red"),
+    "B": ("start", "START", "orange"),
+    "C": ("before_first_chorus_exit_32", "EXIT -32", "sky", False),
+    "D": ("before_first_chorus_exit_8", "GO-8Exit", "yellow"),
+    "E": ("before_first_chorus_exit_4", "Mix-4exit", "magenta"),
+    "F": ("first_chorus_end", "EXIT 1st Chorus", "green"),
+    "G": ("before_out_8", "GO-8OUT", "teal"),
+    "H": ("out", "OUT", "purple"),
+}
+# The pre-v6.1 VOCAL layout, kept as a selectable custom map.
+LEGACY_V7_VOCAL_DEFAULTS = {
     "A": ("intro_start", "INTRO-{beats}", "teal"),
     "B": ("start", "START", "green"),
     "C": ("before_first_chorus_exit_32", "EXIT -32", "purple"),
@@ -74,9 +90,13 @@ _DROP_DEFAULTS = {
 
 def _map_defaults(values):
     return {
-        slot: {"meaning": meaning, "label": label, "color": color, "enabled": True}
-        for slot, (meaning, label, color) in values.items()
+        slot: {"meaning": spec[0], "label": spec[1], "color": spec[2], "enabled": spec[3] if len(spec) > 3 else True}
+        for slot, spec in values.items()
     }
+
+
+def legacy_v7_vocal_map():
+    return _map_defaults(LEGACY_V7_VOCAL_DEFAULTS)
 
 
 DEFAULT_CUE_MAPS = {
@@ -149,7 +169,7 @@ def normalize_cue_maps(value=None):
             color = candidate.get("color", result["maps"][map_type][slot]["color"])
             if not isinstance(color, str) or color not in PALETTE_BY_ID:
                 raise ValueError(f"Cue {slot} color must be selected from the Serato palette.")
-            enabled = candidate.get("enabled", True)
+            enabled = candidate.get("enabled", result["maps"][map_type][slot]["enabled"])
             if not isinstance(enabled, bool):
                 raise ValueError(f"Cue {slot} enabled value must be true or false.")
             result["maps"][map_type][slot] = {
@@ -225,15 +245,18 @@ def validate_automatic_plan(plan):
         if isinstance(bar, bool) or not isinstance(bar, (int, float)) or not math.isfinite(bar):
             errors.append(slot + " has an invalid position")
             continue
-        at_end = spec.get("end_fallback") and spec["meaning"] == "outro_mix_start"
+        at_end = spec.get("end_fallback") and spec["meaning"] == "outro_mix_start" or spec["meaning"] == "out"
         if bar < first_bar or bar > end or (bar == end and not at_end):
             errors.append(slot + " is outside permitted track bounds")
         expected_time = bar_to_time(bar, plan["grid"])
         if expected_time < -1e-6:
             errors.append(slot + " precedes the audio")
         time = cue.get("time_s")
+        tolerance = 0.000501
+        if cue.get("unsnapped") and spec["meaning"] == "start":
+            tolerance = float(plan["grid"]["bar_s"]) / 2 + 0.000501
         if (not isinstance(time, (int, float)) or not math.isfinite(time)
-                or abs(time - expected_time) > 0.000501):
+                or abs(time - expected_time) > tolerance):
             errors.append(slot + " timestamp disagrees with its grid position")
         meaning = MEANINGS[spec["meaning"]]
         anchor = end if spec.get("end_fallback") else events.get(meaning["source"], {}).get("bar")
@@ -309,7 +332,7 @@ def apply_cue_map(plan, settings, candidates, first_bar):
                     break
                 if bar is None:
                     unavailable_reason = f"insufficient room for {meaning['label'].casefold()} after the preceding event"
-            at_song_end = end_fallback and spec["meaning"] == "outro_mix_start"
+            at_song_end = end_fallback and spec["meaning"] == "outro_mix_start" or spec["meaning"] == "out"
             if bar is not None and (bar < first_bar or bar > context["mix_end_bar"]
                                     or (bar == context["mix_end_bar"] and not at_song_end)):
                 bar = None
@@ -342,6 +365,8 @@ def apply_cue_map(plan, settings, candidates, first_bar):
             if spec["meaning"] == "outro_mix_start" and not end_fallback:
                 window = preferred_mix_bars(context["mix_end_bar"] - bar, lengths["exit"])
                 cue["reason"] += f"; {window * 4}-beat mix window from the outro beginning"
+        unsnapped = (bar is not None and spec["enabled"] and spec["meaning"] == "start" and source.get("unsnapped")
+                     and isinstance(source.get("time_s"), (int, float)) and bar == source.get("bar"))
         cue.update({
             "name": _render_label(label_template, spec["meaning"], bar, {**context, "lead_bars": lead_bars, "end_fallback": end_fallback}) if bar is not None
                     else spec["label"].replace("{bars}", "—").replace("{beats}", "—"),
@@ -350,8 +375,14 @@ def apply_cue_map(plan, settings, candidates, first_bar):
             "color": color["metadata"],
             "display_color": color["display"],
             "bar": bar,
-            "time_s": None if bar is None else round(bar_to_time(bar, plan["grid"]), 3),
+            "time_s": None if bar is None else (round(float(source["time_s"]), 3) if unsnapped
+                                                else round(bar_to_time(bar, plan["grid"]), 3)),
         })
+        if unsnapped:
+            cue.update({"unsnapped": True, "start_anchor_bar": bar})
+        else:
+            cue.pop("unsnapped", None)
+            cue.pop("start_anchor_bar", None)
         cue["candidate_bars"] = [] if bar is None else (
             [candidate for candidate in range(math.ceil(bar - 2), math.floor(bar + 2) + 1)
              if first_bar <= candidate < context["mix_end_bar"]]

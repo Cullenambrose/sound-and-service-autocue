@@ -1,7 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const SLOT_COLORS = ["#1DBEBD", "#1FAD26", "#6823B6", "#CE359E", "#DC1D49", "#FAC313", "#0F88CA", "#F8821A"];
-const SLOT_COLOR_IDS = ["teal", "green", "purple", "magenta", "rose", "yellow", "sky", "orange"];
+const SLOT_COLORS = ["#C02626", "#F8821A", "#0F88CA", "#FAC313", "#CE359E", "#1FAD26", "#1DBEBD", "#6823B6"];
+const SLOT_COLOR_IDS = ["red", "orange", "sky", "yellow", "magenta", "green", "teal", "purple"];
 let tracks = [], selected = new Set(), activeTrack = null, activeJob = null, soundOn = false, refreshTimer;
 let eventSource;
 let lastCompletedJob = "";

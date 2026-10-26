@@ -29,6 +29,8 @@ from serato_tags import (
     FLAC_KEY, MP4_KEY, VORBIS_HEADER,
     marker2_entries as _marker2_entries, vorbis_decode as _vorbis_decode,
 )
+import serato_tags
+import serato_writer
 
 WEB = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("AUTOCUE_WEB_DATA", ROOT / "web-data")).expanduser().resolve()
@@ -36,8 +38,8 @@ UPLOADS = DATA / "audio"
 DB_PATH = DATA / "library.sqlite3"
 ALLOWED = {".wav", ".mp3", ".m4a", ".flac", ".aiff", ".aif", ".ogg", ".opus"}
 SLOT_NAMES = {
-    "A": "INTRO", "B": "START", "C": "EXIT -32", "D": "EXIT -16",
-    "E": "EXIT/JUMP", "F": "LAST CHORUS", "G": "GO -32", "H": "OUTRO",
+    "A": "Intro", "B": "START", "C": "PAD 3", "D": "GO-8Exit",
+    "E": "Mix-4exit", "F": "EXIT 1st Chorus", "G": "GO-8OUT", "H": "OUT",
 }
 DROP_SLOT_NAMES = {
     "A": "INTRO", "B": "START", "C": "-32 DROP", "D": "FIRST DROP",
@@ -465,13 +467,13 @@ def _archive_entry_sha256(archive, name):
     return digest.hexdigest()
 
 
-def _cue_binary(cues, plan, existing_data=None):
-    entries = _marker2_entries(existing_data)
-    entries = [(name, payload) for name, payload in entries
-               if name != "CUE" or len(payload) < 2 or payload[1] not in range(8)]
+def _cue_pads(cues, plan):
     names = _slot_names(plan.get("map_type", "VOCAL"))
     grid = plan.get("grid", {})
     grid_origin(grid)
+    palette = _cue_maps_module().PALETTE_BY_ID
+    allowed = {item["metadata"] for item in palette.values()}
+    pads = []
     for index, slot in enumerate("ABCDEFGH"):
         cue = cues.get(slot, {})
         bar = cue.get("bar")
@@ -480,23 +482,26 @@ def _cue_binary(cues, plan, existing_data=None):
         bar_position = float(bar)
         if not math.isfinite(bar_position):
             raise ValueError(f"Cue {slot} has a non-finite bar position.")
-        position = max(0, int(round(bar_to_time(bar_position, grid) * 1000)))
+        position = max(0, int(round(serato_writer.cue_time_s({**cue, "bar": bar_position}, grid) * 1000)))
         if position >= 0xFFFFFFFF:
             raise ValueError(f"Cue {slot} exceeds Serato's supported timestamp.")
-        palette = _cue_maps_module().PALETTE_BY_ID
         default_id = _cue_maps_module().DEFAULT_CUE_MAPS["maps"][plan.get("map_type", "VOCAL")][slot]["color"]
         color_hex = cue.get("color") or palette[default_id]["metadata"]
-        if color_hex not in {item["metadata"] for item in palette.values()}:
+        if color_hex not in allowed:
             raise ValueError(f"Cue {slot} color is not a Serato-compatible palette value.")
-        color = tuple(int(color_hex[offset:offset + 2], 16) for offset in (1, 3, 5))
-        label = _cue_name(cue.get("name"), slot, names,
-                          preserve_custom=bool(plan.get("cue_map"))).encode("utf-8")[:120] + b"\x00"
-        payload = (bytes((0, index)) + position.to_bytes(4, "big") + bytes((0, *color, 0, 0)) + label)
-        entries.append(("CUE", payload))
-    raw = bytearray(b"\x01\x01")
-    for name, payload in entries:
-        raw.extend(name.encode("ascii") + b"\x00" + len(payload).to_bytes(4, "big") + payload)
-    return b"\x01\x01" + base64.b64encode(bytes(raw)) + b"\x00"
+        label = _cue_name(cue.get("name"), slot, names, preserve_custom=bool(plan.get("cue_map")))
+        while len(label.encode("utf-8")) > 120:
+            label = label[:-1]
+        pads.append({"index": index, "slot": slot, "name": label, "position_ms": position, "color": color_hex})
+    return pads
+
+
+def _cue_binary(cues, plan, existing_data=None, min_size=0):
+    return serato_tags.encode_markers2(_cue_pads(cues, plan), existing_data, min_size=min_size)
+
+
+def _cue_v1_binary(cues, plan, existing_data=None):
+    return serato_tags.encode_markers_v1(_cue_pads(cues, plan), serato_tags.track_color_from_markers2(existing_data))
 
 
 WRITABLE = {".mp3": "mp3", ".aiff": "aiff", ".aif": "aiff", ".flac": "flac", ".m4a": "m4a"}
@@ -611,8 +616,6 @@ def _existing_markers(path, kind):
             tags = ID3(path) if kind == "mp3" else (mutagen.File(path).tags or ID3())
         except ID3NoHeaderError:
             return None
-        if tags.getall("GEOB:Serato Markers_"):
-            raise RuntimeError(f"{Path(path).name} uses legacy Serato Markers_ cues; writing is blocked to avoid a conflicting cue set.")
         frames = tags.getall("GEOB:Serato Markers2")
         if len(frames) > 1:
             raise RuntimeError(f"{Path(path).name} has multiple Serato Markers2 frames; writing is blocked.")
@@ -629,7 +632,20 @@ def _existing_markers(path, kind):
     return _vorbis_decode(bytes(values[0]).decode("ascii")) if values else None
 
 
-def _store_markers(path, kind, data):
+def _existing_v1_markers(path, kind):
+    mutagen = _require_mutagen()
+    from mutagen.id3 import ID3, ID3NoHeaderError
+    try:
+        tags = ID3(path) if kind == "mp3" else (mutagen.File(path).tags or ID3())
+    except ID3NoHeaderError:
+        return None
+    frames = tags.getall("GEOB:Serato Markers_")
+    if len(frames) > 1:
+        raise RuntimeError(f"{Path(path).name} has multiple Serato Markers_ frames; writing is blocked.")
+    return frames[0].data if frames else None
+
+
+def _store_markers(path, kind, data, v1_data=None):
     mutagen = _require_mutagen()
     if kind in ("mp3", "aiff"):
         from mutagen.id3 import ID3, GEOB, ID3NoHeaderError
@@ -638,15 +654,18 @@ def _store_markers(path, kind, data):
                 tags = ID3(path)
             except ID3NoHeaderError:
                 tags = ID3()
-            tags.delall("GEOB:Serato Markers2")
-            tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato Markers2", data=data))
-            tags.save(path, v2_version=3)
         else:
             audio = mutagen.File(path)
             if audio.tags is None:
                 audio.add_tags()
-            audio.tags.delall("GEOB:Serato Markers2")
-            audio.tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato Markers2", data=data))
+            tags = audio.tags
+        frames = [("Serato Markers2", data)] + ([("Serato Markers_", v1_data)] if v1_data is not None else [])
+        for desc, payload in frames:
+            tags.delall("GEOB:" + desc)
+            tags.add(GEOB(encoding=0, mime="application/octet-stream", desc=desc, data=payload))
+        if kind == "mp3":
+            tags.save(path, v2_version=3)
+        else:
             audio.save(v2_version=3)
     elif kind == "flac":
         audio = mutagen.File(path)
@@ -669,10 +688,16 @@ def _write_markers2(path, cues, plan):
     temporary = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.autocue{path.suffix}")
     try:
         shutil.copy2(path, temporary)
-        marker_data = _cue_binary(cues, plan, _existing_markers(temporary, kind))
-        _store_markers(temporary, kind, marker_data)
+        existing = _existing_markers(temporary, kind)
+        id3 = kind in ("mp3", "aiff")
+        marker_data = _cue_binary(cues, plan, existing, min_size=serato_tags.MARKERS2_MIN_SIZE if id3 else 0)
+        # Serato prefers Markers_ when present, so ID3 files get a matching v1 tag in lockstep.
+        v1_data = _cue_v1_binary(cues, plan, existing) if id3 else None
+        _store_markers(temporary, kind, marker_data, v1_data)
         if _existing_markers(temporary, kind) != marker_data:
             raise RuntimeError(f"Could not verify the written Serato cue tag in {path.name}.")
+        if v1_data is not None and _existing_v1_markers(temporary, kind) != v1_data:
+            raise RuntimeError(f"Could not verify the written Serato Markers_ tag in {path.name}.")
         if _audio_hash(temporary) != audio_hash:
             raise RuntimeError(f"Audio data changed while writing Serato cues to {path.name}.")
         if _sha256(path) != original_hash:
@@ -1852,10 +1877,14 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError(f"Cue {slot} bar must be a finite number on or after bar {earliest}.")
                     cue_changed = cue.get("name") != new_name or cue.get("bar") != new_bar
                     changed |= cue_changed
+                    keep_unsnapped = bool(cue.get("unsnapped")) and old_bar == new_bar and cue.get("time_s") is not None
+                    if not keep_unsnapped:
+                        cue.pop("unsnapped", None)
                     cue.update({
                         "name": new_name,
                         "bar": new_bar,
-                        "time_s": None if new_bar is None else round(bar_to_time(new_bar, grid), 3),
+                        "time_s": cue["time_s"] if keep_unsnapped else
+                            None if new_bar is None else round(bar_to_time(new_bar, grid), 3),
                         "confidence": cue.get("confidence"),
                         "reason": "Edited by you" if cue_changed else cue.get("reason", ""),
                     })

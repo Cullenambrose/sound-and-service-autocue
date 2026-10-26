@@ -34,9 +34,12 @@ class SeratoGridTests(unittest.TestCase):
         self.assertAlmostEqual(grid["bar_s"], 240 / 124.0, places=4)
         self.assertIn("used the Serato beatgrid", note)
 
-    def test_tempo_disagreement_keeps_detected_grid(self):
+    def test_tempo_disagreement_still_uses_serato_grid_as_ruler(self):
         grid, note = serato_grid.reconcile(self.detected, [{"pos": 0.2, "bpm": 62.0}])
-        self.assertIs(grid, self.detected)
+        self.assertEqual(grid["source"], "serato_beatgrid")
+        self.assertEqual((grid["t1"], grid["bpm"]), (0.2, 62.0))
+        self.assertAlmostEqual(grid["bar_s"], 240 / 62.0, places=6)
+        self.assertFalse(grid["provenance"]["detected_tempo_agrees"])
         self.assertIn("disagrees", note)
 
     def test_tempo_changing_grid_is_ignored(self):

@@ -9,6 +9,7 @@ import sys
 from synced_lyrics import align_synced_lyrics
 from timing import bar_to_time, time_to_bar
 import cue_maps as cue_map_settings
+import pop_cues
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 SWITCHES = (
@@ -16,6 +17,7 @@ SWITCHES = (
     "drop_detection",
     "genre_map",
     "gemini_tiebreaker",
+    "pop_v61",
 )
 DEFAULT_CONFIG = {
     "switches": {
@@ -23,6 +25,7 @@ DEFAULT_CONFIG = {
         "drop_detection": True,
         "genre_map": True,
         "gemini_tiebreaker": False,
+        "pop_v61": True,
     },
     "drop_genres": ["house", "edm", "dance", "electronic", "techno", "trance", "disco", "dubstep", "drum and bass", "dnb", "bass music", "electro", "garage"],
     "drop_bpm_range": [118, 150],
@@ -410,7 +413,7 @@ def _outro_vocal_evidence(vocals, hop_s, duration_s, words):
 
 def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synced_lyrics=None,
                stems=None, low_energy=None, hop_s=0.05, config=None, detected_drops=None,
-               energy=None, fps=50, cue_maps=None):
+               energy=None, fps=50, cue_maps=None, vocal_onset_env=None, vocal_onset_hop_s=None):
     config = {**DEFAULT_CONFIG, **(config or {})}
     config["switches"] = {**DEFAULT_CONFIG["switches"], **config.get("switches", {})}
     grid = analysis["grid"]
@@ -423,6 +426,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     start = old_cues.get("B", {}).get("bar")
     start_reason = "retained existing START on the beat grid"
     start_has_evidence = start is not None and first_bar <= start < bar_count
+    retained_start = start_has_evidence
     if not start_has_evidence:
         start = None
     if start is None:
@@ -486,6 +490,24 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             map_reason = (f"vocals in {vocal_ratio:.0%} of bars and the only drop is in the last half of the "
                           "track, so it reads as vocal-led")
     map_type = "DROP" if is_drop else "VOCAL"
+    pop_layout = bool(config["switches"].get("pop_v61")) and map_type == "VOCAL"
+    stem_vocals = (stems or {}).get("vocals")
+    start_onset = None
+    if pop_layout and not retained_start:
+        onset_env, onset_hop = ((vocal_onset_env, vocal_onset_hop_s) if vocal_onset_env is not None
+                                and vocal_onset_hop_s else (stem_vocals, hop_s))
+        word_start = pop_cues.first_sung_word(words, stem_vocals, hop_s, duration_s)
+        onset_source = "WhisperX first sung word"
+        if word_start is None:
+            word_start = pop_cues.first_vocal_onset(stem_vocals, hop_s)
+            onset_source = "first sustained vocal-stem onset (no usable word timings)"
+        if word_start is not None:
+            found = pop_cues.refine_vocal_onset(word_start, grid, onset_env, onset_hop)
+            if first_bar <= found["anchor_bar"] < bar_count:
+                start_onset = {**found, "evidence": onset_source}
+                start, start_has_evidence = found["anchor_bar"], True
+                start_reason = (f"lead vocal onset at {found['time_s']:.3f}s ({onset_source}); "
+                                f"structural anchor bar {found['anchor_bar']}")
     outro = next((section for section in analysis.get("segments", analysis.get("sections", []))
                   if "outro" in _normal_label(section)), None)
     fallback_outro = False
@@ -532,6 +554,19 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             })
     chorus_spans, chorus_source = _choruses(analysis, grid, lyric_alignment, start, old_exit,
                                             energy, fps, duration_s)
+    exit_evidence = None
+    if pop_layout and chorus_spans:
+        first_span = chorus_spans[0]
+        refined, exit_evidence = pop_cues.refine_chorus_exit(
+            first_span["end_bar"], grid, start, bar_count, stem_vocals, hop_s, energy, fps)
+        next_start = chorus_spans[1]["start_bar"] if len(chorus_spans) > 1 else None
+        if (refined != first_span["end_bar"] and refined > first_span["start_bar"]
+                and (next_start is None or refined <= next_start)):
+            chorus_spans[0] = {**first_span, "end_bar": refined}
+        elif refined != first_span["end_bar"]:
+            exit_evidence.update(status="kept", reason="drop-off candidate would overlap a neighbouring chorus")
+        exit_evidence["chorus_source"] = chorus_source
+    out_detection = pop_cues.detect_out(energy, fps, grid, start, duration_s, stem_vocals, hop_s)
     flags = list(outro_vocal_flags)
     if not start_has_evidence:
         flags.append(start_reason)
@@ -549,8 +584,10 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         flags.append("single drop: last-drop slots repeat first-drop slots")
     if not chorus_spans and not is_drop:
         flags.append("no chorus span found from lyrics or section labels")
-    if fallback_outro:
+    if fallback_outro and not pop_layout:
         flags.append("outro inferred from sustained end-of-track energy/vocal fade; review recommended")
+    if pop_layout and out_detection.get("kind") != "drum_outro":
+        flags.append(f"OUT ({out_detection.get('kind')}): {out_detection.get('reason')}; review recommended")
 
     cues = {}
     intro = cue_map_settings.intro_candidate(start, first_bar, cue_maps["mix_lengths"]["intro"])
@@ -564,6 +601,9 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
     cues["B"] = _cue("START", start,
                      old_cues.get("B", {}).get("confidence", 0.6) if start_has_evidence else 0.35,
                      start_reason, [] if start_has_evidence else [start_reason], grid=grid)
+    if start_onset is not None:
+        cues["B"].update({"time_s": start_onset["time_s"], "unsnapped": True,
+                          "confidence": 0.75 if start_onset["source"] == "vocal_stem_energy_onset" else 0.65})
 
     if is_drop:
         if drop_confident:
@@ -607,7 +647,8 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             cue_flags = []
             if cue_bar is not None and cue_bar < start:
                 cue_flags.append(f"{slot} lands before START")
-                flags.append(f"{slot} lands before START")
+                if not pop_layout:
+                    flags.append(f"{slot} lands before START")
                 cue_bar = None
             cues[slot] = _cue(f"EXIT -{bars}", cue_bar, chorus_conf,
                               f"{bars} bars before EXIT/JUMP", cue_flags, grid)
@@ -666,6 +707,11 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         "lyric_choruses": lyric_choruses,
         "chorus_spans": chorus_spans,
         "lyric_alignment": lyric_alignment,
+        "cue_spec": "v6.1-pop-vocal" if pop_layout else "configurable",
+        "start_anchor_bar": start,
+        "start_onset": start_onset,
+        "exit_evidence": exit_evidence,
+        "out_detection": out_detection,
         "genre_reason": genre_reason,
         "flags": list(dict.fromkeys(flags)),
         "cue_order": list("ABCDEFGH"),
@@ -714,6 +760,12 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
             "flags": ["single drop: shares the first-drop event"] if len(drop_confident) == 1 else [],
         },
         "outro_start": cues["H"],
+        "out": {
+            "bar": out_detection.get("out_bar"),
+            "confidence": out_detection.get("confidence", 0.0),
+            "reason": out_detection.get("reason", ""),
+            "flags": [] if out_detection.get("out_bar") is not None else ["OUT unavailable"],
+        },
     }
     result = cue_map_settings.apply_cue_map(result, cue_maps, candidate_events, first_bar)
     if cue_maps["mode"] != "AUTO":
