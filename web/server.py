@@ -468,6 +468,7 @@ def _archive_entry_sha256(archive, name):
 
 
 def _cue_pads(cues, plan):
+    _cue_maps_module().validate_phrasing({**plan, "cues": cues})
     names = _slot_names(plan.get("map_type", "VOCAL"))
     grid = plan.get("grid", {})
     grid_origin(grid)
@@ -864,6 +865,7 @@ def write_to_serato(hashes):
         plan = json.loads(row["plan_json"])
         if not any(cue.get("bar") is not None for cue in plan.get("cues", {}).values()):
             raise ValueError(f"{row['name']}: no cue bars are available to write.")
+        _cue_pads(plan["cues"], plan)
         tracks.append(row)
     backup_id, backup_path, manifest = _create_backup(tracks)
     touched = []
@@ -1869,6 +1871,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Unknown cue slot: " + slot)
                     cue = plan.setdefault("cues", {}).setdefault(slot, {})
                     old_name, old_bar = cue.get("name"), cue.get("bar")
+                    old_time = None if old_bar is None else serato_writer.cue_time_s(cue, grid)
                     new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names,
                                          preserve_custom=bool(plan.get("cue_map")))[:80]
                     new_bar = float(edit["bar"]) if edit.get("bar") not in (None, "") else None
@@ -1896,13 +1899,17 @@ class Handler(BaseHTTPRequestHandler):
                             "correct" if old_bar == new_bar else "set_here",
                         "from_beat": None if old_bar is None else float(old_bar) * 4,
                         "to_beat": None if new_bar is None else new_bar * 4,
-                        "from_time": None if old_bar is None else round(bar_to_time(old_bar, grid), 3),
-                        "to_time": None if new_bar is None else round(bar_to_time(new_bar, grid), 3),
+                        "from_time": None if old_time is None else round(old_time, 3),
+                        "to_time": cue["time_s"],
                         "original_source": cue.get("source", "suggest"),
                         "original_beat": None if old_bar is None else float(old_bar) * 4,
                         "bar_s": bar_s, "t1": t1, "offset_ms": grid.get("offset_ms", 0),
                         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     })
+                _cue_maps_module().refresh_dynamic_labels(plan)
+                _cue_maps_module().validate_phrasing(plan)
+                for event in events:
+                    event["name"] = plan["cues"][event["cue"]]["name"]
                 plan["answer_key"] = experiments.merge_review_answer(plan, previous_answer, body.get("cues", {}))
                 status = "Edited by you" if changed else "Cues ready"
                 db.execute("UPDATE tracks SET plan_json=?,status=?,edited=?,reviewed=1 WHERE hash=?",

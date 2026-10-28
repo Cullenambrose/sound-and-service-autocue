@@ -1,5 +1,25 @@
 # Cue logic
 
+## v6.2 phrasing safety update (October 28, 2026)
+
+The current Pop/Vocal defaults use explicit-unit labels such as
+`Intro 8 bars (32 beats)` and `GO 4 bars (16 beats) > EXIT`.
+Prefer 8/4/2/1-bar windows; the Mix lead caps at 4 bars. Intro and GO are independent,
+not guaranteed matching two-track windows. Intro counts to START's structural
+anchor; an exact unsnapped pickup can start earlier. Available track space does not
+prove that a window is free of vocals or speech.
+
+Mapped review saves preserve manually placed positions but refresh countdown names
+and resolved offsets to their actual targets. Intentional custom renames remain
+custom. Invalid mapped countdowns and ambiguous unmapped legacy `GO -N` plans
+are blocked before export. Preview and scoring use the exact unsnapped START time
+while its bar is unchanged. The full automatic event-order/clean-outro guard is
+still not a manual-review constraint.
+
+See [PM BOT READ ME](./PM%20BOT%20READ%20ME.md) for the full audit, known musical
+accuracy gaps and portable read-only audit command. The sections below document
+the earlier configurable v7 layout, not the current Pop/Vocal pad meanings.
+
 ## v7 mix windows (confirmed Oct 21, 2026)
 
 `INTRO-N` counts **beats**, not bars, and is a lead-in cue before START, not a measurement of the entire opening section.

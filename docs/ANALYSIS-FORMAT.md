@@ -4,6 +4,14 @@ AutoCue writes one JSON object per track after analysis. Booth Buddy (and later 
 
 **Status:** draft. Fields may gain names but should stay additive. Version bump `schema_version` on breaking changes. The v6 cue-plan contract is schema version 2; the original sample below documents the earlier v1 analysis object.
 
+The October 28 arithmetic/label update adds `phrasing_version: "v6.2"` to new
+plans without changing schema version 2, the `v7` planner-family version, or the
+`v6.1-pop-vocal` pad-layout identifier. Pop/Vocal labels now spell out bars and
+beats; known old templates migrate only on settings normalization/reanalysis.
+Stored plans and already-written tags are not silently converted. Human review
+answers retain `time_s` and `unsnapped` so vocal pickups are not scored against
+their structural bar. See [the phrasing audit](./PM%20BOT%20READ%20ME.md).
+
 ## File naming
 
 Suggested: `<artist> - <title>.analysis.json` next to the audio, or a content-addressed store keyed by `file_hash` / `audio_sha256`. Paths to audio are optional and machine-local; consumers should prefer `audio_sha256` + library index.
@@ -126,7 +134,27 @@ The v6 planner writes a separate plan per song with `schema_version: 2` and `eng
 
 Every cue includes a confidence, reason, review flags, and candidate bars. The plan contains all eight slots A–H in order, plus the resolved cue meaning, label, and Serato palette color for each cue. The settings are user-editable in the web app and apply to new analyses; re-analyze a track to apply changed settings to an existing plan.
 
-Default VOCAL map (v6.1 Pop/Vocal spec): A `Intro - NBTS` (red `#CC0000`, Bar 0 on the Serato BeatGrid, N = 8/4/2/1 bars before START), B `START` (orange `#CC8800`, the exact un-snapped lead-vocal onset in ms; `start_anchor_bar` keeps the structural bar), C empty, D `GO-8Exit` (yellow `#CCCC00`, 8 bars before EXIT), E `Mix-4exit` (magenta `#CC00CC`, 4 bars before EXIT), F `EXIT 1st Chorus` (green `#00CC00`, lyric chorus end confirmed by a 4-bar vocal/RMS drop-off), G `GO-8OUT` (teal `#00CCCC`, 8 bars before OUT), H `OUT` (purple `#8800CC`, final bar of a drum outro, or the last full-volume 4-bar phrase before a >6 dB fade). Plans built this way carry `cue_spec: "v6.1-pop-vocal"`, `start_onset`, `exit_evidence` and `out_detection`; the `pop_v61` switch turns the new algorithms off. The pre-v6.1 VOCAL layout (`INTRO -N`, `START`, `EXIT -32`, `EXIT -16`, `EXIT/JUMP`, `LAST CHORUS`, `GO -32`, `OUTRO -N`) remains available as `cue_maps.legacy_v7_vocal_map()`. Default DROP map: `INTRO -N`, `START`, `-32 DROP`, `FIRST DROP`, `-32 LAST DROP`, `LAST DROP`, `GO -32`, `OUTRO -N`. `N` is computed from the measured bar count. Users can choose another supported musical meaning, custom label, Serato palette color, or disable a cue. AUTO selects between the VOCAL and DROP maps using the planner's existing evidence; forcing DROP does not invent drops when none were detected.
+Default VOCAL map (v6.1 pad layout with v6.2 explicit-unit labels):
+A `Intro 8 bars (32 beats)` (red `#CC0000`, 8/4/2/1 bars before START's structural
+anchor, not necessarily Bar 0), B `START` (orange `#CC8800`, exact unsnapped vocal
+onset; `start_anchor_bar` preserves the structural bar), C empty,
+D `GO 8 bars (32 beats) > EXIT` (yellow `#CCCC00`),
+E `Mix 4 bars (16 beats) > EXIT` (magenta `#CC00CC`),
+F `EXIT 1st Chorus` (green `#00CC00`),
+G `GO 8 bars (32 beats) > OUT` (teal `#00CCCC`), H `OUT` (purple `#8800CC`).
+Countdowns can shorten to configured smaller windows; their labels report the
+actual distance. OUT and chorus boundaries remain heuristic evidence requiring
+listening, not certified clean-window endpoints.
+
+Plans carry `cue_spec: "v6.1-pop-vocal"`, `phrasing_version: "v6.2"`,
+`start_onset`, `exit_evidence` and `out_detection`. `pop_v61` gates the onset/exit/OUT
+algorithms; selecting the older layout is a separate cue-map setting.
+`cue_maps.legacy_v7_vocal_map()` and the DROP layout retain their earlier
+configurable meanings. In those layouts `INTRO-{beats}` and `GO-{beats}` count
+beats, but `EXIT -32` and `-32 DROP` offsets count bars. Never infer units from
+the number alone. Custom meanings, labels, colors and disabled pads are supported.
+AUTO selects between maps using existing evidence; forcing DROP does not invent
+drops when none were detected.
 
 Serato writes (MP3/AIFF) update `GEOB:Serato Markers2` and `GEOB:Serato Markers_` together so Serato never sees two disagreeing cue sets. Markers2 is `01 01` + 72-column base64 of the inner payload (`01 01`, `COLOR`, `CUE`s in pad order, preserved loops/flips, `BPMLOCK`, `00`) + `00`. Existing hot cues on pads 1–8, including Mixed In Key `Energy N` cues, are replaced; cues 9+ and loops are kept. The audio stream SHA-256 (bytes after the ID3v2 tag) must be identical before and after every write.
 

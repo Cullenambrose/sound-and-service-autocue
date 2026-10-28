@@ -236,7 +236,7 @@ def summarize(plan, label, detail=""):
         "t1": grid.get("t1"), "bar_s": grid.get("bar_s"),
         "offset_ms": grid.get("offset_ms", 0),
         "flags": plan.get("flags", []),
-        "cues": {slot: {key: cue.get(key) for key in ("name", "bar", "time_s", "confidence", "reason", "meaning")}
+        "cues": {slot: {key: cue.get(key) for key in ("name", "bar", "time_s", "unsnapped", "confidence", "reason", "meaning")}
                  for slot, cue in plan.get("cues", {}).items()},
     }
 
@@ -295,6 +295,11 @@ def bar_energy_table(stems, low_energy_raw, rms, hop_s, fps, grid, duration_s):
 def _truth_time(cue, grid):
     if cue.get("bar") is None or grid.get("t1") is None:
         return None
+    if cue.get("unsnapped"):
+        time_s = cue.get("time_s")
+        if type(time_s) not in (int, float) or not math.isfinite(time_s) or time_s < 0:
+            raise ValueError("reviewed un-snapped timestamp is invalid")
+        return time_s
     return bar_to_time(cue["bar"], grid)
 
 
@@ -303,7 +308,7 @@ def review_answer(plan, slots=None):
     return {
         "source": "human_review", "map_type": plan.get("map_type"),
         "grid": copy.deepcopy(plan.get("grid", {})),
-        "cues": {slot: {**{key: cue.get(key) for key in ("bar", "name", "meaning")},
+        "cues": {slot: {**{key: cue.get(key) for key in ("bar", "name", "meaning", "time_s", "unsnapped")},
                         "map_type": plan.get("map_type")}
                  for slot, cue in plan.get("cues", {}).items() if slot in selected},
     }

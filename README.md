@@ -4,6 +4,12 @@ Current review candidate: **v7**. Real-library evidence is preliminary; automati
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)
 for the measured sample, remaining gates, and local review instructions.
 
+**October 28 phrasing audit:** baseline `v6.1.0-phrasing-baseline` is preserved.
+The **v6.2 arithmetic/label update is not performance-ready**. Saved legacy plans
+can count 32 **bars** where newer labels mean 32 **beats**. See
+[PM BOT READ ME](docs/PM%20BOT%20READ%20ME.md) for measured evidence, remaining
+algorithm gaps and the read-only crate audit command.
+
 Library-prep engine that analyzes DJ tracks and suggests Serato cue points (A–H layout) plus two clean 4-bar loop ideas. It is a **prep app**, not a booth player: run it on the library before a gig, review the picks, then (later) write approved cues into Serato.
 
 A native Mac app (Xcode) is planned once the logic is proven. Per-song analysis JSON (see `docs/ANALYSIS-FORMAT.md`) is designed so **Booth Buddy** can read the same results later without coupling the two codebases.
@@ -12,20 +18,26 @@ Private repo: `Cullenambrose/sound-and-service-autocue`. Separate from the booki
 
 ## Cue layout (approved)
 
-### v6.1 Pop/Vocal 8-pad spec (current VOCAL default)
+### Pop/Vocal 8-pad spec (v6.2 explicit-unit labels)
 
 | Pad | Slot | Name | Where | Colour |
 |-----|------|------|-------|--------|
-| 1 | A | `Intro - 8BTS` (4/2/1BTS if shorter) | Bar 0 on the `GEOB:Serato BeatGrid` ruler (`bar_time(k) = pos0 + k·240/bpm`) | `#CC0000` |
+| 1 | A | `Intro 8 bars (32 beats)` (4/2/1 bars if shorter) | lead-in before START's structural anchor, not necessarily Bar 0; `bar_time(k) = pos0 + k·240/bpm` | `#CC0000` |
 | 2 | B | `START` | exact un-snapped lead-vocal onset (Demucs stem + WhisperX first word, refined within −1.2 s/+0.5 s of the downbeat); `start_anchor_bar` keeps the bar | `#CC8800` |
 | 3 | C | — | empty | — |
-| 4 | D | `GO-8Exit` | EXIT − 8 bars | `#CCCC00` |
-| 5 | E | `Mix-4exit` | EXIT − 4 bars | `#CC00CC` |
+| 4 | D | `GO 8 bars (32 beats) > EXIT` | EXIT − 8 bars, or an allowed shorter lead with the actual distance in its label | `#CCCC00` |
+| 5 | E | `Mix 4 bars (16 beats) > EXIT` | EXIT − 4 bars, or an allowed shorter lead with the actual distance in its label | `#CC00CC` |
 | 6 | F | `EXIT 1st Chorus` | downbeat where the first chorus ends (synced-lyric repetition + 4-bar vocal/RMS drop-off) | `#00CC00` |
-| 7 | G | `GO-8OUT` | OUT − 8 bars | `#00CCCC` |
+| 7 | G | `GO 8 bars (32 beats) > OUT` | OUT − 8 bars, or an allowed shorter lead with the actual distance in its label | `#00CCCC` |
 | 8 | H | `OUT` | drum-outro edits: final full bar; fade-outs: last full-volume 4-bar phrase before RMS drops >6 dB | `#8800CC` |
 
 The Serato BeatGrid is always the bar ruler; AutoCue never shifts its phase to match legacy Mixed In Key cues. Turn the new algorithms off with the `pop_v61` switch; the older VOCAL layout is `cue_maps.legacy_v7_vocal_map()`. Code: `engine/pop_cues.py`, tests: `engine/test_v61_pop_cues.py`.
+
+These are structural bar counts in 4/4, not a certification of speech-free
+mixing windows. START may be an unsnapped pickup before its anchor. Intro and GO
+preferences are independent. Exact known v6.1 label templates migrate when settings
+are normalized; saved cue plans and existing Serato tags require reanalysis/review.
+Unmapped legacy `GO -N` countdowns are blocked from export rather than silently moved.
 
 **Single-track QA write (DJ MacBook Pro only, Serato closed):**
 

@@ -103,15 +103,16 @@ def fmt_time(ms):
 
 def print_table(title, pads, bars):
     by_index = {pad["index"]: pad for pad in pads}
+    name_width = max(18, max((len(pad["name"]) for pad in pads), default=0) + 2)
     print(f"\n{title}")
-    print(f"{'Pad #':<6}{'Name':<18}{'Timestamp':>11}{'ms':>10}{'Bar':>6}  {'Hex Color':<9}")
+    print(f"{'Pad #':<6}{'Name':<{name_width}}{'Timestamp':>11}{'ms':>10}{'Bar':>6}  {'Hex Color':<9}")
     for index in range(8):
         pad = by_index.get(index)
         if pad is None:
-            print(f"{index + 1:<6}{'None':<18}{'-':>11}{'-':>10}{'-':>6}  {'-':<9}")
+            print(f"{index + 1:<6}{'None':<{name_width}}{'-':>11}{'-':>10}{'-':>6}  {'-':<9}")
             continue
         bar = bars.get(index)
-        print(f"{index + 1:<6}{pad['name']:<18}{fmt_time(pad['position_ms']):>11}{pad['position_ms']:>10,}"
+        print(f"{index + 1:<6}{pad['name']:<{name_width}}{fmt_time(pad['position_ms']):>11}{pad['position_ms']:>10,}"
               f"{'-' if bar is None else f'{bar:g}':>6}  {pad['color']:<9}")
 
 

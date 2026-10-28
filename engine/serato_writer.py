@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import serato_tags
+from cue_maps import validate_phrasing
 from timing import bar_to_time
 
 SLOTS = "ABCDEFGH"
@@ -62,6 +63,7 @@ def cue_time_s(cue, grid):
 
 def plan_pads(plan, default_colors=None):
     """Active pads from a plan as [{index, slot, name, position_ms, color, bar}] in slot order."""
+    validate_phrasing(plan)
     grid = plan.get("grid", {})
     pads = []
     for index, slot in enumerate(SLOTS):

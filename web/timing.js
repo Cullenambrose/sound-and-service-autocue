@@ -14,6 +14,10 @@ const AutoCueTiming = (() => {
   return {
     barToTime: (bar, grid) => finite(origin(grid) + finite(bar, "Bar position") * Number(grid.bar_s), "Audio time"),
     timeToBar: (time, grid) => finite((finite(time, "Audio time") - origin(grid)) / Number(grid.bar_s), "Bar position"),
+    cueTime: (bar, cue, grid) => {
+      if (cue?.unsnapped && bar === cue.bar) return finite(cue.time_s, "Cue time");
+      return finite(origin(grid) + finite(bar, "Bar position") * Number(grid.bar_s), "Audio time");
+    },
   };
 })();
 if (typeof module !== "undefined") module.exports = AutoCueTiming;

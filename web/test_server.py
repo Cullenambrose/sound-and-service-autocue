@@ -623,6 +623,37 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(events[0]["to_beat"], 13)
         self.assertIn("saved_at", events[0])
 
+    def test_mapped_review_relabels_countdowns_and_preserves_pickup_in_logs_and_answers(self):
+        source = Path(self.temporary.name) / "phrasing.mp3"
+        source.write_bytes(b"synthetic phrasing")
+        file_hash, _ = server.copy_import(source, source.name, source_path=str(source))
+        plan = server._cue_maps_module().apply_cue_map({
+            "map_type": "VOCAL", "bar_count": 100, "grid": {"t1": 0.017, "bar_s": 2},
+            "cues": {slot: {} for slot in "ABCDEFGH"},
+        }, None, {"start": {"bar": 8, "time_s": 15.094, "unsnapped": True},
+                  "first_chorus_end": {"bar": 32}, "out": {"bar": 80}}, 0)
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        request = urllib.request.Request(base + f"/api/tracks/{file_hash}", data=json.dumps({
+            "cues": {"B": {"bar": 8, "name": "START"}, "F": {"bar": 36, "name": "EXIT 1st Chorus"}}
+        }).encode(), method="PUT", headers={"Content-Type": "application/json", "Origin": base,
+                                           "X-AutoCue-Token": server.SESSION_TOKEN})
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+        with server.connect() as db:
+            saved = json.loads(db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()[0])
+        self.assertEqual(saved["cues"]["D"]["name"], "GO 12 bars (48 beats) > EXIT")
+        self.assertEqual(saved["cues"]["D"]["bar"], 24)
+        self.assertEqual(saved["answer_key"]["cues"]["B"]["time_s"], 15.094)
+        events = json.loads((server.DATA / "corrections.json").read_text())
+        self.assertEqual(events[0]["from_time"], 15.094)
+        self.assertEqual(events[0]["to_time"], 15.094)
+        server._cue_pads(saved["cues"], saved)
+        saved["cues"]["D"]["name"] = "GO 8 bars (32 beats) > EXIT"
+        with self.assertRaisesRegex(ValueError, "Invalid cue phrasing"):
+            server._cue_pads(saved["cues"], saved)
+
     def test_event_annotations_keep_grid_provenance_and_uncertain_skip_states(self):
         source = Path(self.temporary.name) / "event-labels.mp3"
         source.write_bytes(b"event label fixture")

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from timing import bar_to_time
+from cue_maps import phrasing_report
 
 SLOTS = "ABCDEFGH"
 
@@ -77,6 +78,10 @@ def exact_label_slots(plan):
         for slot, spec in resolved.items():
             if slot in exact:
                 exact[slot] = cues.get(slot, {}).get("name") == spec.get("label")
+        for error in phrasing_report(plan)["errors"]:
+            slot = error.partition(":")[0]
+            if slot in exact:
+                exact[slot] = False
     return exact
 
 

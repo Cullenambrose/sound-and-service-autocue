@@ -1,6 +1,7 @@
 """Configurable cue-map meanings, labels, and Serato-compatible colors."""
 import copy
 import math
+import re
 from timing import bar_to_time
 
 
@@ -56,13 +57,13 @@ MEANINGS = {
 
 # v6.1 canonical Pop/Vocal 8-pad layout. Pad 3 (C) is intentionally empty.
 _VOCAL_DEFAULTS = {
-    "A": ("intro_start", "Intro - {bars}BTS", "red"),
+    "A": ("intro_start", "Intro {bars} bars ({beats} beats)", "red"),
     "B": ("start", "START", "orange"),
     "C": ("before_first_chorus_exit_32", "EXIT -32", "sky", False),
-    "D": ("before_first_chorus_exit_8", "GO-8Exit", "yellow"),
-    "E": ("before_first_chorus_exit_4", "Mix-4exit", "magenta"),
+    "D": ("before_first_chorus_exit_8", "GO {bars} bars ({beats} beats) > EXIT", "yellow"),
+    "E": ("before_first_chorus_exit_4", "Mix {bars} bars ({beats} beats) > EXIT", "magenta"),
     "F": ("first_chorus_end", "EXIT 1st Chorus", "green"),
-    "G": ("before_out_8", "GO-8OUT", "teal"),
+    "G": ("before_out_8", "GO {bars} bars ({beats} beats) > OUT", "teal"),
     "H": ("out", "OUT", "purple"),
 }
 # The pre-v6.1 VOCAL layout, kept as a selectable custom map.
@@ -161,6 +162,16 @@ def normalize_cue_maps(value=None):
             if not isinstance(meaning, str) or meaning not in MEANINGS:
                 raise ValueError(f"Cue {slot} uses an unsupported meaning.")
             label = candidate.get("label", result["maps"][map_type][slot]["label"])
+            old_pop_labels = {
+                ("intro_start", "Intro - {bars}BTS"),
+                ("before_first_chorus_exit_8", "GO-8Exit"),
+                ("before_first_chorus_exit_4", "Mix-4exit"),
+                ("before_out_8", "GO-8OUT"),
+            }
+            if map_type == "VOCAL" and isinstance(label, str) and (meaning, label) in old_pop_labels:
+                label = {
+                    spec[0]: spec[1] for spec in _VOCAL_DEFAULTS.values()
+                }[meaning]
             if not isinstance(label, str) or not label.strip() or len(label) > 80:
                 raise ValueError(f"Cue {slot} label must contain 1–80 characters.")
             plain_label = label.replace("{bars}", "").replace("{beats}", "")
@@ -187,11 +198,11 @@ def cue_map_catalog():
 
 def _render_label(template, meaning, bar, context):
     bars_kind = MEANINGS[meaning].get("bars")
-    if "{bars}" not in template and "{beats}" not in template:
-        return template
     if bars_kind == "mix_window" and context.get("end_fallback"):
         return template.replace("{bars}", "END").replace("{beats}", "END")
-    if bars_kind == "to_start":
+    if "count" in context:
+        count = context["count"]
+    elif bars_kind == "to_start":
         count = max(0, context["start_bar"] - bar)
     elif bars_kind == "to_end":
         count = max(0, context["bar_count"] - bar)
@@ -199,7 +210,13 @@ def _render_label(template, meaning, bar, context):
         count = preferred_mix_bars(context["mix_end_bar"] - bar, context["exit_lengths"]) or 0
     else:
         count = context.get("lead_bars", abs(MEANINGS[meaning]["offset"]))
-    return template.replace("{bars}", str(count)).replace("{beats}", str(count * 4))
+    legacy_countdowns = {
+        "EXIT -32", "EXIT -16", "-32 DROP", "-16 DROP",
+        "-32 LAST DROP", "-16 LAST DROP", "GO-8Exit", "Mix-4exit", "GO-8OUT",
+    }
+    if template in legacy_countdowns and MEANINGS[meaning]["offset"] < 0:
+        return re.sub(r"-\d+", f"-{count:g}", template, count=1)
+    return template.replace("{bars}", f"{count:g}").replace("{beats}", f"{count * 4:g}")
 
 
 def preferred_mix_bars(available, beats=(32, 16, 8, 4)):
@@ -275,6 +292,7 @@ def validate_automatic_plan(plan):
             errors.append(slot + " label disagrees with its resolved meaning")
     if errors:
         raise ValueError("Invalid automatic cue plan: " + "; ".join(errors))
+    validate_phrasing(plan)
     return plan
 
 
@@ -317,11 +335,16 @@ def apply_cue_map(plan, settings, candidates, first_bar):
                     first_drop = candidates.get("first_drop_start", {}).get("bar")
                     if first_drop is not None and first_drop < anchor:
                         floor = max(floor, first_drop + 1)
+                elif spec["meaning"] in ("before_first_chorus_exit_8", "before_first_chorus_exit_4"):
+                    floor = max(floor, context["start_bar"])
                 # A lead-in that lands before the track, the first drop (for last-drop leads) or the last drop/chorus
                 # (for the outro) shrinks to 16, then 8, bars; otherwise the cue stays empty.
                 full = lengths["go"][0] // 4 if spec["meaning"] == "before_outro_8" else abs(meaning["offset"])
                 bar = None
-                leads = [beat // 4 for beat in lengths["go"]] if spec["meaning"] == "before_outro_8" else (full, 16, 8)
+                flexible = spec["meaning"] in ("before_outro_8", "before_out_8",
+                                               "before_first_chorus_exit_8", "before_first_chorus_exit_4")
+                leads = ([beat // 4 for beat in lengths["go"] if beat // 4 <= full]
+                         if flexible else (full, 16, 8))
                 for lead in leads:
                     if (spec["meaning"] != "before_outro_8" and lead > full) or anchor - lead < floor:
                         continue
@@ -425,12 +448,106 @@ def refresh_dynamic_labels(plan):
         template = resolved.get("label_template", "")
         meaning = resolved.get("meaning")
         cue = plan.get("cues", {}).get(slot, {})
-        if ("{bars}" not in template and "{beats}" not in template) or cue.get("bar") is None:
+        if meaning not in MEANINGS or cue.get("bar") is None:
             continue
+        if cue.get("name") != resolved.get("label"):
+            resolved["label_template"] = cue.get("name", "")
+            resolved["label"] = cue.get("name", "")
+            template = resolved["label_template"]
         context = {"start_bar": start or 0, "bar_count": plan.get("bar_count", 0),
                    "mix_end_bar": plan.get("mix_end_bar", plan.get("bar_count", 0)),
                    "exit_lengths": plan["cue_map"].get("mix_lengths", {}).get("exit", [32, 16, 8, 4]),
                    "end_fallback": resolved.get("end_fallback", False),
                    "lead_bars": abs(resolved.get("offset", MEANINGS[meaning]["offset"]))}
+        countdown = meaning == "intro_start" or MEANINGS[meaning]["offset"] < 0
+        target = _countdown_target(plan, meaning, resolved.get("end_fallback", False)) if countdown else None
+        if target is not None:
+            context["count"] = target - cue["bar"]
+            if MEANINGS[meaning]["offset"] < 0:
+                resolved["offset"] = -context["count"]
         cue["name"] = _render_label(template, meaning, cue["bar"], context)
         resolved["label"] = cue["name"]
+
+
+def _countdown_target(plan, meaning, end_fallback=False):
+    if end_fallback:
+        return plan.get("mix_end_bar", plan.get("bar_count"))
+    source = "start" if meaning == "intro_start" else MEANINGS[meaning]["source"]
+    mapping = plan.get("cue_map", {})
+    for slot, spec in mapping.get("resolved", {}).items():
+        anchor_meaning = MEANINGS.get(spec.get("meaning"), {})
+        if (spec.get("enabled") and anchor_meaning.get("source") == source
+                and anchor_meaning.get("offset") == 0):
+            bar = plan.get("cues", {}).get(slot, {}).get("bar")
+            if bar is not None or spec.get("meaning") == source:
+                return bar
+    return mapping.get("candidates", {}).get(source, {}).get("bar")
+
+
+def phrasing_report(plan):
+    """Audit stored plans without audio/model work; bars are structural, not proof of clean vocals."""
+    errors, warnings, intervals = [], [], []
+    mapping = plan.get("cue_map", {})
+    if not mapping.get("resolved"):
+        warnings.append("Unversioned cue meanings: legacy numeric labels cannot be trusted as beat counts; reanalyze.")
+        if re.fullmatch(r"GO\s+-\d+", str(plan.get("cues", {}).get("G", {}).get("name", ""))):
+            errors.append("G: legacy GO countdown has ambiguous units and target; reanalyze and review before export.")
+        for left, right in (("A", "B"), ("G", "H")):
+            begin, end = plan.get("cues", {}).get(left, {}), plan.get("cues", {}).get(right, {})
+            if begin.get("bar") is not None and end.get("bar") is not None:
+                count = end["bar"] - begin["bar"]
+                intervals.append({"slot": left, "target_slot": right, "bars": count, "beats": count * 4,
+                                  "target_inferred": True})
+    for slot, cue in plan.get("cues", {}).items():
+        bar = cue.get("bar")
+        if bar is None:
+            continue
+        grid = plan.get("grid", {})
+        expected = bar_to_time(bar, grid)
+        timestamp = cue.get("time_s")
+        valid_time = type(timestamp) in (int, float) and math.isfinite(timestamp) and timestamp >= 0
+        if ((timestamp is not None and (not valid_time or
+                (not cue.get("unsnapped") and abs(timestamp - expected) > 0.000501)))
+                or (cue.get("unsnapped") and not valid_time)):
+            errors.append(f"{slot}: stored timestamp disagrees with grid.")
+        spec = mapping.get("resolved", {}).get(slot, {})
+        meaning = spec.get("meaning")
+        if meaning not in MEANINGS:
+            continue
+        if meaning != "intro_start" and MEANINGS[meaning]["offset"] >= 0:
+            context = {"bar_count": plan.get("bar_count", 0),
+                       "mix_end_bar": plan.get("mix_end_bar", plan.get("bar_count", 0)),
+                       "exit_lengths": mapping.get("mix_lengths", {}).get("exit", [32, 16, 8, 4]),
+                       "end_fallback": spec.get("end_fallback", False), "lead_bars": 0}
+            expected_name = _render_label(spec.get("label_template", cue.get("name", "")), meaning, bar, context)
+            if cue.get("name") != expected_name:
+                errors.append(f"{slot}: label disagrees with its actual mix window.")
+            continue
+        target = _countdown_target(plan, meaning, spec.get("end_fallback", False))
+        if target is None:
+            errors.append(f"{slot}: countdown target is empty.")
+            continue
+        count = target - bar
+        intervals.append({"slot": slot, "target_bar": target, "bars": count, "beats": count * 4})
+        if count <= 0:
+            errors.append(f"{slot}: countdown must precede its target.")
+        if MEANINGS[meaning]["offset"] < 0 and abs(count + spec.get("offset", MEANINGS[meaning]["offset"])) > 1e-6:
+            errors.append(f"{slot}: countdown distance disagrees with resolved offset.")
+        context = {"count": count, "end_fallback": spec.get("end_fallback", False)}
+        expected_name = _render_label(spec.get("label_template", cue.get("name", "")), meaning, bar, context)
+        if cue.get("name") != expected_name:
+            errors.append(f"{slot}: label {cue.get('name')!r} disagrees with {count:g} bars / {count * 4:g} beats.")
+    start = next((cue for cue in plan.get("cues", {}).values()
+                  if cue.get("meaning") == "start" and cue.get("unsnapped")), None)
+    if start and type(start.get("time_s")) in (int, float) and math.isfinite(start["time_s"]):
+        offset = start["time_s"] - bar_to_time(start["bar"], plan["grid"])
+        if abs(offset) > 0.000501:
+            warnings.append(f"START is {offset:+.3f}s from its structural anchor; intro label counts to the anchor, not exact vocal time.")
+    warnings.append("Arithmetic only: clean vocal-free windows and musical phrase boundaries require audio review.")
+    return {"errors": errors, "warnings": warnings, "intervals": intervals}
+
+
+def validate_phrasing(plan):
+    errors = phrasing_report(plan)["errors"]
+    if errors:
+        raise ValueError("Invalid cue phrasing: " + "; ".join(errors))

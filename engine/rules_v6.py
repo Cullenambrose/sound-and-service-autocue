@@ -708,6 +708,7 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         "chorus_spans": chorus_spans,
         "lyric_alignment": lyric_alignment,
         "cue_spec": "v6.1-pop-vocal" if pop_layout else "configurable",
+        "phrasing_version": "v6.2",
         "start_anchor_bar": start,
         "start_onset": start_onset,
         "exit_evidence": exit_evidence,

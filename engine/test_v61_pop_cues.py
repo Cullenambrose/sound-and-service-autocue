@@ -20,8 +20,9 @@ from timing import bar_to_time
 
 SPEC_COLORS = {"A": "#CC0000", "B": "#CC8800", "D": "#CCCC00", "E": "#CC00CC",
                "F": "#00CC00", "G": "#00CCCC", "H": "#8800CC"}
-SPEC_NAMES = {"A": "Intro - 8BTS", "B": "START", "D": "GO-8Exit", "E": "Mix-4exit",
-              "F": "EXIT 1st Chorus", "G": "GO-8OUT", "H": "OUT"}
+SPEC_NAMES = {"A": "Intro 8 bars (32 beats)", "B": "START", "D": "GO 8 bars (32 beats) > EXIT",
+              "E": "Mix 4 bars (16 beats) > EXIT",
+              "F": "EXIT 1st Chorus", "G": "GO 8 bars (32 beats) > OUT", "H": "OUT"}
 CHORUS = ["paper lanterns over harbor", "carry me across the water",
           "silver morning hold the line", "we keep turning into light"]
 
@@ -348,8 +349,7 @@ class SingleTrackScriptTests(unittest.TestCase):
             self.assertEqual(serato_writer.mp3_audio_sha256(song), audio_before)
             cues = serato_tags.decode_markers2(serato_writer.read_serato_frames(song)["Serato Markers2"])["cues"]
             self.assertEqual([(cue["index"], cue["name"]) for cue in cues],
-                             [(0, "Intro - 8BTS"), (1, "START"), (3, "GO-8Exit"), (4, "Mix-4exit"),
-                              (5, "EXIT 1st Chorus"), (6, "GO-8OUT"), (7, "OUT")])
+                             [(index, SPEC_NAMES[slot]) for index, slot in enumerate("ABCDEFGH") if slot != "C"])
             self.assertEqual(cues[1]["position_ms"], 22970)
 
 

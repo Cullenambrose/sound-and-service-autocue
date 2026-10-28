@@ -140,7 +140,7 @@ function drawLiveWave(live){
   const track=tracks.find(item=>item.hash===live.hash);
   if(track&&track.t1!=null&&track.bar_s&&liveWave.duration){
     "ABCDEFGH".split("").forEach((slot,i)=>{const bar=track.cues?.[slot]?.bar;if(bar==null)return;
-      const x=AutoCueTiming.barToTime(bar,track)/liveWave.duration*width;context.fillStyle=SLOT_COLORS[i];context.fillRect(x,0,2,height);context.fillText(slot,x+3,10)});
+      const x=AutoCueTiming.cueTime(bar,track.cues[slot],track)/liveWave.duration*width;context.fillStyle=SLOT_COLORS[i];context.fillRect(x,0,2,height);context.fillText(slot,x+3,10)});
   }
 }
 function formatDuration(seconds){return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,"0")}`}
@@ -475,6 +475,7 @@ function cueBarValue(slot) {
   return value === "" || value == null || !Number.isFinite(Number(value)) ? null : Number(value);
 }
 function barToTime(bar) { return AutoCueTiming.barToTime(bar, activeTrack); }
+function cueTime(slot) { return AutoCueTiming.cueTime(cueBarValue(slot), activeTrack.cues?.[slot], activeTrack); }
 function timeToBar(time) { return AutoCueTiming.timeToBar(time, activeTrack); }
 function formatBar(bar) { return String(Number(bar.toFixed(2))); }
 function waveSnapshot() { return Object.fromEntries("ABCDEFGH".split("").map(slot => [slot, $(`.cue-bar[data-slot="${slot}"]`)?.value ?? ""])); }
@@ -524,7 +525,7 @@ function startPreviewPlayback() {
 function playFromCue(slot, length) {
   const bar = cueBarValue(slot);
   if (bar == null || activeTrack.t1 == null || activeTrack.bar_s == null) return toast("This track has no timing grid yet.");
-  const audio = $("#preview-audio"), time = Math.max(0, barToTime(bar));
+  const audio = $("#preview-audio"), time = Math.max(0, cueTime(slot));
   audio.currentTime = time; wave.stopAt = length ? time + length : null; startPreviewPlayback();
   wave.playhead = time; ensureVisible(time); drawWave();
 }
@@ -553,7 +554,7 @@ function centerOn(time) { clampView(time - wave.viewSpan / 2, wave.viewSpan); dr
 function zoomToCue(slot) {
   const bar = cueBarValue(slot);
   if (bar == null) return toast(`Cue ${slot} has no bar yet.`);
-  clampView(barToTime(bar) - activeTrack.bar_s * 8, activeTrack.bar_s * 16); drawWave();
+  clampView(cueTime(slot) - activeTrack.bar_s * 8, activeTrack.bar_s * 16); drawWave();
 }
 function fitView() { clampView(0, wave.duration); drawWave(); }
 
@@ -671,7 +672,7 @@ function drawWave() {
 
   for (const [index, slot] of "ABCDEFGH".split("").entries()) {
     const bar = cueBarValue(slot); if (bar == null || !hasGrid) continue;
-    const x = toX(barToTime(bar)); if (x < -4 || x > width + 4) continue;
+    const x = toX(cueTime(slot)); if (x < -4 || x > width + 4) continue;
     const color = cueDisplayColor(slot), selectedCue = wave.selected === slot;
     ctx.strokeStyle = color; ctx.lineWidth = selectedCue ? 2.5 : 1.5;
     ctx.beginPath(); ctx.moveTo(x, RULER_H); ctx.lineTo(x, WAVE_H); ctx.stroke();
@@ -704,7 +705,7 @@ function drawMiniMap() {
   paintWaveColumns(ctx, wave.mini.data, MINI_H / 2, MINI_H / 2 - 2);
   for (const slot of "ABCDEFGH") {
     const bar = cueBarValue(slot); if (bar == null || !activeTrack.bar_s) continue;
-    ctx.fillStyle = cueDisplayColor(slot); ctx.fillRect(Math.round(barToTime(bar) / wave.duration * width) - 1, 0, 2, MINI_H);
+    ctx.fillStyle = cueDisplayColor(slot); ctx.fillRect(Math.round(cueTime(slot) / wave.duration * width) - 1, 0, 2, MINI_H);
   }
   const x0 = wave.viewStart / wave.duration * width, w = Math.max(3, wave.viewSpan / wave.duration * width);
   ctx.fillStyle = "rgba(255,255,255,.12)"; ctx.fillRect(x0, 0, w, MINI_H);
@@ -722,7 +723,7 @@ function markerAt(x) {
   let best = null, bestDistance = HIT_PX + 1;
   for (const slot of "ABCDEFGH") {
     const bar = cueBarValue(slot); if (bar == null) continue;
-    const distance = Math.abs((barToTime(bar) - wave.viewStart) / wave.viewSpan * $("#waveform").clientWidth - x);
+    const distance = Math.abs((cueTime(slot) - wave.viewStart) / wave.viewSpan * $("#waveform").clientWidth - x);
     if (distance < bestDistance || (distance === bestDistance && slot === wave.selected)) { best = slot; bestDistance = distance; }
   }
   return best;
@@ -805,7 +806,7 @@ function bindWaveEditor() {
   });
   $("#wave-legend").addEventListener("click", event => {
     const item = event.target.closest("[data-slot]"); if (!item) return;
-    selectCue(item.dataset.slot); if (cueBarValue(item.dataset.slot) != null) centerOn(barToTime(cueBarValue(item.dataset.slot))); else toast(`Cue ${item.dataset.slot} has no bar yet.`);
+    selectCue(item.dataset.slot); if (cueBarValue(item.dataset.slot) != null) centerOn(cueTime(item.dataset.slot)); else toast(`Cue ${item.dataset.slot} has no bar yet.`);
   });
   $("#wave-zoom-in").onclick = () => zoomAt(0.5, wave.playhead >= wave.viewStart && wave.playhead <= wave.viewStart + wave.viewSpan ? wave.playhead : wave.viewStart + wave.viewSpan / 2);
   $("#wave-zoom-out").onclick = () => zoomAt(2, wave.viewStart + wave.viewSpan / 2);
@@ -834,7 +835,7 @@ function bindWaveEditor() {
     else if (key === "}" && wave.selected) nudgeCue(wave.selected, 1);
     else if (/^[1-8]$/.test(key)) {
       const slot = "ABCDEFGH"[Number(key) - 1]; selectCue(slot);
-      const bar = cueBarValue(slot); bar == null ? toast(`Cue ${slot} has no bar yet. Press C to set it at the playhead.`) : centerOn(barToTime(bar));
+      const bar = cueBarValue(slot); bar == null ? toast(`Cue ${slot} has no bar yet. Press C to set it at the playhead.`) : centerOn(cueTime(slot));
     }
     else if (key.toLowerCase() === "p" && wave.selected) previewCue(wave.selected);
     else if (key.toLowerCase() === "c" && wave.selected) cueToPlayhead(wave.selected);
