@@ -1,5 +1,18 @@
 # Cue logic
 
+## Full-track grid review
+
+New analyses compare the selected constant 4/4 ruler with model downbeats in
+the beginning, middle and end, and check accumulated drift and possible
+half/double-time. Phase/drift tolerance is a quarter beat at the selected tempo.
+Multi-marker Serato drift and unsupported variable-tempo imports are explicit
+warnings, even if a fallback fits the detected beats. No grid phase or cue is
+automatically moved. Older plans require reanalysis for these checks.
+
+These are advisory checks, not new export gates or musical-accuracy proof.
+The model may be wrong; detected-grid fits also reuse those observations.
+See [the diagnostic fields and limitations](./ANALYSIS-FORMAT.md#grid-diagnostics).
+
 ## Outro-derived intro Cue Loop proposal
 
 If no clean intro fits, the desired fallback is a later outro-derived Serato 5

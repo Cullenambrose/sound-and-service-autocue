@@ -89,6 +89,26 @@ class AnalyzeTests(unittest.TestCase):
         features = np.load(folder / "features/00.npz")
         self.assertAlmostEqual(float(features["dur"]), 90, places=0)
 
+    def test_pipeline_reports_stable_half_time_and_unsupported_imports_without_shifting_ruler(self):
+        cases = [
+            ([{"pos": 0.0, "bpm": 120}], "aligned", None, 2),
+            ([{"pos": 0.0, "bpm": 60}], "review_required", "possible_half_time_grid", 4),
+            ([{"pos": 0.0, "beats_to_next": 64}, {"pos": 32, "bpm": 140}],
+             "review_required", "unsupported_serato_grid", 2),
+        ]
+        original = self.song.read_bytes()
+        for markers, status, code, bar_s in cases:
+            with self.subTest(markers=markers), patch("serato_grid.read_beatgrid", return_value=markers):
+                plan = self.run_pipeline([])
+                self.assertEqual(plan["grid_diagnostics"]["status"], status)
+                self.assertAlmostEqual(plan["grid"]["bar_s"], bar_s, places=6)
+                self.assertAlmostEqual(plan["grid"]["t1"], 0, places=6)
+                if code:
+                    self.assertIn(code, {issue["code"] for issue in plan["grid_diagnostics"]["issues"]})
+                    self.assertTrue(any(flag.startswith("Grid review:") for flag in plan["flags"]))
+                self.assertEqual(plan["variants"]["baseline"]["grid_diagnostics"], plan["grid_diagnostics"])
+        self.assertEqual(self.song.read_bytes(), original)
+
     def test_missing_beat_model_is_a_named_install_error(self):
         with patch.object(analyze, "decode_wav", lambda src, dst, **_k: (dst.parent.mkdir(parents=True, exist_ok=True), shutil.copy(src, dst))), \
                 patch("shutil.which", return_value="/usr/bin/ffmpeg"), \

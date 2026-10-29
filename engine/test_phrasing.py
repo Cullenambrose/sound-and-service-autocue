@@ -1,15 +1,17 @@
 import copy
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 
 import cue_maps
 import serato_writer
 import experiments
 from score_v6 import labels_exact
-from scripts.audit_phrasing import audit_library
+from scripts.audit_phrasing import audit_library, main as audit_main
 
 
 def mapped_plan(start=8, exit_bar=32, out=80, settings=None):
@@ -130,3 +132,32 @@ class PhrasingTests(unittest.TestCase):
         fresh["grid"]["t1"] += 0.1
         merged = experiments.merge_review_answer(fresh, answer, ["A"])
         self.assertEqual(experiments._truth_time(merged["cues"]["B"], merged["grid"]), 15.094)
+
+    def test_audit_separates_saved_grid_warnings_from_arithmetic_success_and_preserves_database(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "library.sqlite3"
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE tracks(hash TEXT,name TEXT,plan_json TEXT)")
+                for status in ("aligned", "review_required", "unavailable"):
+                    plan = mapped_plan()
+                    if status != "unavailable":
+                        plan["grid_diagnostics"] = {"version": 1, "status": status, "issues": []}
+                        if status == "review_required":
+                            plan["grid_diagnostics"]["issues"].append({
+                                "code": "accumulated_drift", "message": "Grid drift requires review."})
+                    db.execute("INSERT INTO tracks VALUES(?,?,?)", (status, "synthetic", json.dumps(plan)))
+            before = path.read_bytes()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = audit_main(["--library", str(path)])
+            report = json.loads(output.getvalue())
+            self.assertEqual(result, 0)
+            self.assertEqual(report["counts"]["arithmetic_checked"], 3)
+            self.assertEqual(report["grid_checks"],
+                             {"aligned": 1, "review_required": 1, "unverified": 0, "unavailable": 1})
+            saved = next(row for row in report["tracks"] if row["track"] == "review_required")
+            self.assertEqual(saved["grid_diagnostics"]["issues"][0]["code"], "accumulated_drift")
+            stale = next(row for row in report["tracks"] if row["track"] == "unavailable")
+            self.assertIsNone(stale["grid_diagnostics"])
+            self.assertTrue(any("reanalysis required" in warning for warning in stale["warnings"]))
+            self.assertEqual(path.read_bytes(), before)

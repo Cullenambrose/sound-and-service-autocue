@@ -15,6 +15,14 @@ outro-derived intro loops. Genuine **Serato 5 Cue Loop export is blocked pending
 verified synthetic tag fixtures**, so the proposed START/Intro fallback is not
 silently applied. See [the Cue Loop QA guide](docs/SERATO-CUE-LOOP-QA.md).
 
+New analyses also save **full-track grid diagnostics**: beginning/middle/end
+alignment, accumulated drift, possible half/double-time, and unsupported or
+drifting multi-marker Serato grids. Review, the single-track CLI and the read-only
+audit expose these checks. Older plans show diagnostics unavailable until
+reanalysis. They are warnings, not automatic grid repairs or new export gates;
+`aligned` means agreement with model observations, not verified musical phrasing.
+See [the diagnostic contract](docs/ANALYSIS-FORMAT.md#grid-diagnostics).
+
 Library-prep engine that analyzes DJ tracks and suggests Serato cue points (A–H layout) plus two clean 4-bar loop ideas. It is a **prep app**, not a booth player: run it on the library before a gig, review the picks, then (later) write approved cues into Serato.
 
 A native Mac app (Xcode) is planned once the logic is proven. Per-song analysis JSON (see `docs/ANALYSIS-FORMAT.md`) is designed so **Booth Buddy** can read the same results later without coupling the two codebases.

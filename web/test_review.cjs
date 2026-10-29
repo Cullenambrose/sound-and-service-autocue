@@ -16,6 +16,18 @@ test("missing, incomplete and invalid vocal evidence never looks verified", () =
                /unverified.*coverage is incomplete/);
 });
 
+test("grid diagnostics distinguish unavailable, aligned and drift review states", () => {
+  assert.match(text({}), /Grid check unavailable.*reanalyze/);
+  const message = text({grid_diagnostics: {status: "review_required", issues: [
+    {code: "accumulated_drift", message: "Timing drifts more than a quarter beat."},
+    {code: "possible_half_time_grid", message: "Possible half-time BPM."},
+  ]}});
+  assert.match(message, /Grid check: review_required/);
+  assert.match(message, /Timing drifts more than a quarter beat/);
+  assert.match(message, /Possible half-time BPM/);
+  assert.match(text({grid_diagnostics: {status: "aligned", issues: []}}), /Grid check: aligned/);
+});
+
 test("detected instrumental endings show timing, limitations and rejected words", () => {
   const message = text({outro_vocal_evidence: {
     status: "analyzed", last_vocal_end_s: 160.125, ignored_words: 2,

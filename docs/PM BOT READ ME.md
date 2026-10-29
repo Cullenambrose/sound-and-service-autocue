@@ -1,5 +1,48 @@
 # PM BOT READ ME
 
+## Latest follow-up: grid diagnostics and portable export regression
+
+**Still not performance-ready.** This is additional pre-MBP hardening, not a
+claim that the failed crate now phrases correctly. No real library audio or
+Track #1 was accessed.
+
+- New analyses compare the chosen constant 4/4 ruler with raw model downbeats
+  across beginning/middle/end thirds. Quarter-beat thresholds scale with BPM.
+  Checks flag possible half/double-time, phase/tempo disagreement, cumulative
+  drift through phase wraparound, missing coverage and irregular detections.
+- Imported Serato markers are checked for unsupported variable tempo and
+  cumulative deviation, including final-tempo extrapolation. Supported Serato
+  ruler positions remain unchanged; rejected imports still use the existing
+  fallback but now carry a structured warning.
+- Diagnostics survive frozen baseline summaries and library API responses.
+  Review text and the single-track CLI expose issues. The read-only audit
+  includes saved diagnostics and separate `grid_checks` counts. Old plans
+  explicitly report unavailable checks and need reanalysis.
+- Diagnostics are **warnings, not new export blocks or automatic repairs**.
+  Model agreement is not human confirmation, and detected-grid fits may reuse
+  the same model observations. Malformed/read failures remain pipeline notes.
+  Beat-fit failure before reconciliation and non-4/4 support remain gaps.
+- A portable synthetic end-to-end regression now exercises real analysis and
+  planning, HTTP review, manual EXIT relabeling, frozen predictions, correction
+  timestamps, real backed-up dual-tag export/readback, unchanged audio payload,
+  and exact-byte undo. Only audio/model evidence and process/environment
+  boundaries are mocked. START remains an exact unsnapped pickup throughout.
+- Synthetic pipeline cases also cover stable imports, half-time disagreement
+  and rejected variable grids without moving the ruler.
+
+The dated sections below are historical milestones. Their original gap tables
+should be read alongside these follow-ups, not as the current implementation.
+For detailed thresholds/statuses see
+[the diagnostic contract](./ANALYSIS-FORMAT.md#grid-diagnostics).
+Real-track listening and genuine Serato 5 Cue Loop metadata remain MBP gates;
+the proposed later-A/early-B fallback is still unapplied.
+
+Validation on the Air: **302 engine tests, 42 web tests, 16 browser tests passed**;
+JavaScript syntax and whitespace checks passed. All new audio fixtures are
+synthetic and temporary. No full-library mount, inference marathon, or Serato
+session was needed. Next MBP work remains a small read-only listening packet
+plus synthetic Cue Loop captures, not another unattended crate-wide write.
+
 ## October 28 follow-up: whole-window evidence and outro-derived intro Cue Loops
 
 The user clarified the no-clean-intro fallback: START on the first playable

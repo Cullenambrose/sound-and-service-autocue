@@ -20,6 +20,9 @@ def audit_library(path):
             continue
         plan = json.loads(raw)
         report = phrasing_report(plan)
+        report["grid_diagnostics"] = plan.get("grid_diagnostics")
+        if not report["grid_diagnostics"]:
+            report["warnings"].append("No saved full-track grid diagnostics; reanalysis required to assess drift.")
         report.update({"track": digest, "name": name, "version": plan.get("version"),
                        "phrasing_version": plan.get("phrasing_version"),
                        "status": "invalid" if report["errors"] else
@@ -38,8 +41,11 @@ def main(argv=None):
         parser.exit(2, f"Audit failed: {error}\n")
     counts = {status: sum(row["status"] == status for row in results)
               for status in ("invalid", "unversioned", "not_analyzed", "arithmetic_checked")}
+    grid_checks = {status: sum((row.get("grid_diagnostics") or {}).get("status", "unavailable") == status
+                              for row in results)
+                   for status in ("aligned", "review_required", "unverified", "unavailable")}
     print(json.dumps({"scope": "arithmetic only; no clean-window or audio accuracy certification",
-                      "counts": counts, "tracks": results}, indent=2))
+                      "counts": counts, "grid_checks": grid_checks, "tracks": results}, indent=2))
     return 1 if counts["invalid"] or counts["unversioned"] or counts["not_analyzed"] else 0
 
 

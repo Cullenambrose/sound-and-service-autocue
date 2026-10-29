@@ -494,7 +494,8 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
     step("vocals", lambda: _run_demucs(decoded, paths))
     segments_record = step("sections", lambda: _run_sections(decoded, paths))
     segments = (segments_record or {}).get("segments", [])
-    analysis = {"segments": segments, "grid": grid, "beats": beats["beats"], "downbeats": beats["downbeats"]}
+    analysis = {"segments": segments, "grid": grid, "beats": beats["beats"], "downbeats": beats["downbeats"],
+                "serato_markers": markers}
     if segments:
         _write_json(paths.sections, {**analysis, "engine": segments_record.get("engine")})
 

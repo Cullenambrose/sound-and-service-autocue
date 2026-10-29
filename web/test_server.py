@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -932,6 +933,123 @@ class WebServerTests(unittest.TestCase):
         (serato / "Subcrates").mkdir(parents=True, exist_ok=True)
         (serato / "database V2").write_bytes(b"read-only Serato database")
         return home
+
+    def test_analysis_review_and_dual_tag_export_keep_grid_warnings_pickup_and_countdowns(self):
+        """Real orchestration/HTTP/tag codecs, with only audio/model boundaries replaced by synthetic evidence."""
+        import numpy as np
+        import struct
+        from mutagen.id3 import ID3, GEOB
+        import analyze
+        import serato_writer
+
+        home = self._serato_home()
+        song = home / "Music" / "Synthetic pipeline QA.mp3"
+        song.write_bytes(fixtures.mp3())
+        tags = ID3()
+        tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato BeatGrid",
+                      data=b"\x01\x00" + struct.pack(">Iff", 1, 0.017, 120) + b"\x00"))
+        tags.save(song)
+        original = song.read_bytes()
+        file_hash, _ = server.copy_import(song, song.name, source_path=str(song))
+        with server.connect() as db:
+            row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+        duration, hop, fps = 160.617, 0.05, 50
+        vocals = np.zeros(math.ceil(duration / hop), dtype=float)
+        vocals[int(15.094 / hop):int(128.017 / hop)] = 0.3
+
+        def features(_source, target):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            values = np.full(math.ceil(duration * fps), 0.5)
+            np.savez(target, dur=duration, fps=fps, rms=values, lo=values, peak=values)
+
+        def stems(_source, paths):
+            paths.stems_env.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(paths.stems_env, hop_s=hop, vocals=vocals,
+                     drums=np.full(len(vocals), 0.3), bass=np.full(len(vocals), 0.3))
+            paths.vocal_wav.parent.mkdir(parents=True, exist_ok=True)
+            paths.vocal_wav.touch()
+
+        cache = home / "synthetic-cache"
+        settings = {"gemini": "false", "cue_maps": json.dumps({
+            "mode": "VOCAL", "mix_lengths": {"intro": [16, 8, 4], "go": [16, 8, 4]}})}
+        with patch.object(analyze, "cache_root", return_value=cache), \
+                patch.object(analyze, "decode_wav", side_effect=lambda _src, dst:
+                             (dst.parent.mkdir(parents=True, exist_ok=True), dst.touch())), \
+                patch.object(analyze, "compute_features", side_effect=features), \
+                patch.object(analyze, "_run_beats", return_value={
+                    "beats": [0.017 + index * 0.5025 for index in range(318)],
+                    "downbeats": [0.017 + index * 2.01 for index in range(80)]}), \
+                patch.object(analyze, "_run_demucs", side_effect=stems), \
+                patch.object(analyze, "_run_sections", return_value={"segments": [
+                    {"label": "intro", "start": 0.017, "end": 16.017},
+                    {"label": "chorus", "start": 48.017, "end": 64.017},
+                    {"label": "outro", "start": 128.017, "end": 160.017},
+                ]}), \
+                patch.object(analyze, "_run_words", return_value={
+                    "words": [{"word": "synthetic", "start": 15.15, "end": 15.45}]}), \
+                patch.object(analyze, "_run_lyrics", return_value={"syncedLyrics": None}), \
+                patch.object(analyze, "fine_vocal_envelope", return_value=([0.0] * 15094 + [0.3] * 5000, 0.001)), \
+                patch.object(analyze, "environment_report", return_value={"synthetic": True}), \
+                patch.object(analyze, "torch_device", return_value="cpu"), \
+                patch("shutil.which", return_value="/synthetic/ffmpeg"):
+            plan = server.process_builtin(row, settings, map_override="VOCAL")
+        self.assertEqual(song.read_bytes(), original)
+        self.assertEqual(plan["grid"]["source"], "serato_beatgrid")
+        self.assertAlmostEqual(plan["grid"]["t1"], 0.017, places=5)
+        self.assertEqual(plan["grid"]["bar_s"], 2)
+        self.assertEqual(plan["grid_diagnostics"]["status"], "review_required")
+        self.assertTrue(any(issue["code"] == "accumulated_drift" for issue in plan["grid_diagnostics"]["issues"]))
+        self.assertEqual(plan["cues"]["A"]["name"], "Intro 4 bars (16 beats)")
+        self.assertEqual(plan["cues"]["D"]["name"], "GO 4 bars (16 beats) > EXIT")
+        self.assertEqual(plan["cues"]["B"]["time_s"], 15.094)
+        self.assertTrue(plan["cues"]["B"]["unsnapped"])
+        baseline = plan["variants"]["baseline"]
+        self.assertEqual(baseline["grid_diagnostics"], plan["grid_diagnostics"])
+        server._store_plan(file_hash, plan, "Needs a look")
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+
+        def library_track():
+            with urllib.request.urlopen(base + "/api/library") as response:
+                return next(track for track in json.load(response)["tracks"] if track["hash"] == file_hash)
+
+        public = library_track()
+        self.assertEqual(public["grid_diagnostics"], plan["grid_diagnostics"])
+        self.assertEqual(public["cues"]["B"]["time_s"], 15.094)
+        self.assertTrue(public["cues"]["B"]["unsnapped"])
+        edits = {slot: {"name": cue["name"], "bar": cue["bar"]} for slot, cue in public["cues"].items()}
+        edits["F"]["bar"] = 36
+        request = urllib.request.Request(base + f"/api/tracks/{file_hash}", data=json.dumps({"cues": edits}).encode(),
+                                        method="PUT", headers={"Content-Type": "application/json", "Origin": base,
+                                                              "X-AutoCue-Token": server.SESSION_TOKEN})
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+        public = library_track()
+        self.assertEqual(public["cues"]["D"]["name"], "GO 8 bars (32 beats) > EXIT")
+        self.assertEqual(public["grid_diagnostics"], plan["grid_diagnostics"])
+        self.assertIsNone(public["mix_window_evidence"])
+        self.assertEqual(public["cues"]["A"]["mix_window_evidence"]["status"], "unverified")
+        with server.connect() as db:
+            saved = json.loads(db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()[0])
+        self.assertEqual(saved["answer_key"]["cues"]["B"]["time_s"], 15.094)
+        self.assertEqual(saved["variants"]["baseline"], baseline)
+        corrections = json.loads((server.DATA / "corrections.json").read_text())
+        self.assertEqual(next(event["to_time"] for event in corrections if event["cue"] == "B"), 15.094)
+        before_audio = serato_writer.mp3_audio_sha256(song)
+        with patch.object(server.Path, "home", return_value=home), \
+                patch.object(server, "_serato_open", return_value=False), \
+                patch.object(server.sys, "platform", "darwin"):
+            result = server.write_to_serato([file_hash])
+            frames = serato_writer.read_serato_frames(song)
+            decoded = server.serato_tags.decode_markers2(frames["Serato Markers2"])
+            pads = {cue["index"]: cue for cue in decoded["cues"]}
+            self.assertEqual(pads[1]["position_ms"], 15094)
+            self.assertEqual(pads[3]["name"], "GO 8 bars (32 beats) > EXIT")
+            self.assertEqual(pads[5]["position_ms"] - pads[3]["position_ms"], 16000)
+            v1 = server.serato_tags.decode_markers_v1(frames["Serato Markers_"])
+            self.assertEqual(v1["entries"][1]["position_ms"], 15094)
+            self.assertEqual(serato_writer.mp3_audio_sha256(song), before_audio)
+            server.undo_backup(result["backup_id"])
+        self.assertEqual(song.read_bytes(), original)
 
     def _import_reviewed(self, home, name, data):
         song = home / "Music" / name

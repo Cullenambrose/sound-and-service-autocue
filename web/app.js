@@ -397,18 +397,22 @@ function outroEvidenceText(track) {
   const windows = track.mix_window_evidence;
   const fallback = windows?.intro_loop_fallback;
   const introNote = windows ? `Intro window: ${windows.intro.status}. ` : "";
+  const diagnostics = track.grid_diagnostics;
+  const gridNote = diagnostics
+    ? `Grid check: ${diagnostics.status} (model comparison, not phrasing certification). ${(diagnostics.issues || []).map(issue => issue.message).join(" ")} `
+    : "Grid check unavailable for this saved plan; reanalyze for full-track diagnostics. ";
   const loopNote = fallback?.loop
     ? `Outro-derived intro loop candidate: ${fallback.loop.bars} bars (${fallback.loop.beats} beats), bars ${fallback.loop.start_bar}–${fallback.loop.end_bar}. Proposed START: bar ${fallback.proposed_start_bar}. Serato Cue Loop export is not yet verified; nothing applied. `
     : fallback && fallback.status !== "not_needed" ? `Intro loop fallback: ${fallback.reason}. ` : "";
   const evidence = track.outro_vocal_evidence;
   if (!evidence || evidence.status !== "analyzed") {
-    return introNote + loopNote + `Instrumental outro unverified: ${evidence?.reason || "vocal evidence unavailable"}. Listen before writing cues.`;
+    return gridNote + introNote + loopNote + `Instrumental outro unverified: ${evidence?.reason || "vocal evidence unavailable"}. Listen before writing cues.`;
   }
   const boundary = Number(evidence.last_vocal_end_s);
   const note = track.no_vocal_free_outro
     ? "No full detected vocal-free outro bar remains. End-of-song cues, if enabled, are not an instrumental outro."
     : `Last detected vocal activity ends at ${boundary.toFixed(2)}s. No later stem activity above the detection threshold.`;
-  return introNote + loopNote + note + " Stem leakage/reverb and missed vocals require listening review." +
+  return gridNote + introNote + loopNote + note + " Stem leakage/reverb and missed vocals require listening review." +
     (evidence.ignored_words ? ` ${evidence.ignored_words} invalid or stem-unsupported word timings ignored.` : "");
 }
 function firstBar() {

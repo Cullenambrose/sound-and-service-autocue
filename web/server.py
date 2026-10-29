@@ -226,6 +226,7 @@ def track_record(row):
         "map_type": plan.get("map_type", "VOCAL"),
         "map_override": plan.get("map_override"),
         "map_choice": plan.get("map_choice"),
+        "grid_diagnostics": plan.get("grid_diagnostics"),
         "gemini": plan.get("gemini"),
         "outro_vocal_evidence": plan.get("outro_vocal_evidence"),
         "mix_window_evidence": plan.get("mix_window_evidence"),

@@ -1,17 +1,23 @@
 """Read the beatgrid Serato stored in an MP3's ID3 tags and reconcile it with the detected bar grid.
 
-A track analyzed in Serato may carry a "Serato BeatGrid" GEOB frame. Prefer that imported grid when
-its tempo agrees with detection, without assuming the DJ manually verified it.
+A track analyzed in Serato may carry a "Serato BeatGrid" GEOB frame. Prefer a supported imported grid,
+report disagreement without changing its phase, and never assume the DJ manually verified it.
 """
 import logging
 import math
 import struct
 from pathlib import Path
+from statistics import median
+
+from timing import grid_origin
 
 logger = logging.getLogger(__name__)
 
 SERATO_TEMPO_TOLERANCE = 0.015  # relative tempo disagreement allowed between Serato and the detected grid
 MULTI_MARKER_TOLERANCE = 0.005  # relative tempo spread allowed across a multi-marker Serato grid
+DIAGNOSTICS_VERSION = 1
+ALIGNMENT_TOLERANCE_BEATS = 0.25
+MIN_REGION_DOWNBEATS = 4
 
 
 def parse_beatgrid(data):
@@ -156,3 +162,115 @@ def reconcile(detected, markers):
                       f"({240.0 / detected_bar:.1f} BPM) disagrees, so review the grid in Serato")
     shift = ((t1 - float(detected["t1"]) + bar_s / 2) % bar_s) - bar_s / 2
     return grid, f"used the Serato beatgrid (first beat {shift:+.2f}s from the detected downbeat)"
+
+
+def diagnose(grid, downbeats, duration_s, markers=None):
+    """Compare raw model observations to the chosen constant 4/4 ruler without altering it.
+
+    Wrapped residuals measure local phase; accumulated nearest integer bar intervals expose drift
+    through wraparound. Model observations are evidence, not proof of correct meter or phrasing.
+    """
+    origin = grid_origin(grid)
+    if type(duration_s) not in (int, float) or not math.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("Grid diagnostics require finite positive duration.")
+    bar_s = float(grid["bar_s"])
+    beat_s = bar_s / 4
+    limit = beat_s * ALIGNMENT_TOLERANCE_BEATS
+    issues = []
+    result = {"version": DIAGNOSTICS_VERSION, "status": "unverified",
+              "scope": "constant 4/4 ruler versus model downbeats; not musical accuracy certification",
+              "tolerance_beats": ALIGNMENT_TOLERANCE_BEATS, "tolerance_s": round(limit, 6),
+              "grid_source": grid.get("source"), "regions": [], "issues": issues}
+
+    def issue(code, message):
+        issues.append({"code": code, "message": message})
+
+    def exceeds(value):
+        return value > limit + 1e-9
+
+    if markers:
+        marker_origin, marker_bar_s, reason = grid_from_markers(markers)
+        if marker_origin is None:
+            issue("unsupported_serato_grid", reason + "; constant-ruler phrasing is unverified.")
+        elif len(markers) > 1:
+            cumulative_beats, errors = 0, []
+            for index, marker in enumerate(markers):
+                if index:
+                    cumulative_beats += markers[index - 1]["beats_to_next"]
+                errors.append(marker["pos"] - (marker_origin + cumulative_beats * marker_bar_s / 4))
+            tail_s = max(0, duration_s - markers[-1]["pos"])
+            tail_error = errors[-1] + tail_s * (1 - marker_bar_s * markers[-1]["bpm"] / 240)
+            maximum = max(abs(value) for value in errors + [tail_error])
+            result["serato_marker_max_deviation_s"] = round(maximum, 6)
+            if exceeds(maximum):
+                issue("serato_marker_drift", "Flattening the imported markers exceeds a quarter beat over this track.")
+
+    observations = list(downbeats) if downbeats is not None else []
+    valid = [float(value) for value in observations
+             if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= duration_s]
+    invalid_count = len(observations) - len(valid)
+    duplicate_count = len(valid) - len(set(valid))
+    result.update(observed_downbeats=len(valid), ignored_downbeats=invalid_count + duplicate_count)
+    if invalid_count or duplicate_count or any(right <= left for left, right in zip(valid, valid[1:])):
+        issue("invalid_observations", "Invalid, duplicate or unordered downbeats were excluded or reordered; review detection.")
+    times = sorted(set(valid))
+    if len(times) < MIN_REGION_DOWNBEATS:
+        issue("insufficient_downbeats", "Too few model downbeats to evaluate alignment.")
+        if any(item["code"] not in ("insufficient_downbeats", "invalid_observations") for item in issues):
+            result["status"] = "review_required"
+        return result
+    # Inspect raw intervals rather than fitted intervals, which can hide double-time.
+    intervals = [right - left for left, right in zip(times, times[1:])]
+    observed_bar_s = median(intervals)
+    ratio = bar_s / observed_bar_s
+    result.update(observed_bar_s=round(observed_bar_s, 6), bar_duration_ratio=round(ratio, 6))
+    if abs(ratio / 2 - 1) <= SERATO_TEMPO_TOLERANCE:
+        issue("possible_half_time_grid", "Chosen bars are about twice the observed duration; possible half-time BPM.")
+    elif abs(ratio / 0.5 - 1) <= SERATO_TEMPO_TOLERANCE:
+        issue("possible_double_time_grid", "Chosen bars are about half the observed duration; possible double-time BPM.")
+    elif abs(ratio - 1) > SERATO_TEMPO_TOLERANCE:
+        issue("tempo_disagreement", "Chosen ruler and median detected downbeat interval disagree by more than 1.5%.")
+
+    residuals = [((time - origin + bar_s / 2) % bar_s) - bar_s / 2 for time in times]
+    absolute = sorted(abs(value) for value in residuals)
+    result["p95_phase_error_s"] = round(absolute[math.ceil(0.95 * len(absolute)) - 1], 6)
+    result["aligned_fraction"] = round(sum(not exceeds(value) for value in absolute) / len(times), 4)
+    for index, name in enumerate(("beginning", "middle", "end")):
+        selected = [(time, residual) for time, residual in zip(times, residuals)
+                    if index * duration_s / 3 <= time
+                    and (time < (index + 1) * duration_s / 3 or index == 2)]
+        region = {"name": name, "count": len(selected), "status": "unverified"}
+        if len(selected) >= MIN_REGION_DOWNBEATS:
+            phase = median(residual for _, residual in selected)
+            p95 = sorted(abs(residual) for _, residual in selected)[math.ceil(0.95 * len(selected)) - 1]
+            region.update(median_phase_s=round(phase, 6), p95_phase_error_s=round(p95, 6),
+                          status="review_required" if exceeds(p95) else "aligned")
+        else:
+            issue("incomplete_coverage", f"Too few downbeats in the {name} third; whole-track fit is unverified.")
+        result["regions"].append(region)
+    if exceeds(absolute[math.ceil(0.95 * len(absolute)) - 1]):
+        issue("phase_disagreement", "Detected downbeats depart from the chosen bar phase by more than a quarter beat.")
+
+    # Only interpret accumulated drift when downbeat tempo is close to this ruler.
+    if abs(ratio - 1) <= SERATO_TEMPO_TOLERANCE:
+        accumulated, bar_index, reliable = [times[0] - origin - round((times[0] - origin) / bar_s) * bar_s], 0, True
+        for left, right in zip(times, times[1:]):
+            step = round((right - left) / bar_s)
+            if step < 1 or abs((right - left) / bar_s - step) > 0.2:
+                reliable = False
+                break
+            bar_index += step
+            accumulated.append(accumulated[0] + right - times[0] - bar_index * bar_s)
+        if reliable:
+            count = min(max(MIN_REGION_DOWNBEATS, len(times) // 10), len(times) // 2)
+            drift = median(accumulated[-count:]) - median(accumulated[:count])
+            result["accumulated_drift_s"] = round(drift, 6)
+            result["accumulated_drift_beats"] = round(drift / beat_s, 4)
+            if exceeds(abs(drift)):
+                issue("accumulated_drift", "Detected bar timing drifts more than a quarter beat from beginning to end.")
+        else:
+            issue("irregular_intervals", "Irregular detected intervals prevent a trustworthy accumulated-drift estimate.")
+    result["status"] = ("review_required" if issues else "aligned")
+    if issues and all(item["code"] == "incomplete_coverage" for item in issues):
+        result["status"] = "unverified"
+    return result

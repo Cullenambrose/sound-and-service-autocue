@@ -235,6 +235,7 @@ def summarize(plan, label, detail=""):
         "label": label, "status": "ok", "detail": detail, "map_type": plan.get("map_type"),
         "t1": grid.get("t1"), "bar_s": grid.get("bar_s"),
         "offset_ms": grid.get("offset_ms", 0),
+        "grid_diagnostics": copy.deepcopy(plan.get("grid_diagnostics")),
         "flags": plan.get("flags", []),
         "cues": {slot: {key: cue.get(key) for key in ("name", "bar", "time_s", "unsnapped", "confidence", "reason", "meaning")}
                  for slot, cue in plan.get("cues", {}).items()},

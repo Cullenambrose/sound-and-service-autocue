@@ -24,6 +24,55 @@ loop or an already relocated START. Window evidence statuses are `candidate`,
 of real speech/singing or a seamless musical loop. Rebuilding maps or moving
 reviewed positions invalidates this evidence until reanalysis.
 
+## Grid diagnostics
+
+New plans add `grid_diagnostics` (`version: 1`) without changing existing schema
+or planner versions. The same object reaches library review records, frozen
+variant summaries, and the read-only audit. It never changes grid/cue positions.
+
+- `status`: `aligned`, `review_required`, or `unverified`.
+  `aligned` requires sufficient coverage and no detected issues.
+- `scope`: constant 4/4 ruler only. This does not certify meter, musical
+  downbeats, chorus boundaries, clean mix windows or correct phrase starts.
+- `tolerance_beats: 0.25` and `tolerance_s`: quarter of a beat at the chosen
+  tempo, not a fixed millisecond allowance.
+- `regions`: beginning/middle/end thirds, each requiring at least four model
+  downbeats; includes count, status and, when available, signed median phase
+  and absolute 95th-percentile phase error in seconds.
+- `issues`: objects with `code` and readable `message`. Codes cover phase/
+  tempo disagreement, possible half/double-time, accumulated drift, invalid/
+  irregular observations, insufficient/incomplete coverage, unsupported Serato
+  grids and cumulative multi-marker deviation.
+- Summary metrics include observation counts, median observed-to-grid bar
+  ratio, `aligned_fraction` and `p95_phase_error_s`.
+  `accumulated_drift_s`/`accumulated_drift_beats` are present only when detected
+  intervals support a reliable integer-bar accumulation. Missing bars are
+  allowed; irregular intervals suppress that estimate rather than inventing it.
+- `serato_marker_max_deviation_s`, when available, measures marker deviation
+  from the first constant interval, including final-marker tempo extrapolation
+  through the audio duration. Small permitted marker-tempo variation can still
+  accumulate an unacceptable timing error.
+
+Only incomplete coverage yields `unverified`; a supported finding of
+disagreement yields `review_required` even if other evidence is missing.
+No/too-few observations also yield `unverified` unless an independently
+unsupported imported grid was detected. Missing diagnostics on an older plan
+mean **unavailable**, not aligned. Reanalysis is necessary; version strings
+alone do not establish which checks ran.
+
+Diagnostics are advisory, not a new export prohibition or automatic ruler
+repair. Supported imported Serato grids remain authoritative. Unsupported
+variable-tempo grids still use the existing detected-grid fallback, now
+explicitly flagged. Model observations can be wrong and may also have been
+used to fit a detected grid; their agreement is not independent human truth.
+Malformed/unreadable import details remain in pipeline notes, not structured
+marker diagnostics. Current fitting still requires enough detected downbeats
+before Serato reconciliation; this change does not rescue a failed beat fit.
+
+The audit's `counts` and exit code still concern arithmetic/versioning.
+`grid_checks` separately counts `aligned`, `review_required`, `unverified` and
+`unavailable`; an arithmetic-only success is not a grid or listening approval.
+
 ## File naming
 
 Suggested: `<artist> - <title>.analysis.json` next to the audio, or a content-addressed store keyed by `file_hash` / `audio_sha256`. Paths to audio are optional and machine-local; consumers should prefer `audio_sha256` + library index.

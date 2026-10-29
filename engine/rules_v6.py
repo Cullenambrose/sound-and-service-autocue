@@ -10,6 +10,7 @@ from synced_lyrics import align_synced_lyrics
 from timing import bar_to_time, time_to_bar
 import cue_maps as cue_map_settings
 import pop_cues
+import serato_grid
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 SWITCHES = (
@@ -769,6 +770,10 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         },
     }
     result = cue_map_settings.apply_cue_map(result, cue_maps, candidate_events, first_bar)
+    result["grid_diagnostics"] = serato_grid.diagnose(
+        grid, analysis.get("downbeats"), duration_s, analysis.get("serato_markers"))
+    for issue in result["grid_diagnostics"]["issues"]:
+        result["flags"].append("Grid review: " + issue["message"])
     if pop_layout:
         result["mix_window_evidence"] = pop_cues.intro_loop_evidence(
             grid, first_bar, start, duration_s, stems, hop_s, cue_maps["mix_lengths"]["intro"],

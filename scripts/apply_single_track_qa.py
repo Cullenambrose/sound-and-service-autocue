@@ -144,6 +144,8 @@ def run(args):
     bars = {pad["index"]: pad["bar"] for pad in pads}
     grid = plan.get("grid", {})
     print(f"\nBeatGrid ruler: source={grid.get('source')} t1={grid.get('t1')} bpm={grid.get('bpm')}")
+    diagnostics = plan.get("grid_diagnostics")
+    print(f"Grid check: {diagnostics['status'] if diagnostics else 'unavailable; reanalyze for drift diagnostics'}")
     if grid.get("source") != "serato_beatgrid":
         print("  WARNING: no usable Serato BeatGrid tag; bars use the detected grid instead.")
     onset = plan.get("start_onset") or {}
