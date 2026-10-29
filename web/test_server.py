@@ -276,8 +276,13 @@ class WebServerTests(unittest.TestCase):
         file_hash, _ = server.copy_import(source, source.name)
         evidence = {"status": "analyzed", "last_vocal_end_s": 90.1, "ignored_words": 2,
                     "threshold": 0.003, "coverage_s": 100.0}
-        plan = {"cues": {"H": {"bar": None, "reason": "insufficient instrumental outro",
+        mix_evidence = {"intro": {"status": "unavailable"}, "intro_loop_fallback": {
+            "status": "needs_serato_fixture", "applied": False, "proposed_start_bar": 0,
+            "loop": {"start_bar": 40, "end_bar": 48, "bars": 8, "beats": 32}}}
+        plan = {"cues": {"B": {"bar": 8, "time_s": 15.094, "unsnapped": True},
+                         "H": {"bar": None, "reason": "insufficient instrumental outro",
                                "flags": ["configured window unavailable"]}},
+                "mix_window_evidence": mix_evidence,
                 "outro_vocal_evidence": evidence, "no_vocal_free_outro": True}
         with server.connect() as db:
             db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
@@ -285,6 +290,9 @@ class WebServerTests(unittest.TestCase):
         with urllib.request.urlopen(base + "/api/library") as response:
             record = json.load(response)["tracks"][0]
         self.assertEqual(record["outro_vocal_evidence"], evidence)
+        self.assertEqual(record["mix_window_evidence"], mix_evidence)
+        self.assertEqual(record["cues"]["B"]["time_s"], 15.094)
+        self.assertTrue(record["cues"]["B"]["unsnapped"])
         self.assertTrue(record["no_vocal_free_outro"])
         self.assertEqual(record["cues"]["H"]["reason"], "insufficient instrumental outro")
         self.assertEqual(record["cues"]["H"]["flags"], ["configured window unavailable"])
@@ -632,6 +640,8 @@ class WebServerTests(unittest.TestCase):
             "cues": {slot: {} for slot in "ABCDEFGH"},
         }, None, {"start": {"bar": 8, "time_s": 15.094, "unsnapped": True},
                   "first_chorus_end": {"bar": 32}, "out": {"bar": 80}}, 0)
+        plan["mix_window_evidence"] = {"intro": {"status": "candidate"}}
+        plan["cues"]["A"]["mix_window_evidence"] = {"status": "candidate"}
         with server.connect() as db:
             db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
@@ -646,6 +656,8 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(saved["cues"]["D"]["name"], "GO 12 bars (48 beats) > EXIT")
         self.assertEqual(saved["cues"]["D"]["bar"], 24)
         self.assertEqual(saved["answer_key"]["cues"]["B"]["time_s"], 15.094)
+        self.assertNotIn("mix_window_evidence", saved)
+        self.assertEqual(saved["cues"]["A"]["mix_window_evidence"]["status"], "unverified")
         events = json.loads((server.DATA / "corrections.json").read_text())
         self.assertEqual(events[0]["from_time"], 15.094)
         self.assertEqual(events[0]["to_time"], 15.094)

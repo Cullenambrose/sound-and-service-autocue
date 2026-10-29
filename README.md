@@ -10,6 +10,11 @@ can count 32 **bars** where newer labels mean 32 **beats**. See
 [PM BOT READ ME](docs/PM%20BOT%20READ%20ME.md) for measured evidence, remaining
 algorithm gaps and the read-only crate audit command.
 
+Whole-window vocal/drum checks now flag unsafe/unverified intros and propose
+outro-derived intro loops. Genuine **Serato 5 Cue Loop export is blocked pending
+verified synthetic tag fixtures**, so the proposed START/Intro fallback is not
+silently applied. See [the Cue Loop QA guide](docs/SERATO-CUE-LOOP-QA.md).
+
 Library-prep engine that analyzes DJ tracks and suggests Serato cue points (A–H layout) plus two clean 4-bar loop ideas. It is a **prep app**, not a booth player: run it on the library before a gig, review the picks, then (later) write approved cues into Serato.
 
 A native Mac app (Xcode) is planned once the logic is proven. Per-song analysis JSON (see `docs/ANALYSIS-FORMAT.md`) is designed so **Booth Buddy** can read the same results later without coupling the two codebases.

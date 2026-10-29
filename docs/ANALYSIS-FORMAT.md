@@ -12,6 +12,18 @@ Stored plans and already-written tags are not silently converted. Human review
 answers retain `time_s` and `unsnapped` so vocal pickups are not scored against
 their structural bar. See [the phrasing audit](./PM%20BOT%20READ%20ME.md).
 
+New Pop/Vocal plans also carry `mix_window_evidence`: `intro.windows` contains
+whole-window vocal/drum assessments; `intro.selected` is a candidate, not an
+automatically applied cue or a musical seam guarantee.
+`intro_loop_fallback` records `target_slot`, `start_slot`, `proposed_start_bar`,
+`applied: false`, and an optional later `loop` (start/end bars, seconds, bars/beats).
+`needs_serato_fixture` means the loop candidate exists but genuine Serato 5
+Cue Loop serialization is unverified. It must not be interpreted as a saved
+loop or an already relocated START. Window evidence statuses are `candidate`,
+`vocal_overlap`, `no_drums` or `unverified`; a coarse stem cannot certify absence
+of real speech/singing or a seamless musical loop. Rebuilding maps or moving
+reviewed positions invalidates this evidence until reanalysis.
+
 ## File naming
 
 Suggested: `<artist> - <title>.analysis.json` next to the audio, or a content-addressed store keyed by `file_hash` / `audio_sha256`. Paths to audio are optional and machine-local; consumers should prefer `audio_sha256` + library index.

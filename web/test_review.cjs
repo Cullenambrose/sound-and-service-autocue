@@ -34,6 +34,17 @@ test("song-end fallback is not presented as an instrumental outro", () => {
   assert.doesNotMatch(message, /No later stem activity/);
 });
 
+test("outro intro-loop proposals are explicitly unapplied and unsupported for export", () => {
+  const message = text({mix_window_evidence: {
+    intro: {status: "unavailable"},
+    intro_loop_fallback: {status: "needs_serato_fixture", proposed_start_bar: 0,
+      loop: {bars: 8, beats: 32, start_bar: 64, end_bar: 72}},
+  }});
+  assert.match(message, /8 bars \(32 beats\).*64–72/);
+  assert.match(message, /Proposed START: bar 0/);
+  assert.match(message, /export is not yet verified; nothing applied/);
+});
+
 const scores = vm.createContext({
   escapeHtml: text => String(text).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;"),

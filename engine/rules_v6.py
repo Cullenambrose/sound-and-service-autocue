@@ -381,10 +381,7 @@ def _outro_vocal_evidence(vocals, hop_s, duration_s, words):
         evidence["reason"] = "vocal stem coverage is incomplete"
         return evidence
     values = list(vocals[:math.ceil(duration_s / hop_s)])
-    ordered = sorted(values)
-    reference = max(ordered[int((len(ordered) - 1) * 0.95)], max(values) * 0.1)
-    # Scale down for quiet stems, but never raise the previous absolute audibility ceiling.
-    threshold = max(1e-5, min(0.04, reference * 0.15))
+    threshold = pop_cues.vocal_threshold(values)
     active = [index for index, value in enumerate(values) if value >= threshold]
     last_end = min(duration_s, (active[-1] + 1) * hop_s) if active else 0.0
     if active and active[-1] == len(values) - 1:
@@ -566,7 +563,8 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         elif refined != first_span["end_bar"]:
             exit_evidence.update(status="kept", reason="drop-off candidate would overlap a neighbouring chorus")
         exit_evidence["chorus_source"] = chorus_source
-    out_detection = pop_cues.detect_out(energy, fps, grid, start, duration_s, stem_vocals, hop_s)
+    out_detection = pop_cues.detect_out(energy, fps, grid, start, duration_s, stem_vocals, hop_s,
+                                       (stems or {}).get("drums"))
     flags = list(outro_vocal_flags)
     if not start_has_evidence:
         flags.append(start_reason)
@@ -588,6 +586,8 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         flags.append("outro inferred from sustained end-of-track energy/vocal fade; review recommended")
     if pop_layout and out_detection.get("kind") != "drum_outro":
         flags.append(f"OUT ({out_detection.get('kind')}): {out_detection.get('reason')}; review recommended")
+    if exit_evidence and exit_evidence["status"] == "unverified":
+        flags.append("Chorus EXIT unverified: " + exit_evidence["reason"])
 
     cues = {}
     intro = cue_map_settings.intro_candidate(start, first_bar, cue_maps["mix_lengths"]["intro"])
@@ -769,6 +769,22 @@ def build_plan(track_id, analysis, plan, duration_s, genre="", words=None, synce
         },
     }
     result = cue_map_settings.apply_cue_map(result, cue_maps, candidate_events, first_bar)
+    if pop_layout:
+        result["mix_window_evidence"] = pop_cues.intro_loop_evidence(
+            grid, first_bar, start, duration_s, stems, hop_s, cue_maps["mix_lengths"]["intro"],
+            out_detection.get("out_bar"), outro_start)
+        intro_evidence = result["mix_window_evidence"]["intro"]
+        for cue in result["cues"].values():
+            if cue.get("meaning") != "intro_start" or cue.get("bar") is None:
+                continue
+            checked = next((window for window in intro_evidence["windows"]
+                            if window["start_bar"] == cue["bar"]), None)
+            cue["mix_window_evidence"] = checked or {"status": "unverified", "reason": "window not assessed"}
+            if cue["mix_window_evidence"]["status"] != "candidate":
+                warning = "Intro is structural only: " + cue["mix_window_evidence"]["reason"]
+                cue["flags"].append(warning)
+                cue["confidence"] = min(cue["confidence"], 0.35)
+                result["flags"].append(warning)
     if cue_maps["mode"] != "AUTO":
         result["flags"].append(f"cue map manually selected: {map_type}")
     return result

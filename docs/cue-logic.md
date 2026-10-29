@@ -1,5 +1,16 @@
 # Cue logic
 
+## Outro-derived intro Cue Loop proposal
+
+If no clean intro fits, the desired fallback is a later outro-derived Serato 5
+Cue Loop on A, with START on B at the first playable downbeat. Whole-window stem
+checks and a review proposal are implemented, but no fallback positions or
+loop tags are applied until the new Serato linkage format is verified. See
+[the synthetic-only verification guide](./SERATO-CUE-LOOP-QA.md).
+One active vocal envelope frame disqualifies a candidate; drum activity is
+required in each bar, and incomplete evidence is unverified. This does not
+distinguish real speech from singing or certify loop seams.
+
 ## v6.2 phrasing safety update (October 28, 2026)
 
 The current Pop/Vocal defaults use explicit-unit labels such as

@@ -297,6 +297,8 @@ def validate_automatic_plan(plan):
 
 
 def apply_cue_map(plan, settings, candidates, first_bar):
+    if "mix_window_evidence" in plan:
+        invalidate_mix_window_evidence(plan)
     settings = normalize_cue_maps(settings)
     map_type = plan["map_type"]
     slots = settings["maps"][map_type]
@@ -440,6 +442,17 @@ def apply_cue_map(plan, settings, candidates, first_bar):
         },
     }
     return validate_automatic_plan(plan)
+
+
+def invalidate_mix_window_evidence(plan):
+    """Positions changed without stem data: previous window checks no longer describe these cues."""
+    plan.pop("mix_window_evidence", None)
+    for cue in plan.get("cues", {}).values():
+        if "mix_window_evidence" in cue:
+            cue["mix_window_evidence"] = {"status": "unverified", "reason": "cue positions changed; reanalysis required"}
+    warning = "Mix-window evidence invalidated by cue changes; reanalyze to assess the new windows."
+    if warning not in plan.setdefault("flags", []):
+        plan["flags"].append(warning)
 
 
 def refresh_dynamic_labels(plan):

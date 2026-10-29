@@ -1,5 +1,52 @@
 # PM BOT READ ME
 
+## October 28 follow-up: whole-window evidence and outro-derived intro Cue Loops
+
+The user clarified the no-clean-intro fallback: START on the first playable
+BeatGrid downbeat, with a genuine Serato 5 **Cue Loop** on the preceding pad,
+using a later outro passage. Pad order is intentionally not time order.
+
+Implemented groundwork:
+
+- Shared complete-coverage envelope validation, a capped adaptive vocal
+  threshold, and whole-window activity checks. Even one active coarse vocal frame
+  prevents a window from being marked a candidate; no averaging away brief returns.
+- Intro assessments prefer configured 8/4/2/1-bar leads. Candidates need no
+  detected vocal activity and drum activity in every bar. Missing, truncated,
+  negative/nonfinite or invalid stems are unverified, never assumed clean.
+- If no supported intro fits, search an outro region for a same-track 8/4/2/1-bar
+  loop proposal. Save the proposed first-downbeat START and intended A/B slots.
+  Prefix activity counts avoid rescanning the entire track for every window.
+- A contaminated/unverified structural Intro is flagged and confidence-capped.
+  Evidence is invalidated on map rebuilds or manual position edits.
+- The new OUT path no longer calls missing stems a drum outro and no longer
+  dilutes a tiny late vocal return into an eight-bar average. Missing drum
+  evidence is explicitly `unverified_end`.
+- Chorus candidates without a clear 4-bar energy drop are now described as
+  unverified, not confirmed.
+- Found and fixed another unsnapped-preview gap: the library API had omitted
+  `time_s`/`unsnapped`, so the prior browser helper could not use them. API tests
+  now assert both reach the browser.
+- Added a synthetic-only fixture generator and read-only GEOB snapshot utility;
+  exercised actual MP3 generation/capture in a temporary directory, verifying
+  unchanged MP3 bytes and audio identity.
+
+**Not applied / blocked:** Serato officially documents Cue Loop behavior, but the
+new persisted cue-to-loop linkage is not established by the public legacy tag
+format. No reserved-byte guesses or unrelated LOOP entries were written.
+`mix_window_evidence.intro_loop_fallback` explicitly records `applied: false`
+and `needs_serato_fixture` when a candidate exists. Current START/A positions
+are unchanged until the genuine Cue Loop writer is verified. This is not a
+completed fallback implementation or real-track musical-accuracy validation.
+
+The review UI exposes the proposal and blocker. Detailed synthetic capture steps
+and official sources: [SERATO-CUE-LOOP-QA](./SERATO-CUE-LOOP-QA.md).
+Chronological cue sorting must be disabled to preserve A-before-B pad order.
+
+Validation: 283 engine tests, 41 web tests, 15 browser tests passed; JavaScript
+syntax and diff checks passed. Synthetic fixture generation/capture kept MP3
+bytes unchanged. No real library audio or Track #1 was read/written.
+
 ## October 28, 2026: phrasing failure audit and v6.2 arithmetic update
 
 **Release status: NOT performance-ready.** Crate listening reports incorrect

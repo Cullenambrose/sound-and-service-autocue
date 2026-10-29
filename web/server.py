@@ -228,6 +228,7 @@ def track_record(row):
         "map_choice": plan.get("map_choice"),
         "gemini": plan.get("gemini"),
         "outro_vocal_evidence": plan.get("outro_vocal_evidence"),
+        "mix_window_evidence": plan.get("mix_window_evidence"),
         "no_vocal_free_outro": plan.get("no_vocal_free_outro", False),
         "genre": plan.get("genre", ""),
         "confidence": _mean_confidence(cues),
@@ -239,6 +240,9 @@ def track_record(row):
                 "name": _cue_name(cues.get(slot, {}).get("name"), slot, names,
                                   preserve_custom=bool(plan.get("cue_map"))),
                 "bar": cues.get(slot, {}).get("bar"),
+                "time_s": cues.get(slot, {}).get("time_s"),
+                "unsnapped": bool(cues.get(slot, {}).get("unsnapped")),
+                "mix_window_evidence": cues.get(slot, {}).get("mix_window_evidence"),
                 "confidence": cues.get(slot, {}).get("confidence"),
                 "reason": cues.get(slot, {}).get("reason", ""),
                 "flags": cues.get(slot, {}).get("flags", []),
@@ -1864,6 +1868,7 @@ class Handler(BaseHTTPRequestHandler):
                     previous_answer = experiments.review_answer(plan)
                 plan["variants"] = experiments.scoring_variants(plan, allow_current=not row["reviewed"])
                 changed = False
+                positions_changed = False
                 events = []
                 t1, bar_s = grid.get("t1"), grid.get("bar_s")
                 for slot, edit in body.get("cues", {}).items():
@@ -1879,6 +1884,7 @@ class Handler(BaseHTTPRequestHandler):
                     if new_bar is not None and (not math.isfinite(new_bar) or new_bar < earliest):
                         raise ValueError(f"Cue {slot} bar must be a finite number on or after bar {earliest}.")
                     cue_changed = cue.get("name") != new_name or cue.get("bar") != new_bar
+                    positions_changed |= old_bar != new_bar
                     changed |= cue_changed
                     keep_unsnapped = bool(cue.get("unsnapped")) and old_bar == new_bar and cue.get("time_s") is not None
                     if not keep_unsnapped:
@@ -1906,6 +1912,8 @@ class Handler(BaseHTTPRequestHandler):
                         "bar_s": bar_s, "t1": t1, "offset_ms": grid.get("offset_ms", 0),
                         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     })
+                if positions_changed and plan.get("mix_window_evidence"):
+                    _cue_maps_module().invalidate_mix_window_evidence(plan)
                 _cue_maps_module().refresh_dynamic_labels(plan)
                 _cue_maps_module().validate_phrasing(plan)
                 for event in events:

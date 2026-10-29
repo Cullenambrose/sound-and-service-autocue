@@ -83,7 +83,8 @@ def synthetic_track(pos0, bpm, onset_s, chorus1, chorus2, vocal_end_bar, end_bar
 def plan_for(track):
     return build_plan("synthetic", {"grid": track["grid"], "segments": []}, {"cues": {}}, track["duration"],
                       genre="pop", words=track["words"], synced_lyrics=track["lrc"],
-                      stems={"vocals": track["vocals"]}, hop_s=track["hop"], energy=track["energy"],
+                      stems={"vocals": track["vocals"], "drums": [0.3] * len(track["vocals"])},
+                      hop_s=track["hop"], energy=track["energy"],
                       fps=track["fps"], vocal_onset_env=track["fine"], vocal_onset_hop_s=track["fine_hop"])
 
 
@@ -177,7 +178,7 @@ class V61AlgorithmTests(unittest.TestCase):
     def test_fade_out_places_out_on_last_full_volume_phrase(self):
         track = synthetic_track(0.0, 120.0, 16.0, (24, 32), (48, 56), 70, 88, 0.0, fade_from_bar=78)
         result = pop_cues.detect_out(track["energy"], track["fps"], track["grid"], 8, track["duration"],
-                                     track["vocals"], track["hop"])
+                                     track["vocals"], track["hop"], drums=[0.3] * len(track["vocals"]))
         self.assertEqual(result["kind"], "fade_out")
         self.assertEqual((result["out_bar"], result["go_bar"]), (76, 68))
         self.assertGreaterEqual(result["drop_bar"], 78)
@@ -185,7 +186,7 @@ class V61AlgorithmTests(unittest.TestCase):
     def test_drum_outro_keeps_final_bar(self):
         track = synthetic_track(0.0, 120.0, 16.0, (24, 32), (48, 56), 70, 88, 0.0)
         result = pop_cues.detect_out(track["energy"], track["fps"], track["grid"], 8, track["duration"],
-                                     track["vocals"], track["hop"])
+                                     track["vocals"], track["hop"], drums=[0.3] * len(track["vocals"]))
         self.assertEqual((result["kind"], result["out_bar"], result["go_bar"]), ("drum_outro", 88, 80))
 
 
