@@ -73,13 +73,18 @@ def read_beatgrid(path, on_diagnostic=None):
             report("Could not read Serato beatgrid tag; using detected grid.")
             return None
         if not values:
+            report(f"Serato beatgrid key missing or empty ({MP4_BEATGRID_KEY}); using detected grid.")
             return None
         try:
-            markers = parse_beatgrid(vorbis_decode(bytes(values[0]).decode("ascii"), "Serato BeatGrid"))
+            payload = vorbis_decode(values[0], "Serato BeatGrid")
         except (ValueError, UnicodeError):
-            markers = None
+            report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}): invalid base64 text or envelope header; "
+                   "using detected grid.")
+            return None
+        markers = parse_beatgrid(payload)
         if markers is None:
-            report("Malformed or unsupported Serato beatgrid tag; using detected grid.")
+            report(f"Serato beatgrid parse failed ({MP4_BEATGRID_KEY}): malformed or unsupported binary BeatGrid; "
+                   "using detected grid.")
         return markers
     try:
         tags = ID3(str(path))

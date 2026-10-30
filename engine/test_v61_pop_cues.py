@@ -130,6 +130,19 @@ class V61GroundTruthTests(unittest.TestCase):
         self.assertEqual(plan["start_anchor_bar"], 8)
         self.assertEqual(plan["out_detection"]["kind"], "drum_outro")
 
+    def test_refined_long_pickup_keeps_word_phrase_anchor_and_exact_onset(self):
+        for early_bars in (0.6, 0.9):
+            with self.subTest(early_bars=early_bars):
+                track = synthetic_track(0.0, 200.0, 9.65, (24, 32), (48, 56), 84, 92, 0.6)
+                onset = round(bar_to_time(8, track["grid"]) - early_bars * track["grid"]["bar_s"], 3)
+                track["fine"] = [0.0] * round(onset * 1000) + [0.3] * 4000
+                plan = plan_for(track)
+                self.assertEqual(plan["cues"]["B"]["bar"], 8)
+                self.assertEqual(plan["start_anchor_bar"], 8)
+                self.assertEqual(plan["cues"]["B"]["time_s"], onset)
+                self.assertTrue(plan["cues"]["B"]["unsnapped"])
+                self.assertEqual(serato_writer.plan_pads(plan)[1]["position_ms"], round(onset * 1000))
+
     def test_pop_layout_can_be_switched_off(self):
         track = synthetic_track(0.0167, 80.0039, 23.094, (24, 32), (48, 56), 84, 92, 1.0)
         plan = build_plan("synthetic", {"grid": track["grid"], "segments": []}, {"cues": {}},

@@ -53,9 +53,13 @@ def marker2_entries(data):
 
 
 def vorbis_decode(text, field="Serato Markers2"):
+    if isinstance(text, bytes):
+        text = text.decode("ascii")
+    if not isinstance(text, str):
+        raise ValueError("Existing " + field + " tag must contain base64 text.")
     raw = "".join(text.split()).encode("ascii")
     raw += b"=" * (-len(raw) % 4)
-    decoded = base64.b64decode(raw)
+    decoded = base64.b64decode(raw, validate=True)
     header = ENVELOPE_PREFIX + field.encode("ascii") + b"\x00"
     if not decoded.startswith(header):
         raise ValueError("Existing " + field + " tag has an unsupported header.")

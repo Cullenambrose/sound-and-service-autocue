@@ -105,6 +105,29 @@ class PhrasingTests(unittest.TestCase):
         self.assertTrue(any("structural anchor" in warning for warning in report["warnings"]))
         self.assertEqual(serato_writer.plan_pads(plan)[1]["position_ms"], 15094)
 
+    def test_unsnapped_start_accepts_long_pickups_without_moving_any_cue(self):
+        for fraction in (-1.0, -0.9, -0.6, 0.0, 0.25):
+            with self.subTest(fraction=fraction):
+                plan = mapped_plan()
+                plan["cues"]["B"].update(unsnapped=True, start_anchor_bar=8,
+                                         time_s=round(16.017 + fraction * 2, 3))
+                before = copy.deepcopy(plan)
+                cue_maps.validate_automatic_plan(plan)
+                self.assertEqual(plan, before)
+                self.assertEqual(serato_writer.plan_pads(plan)[1]["position_ms"],
+                                 round(plan["cues"]["B"]["time_s"] * 1000))
+
+    def test_pickup_window_is_asymmetric_and_other_pads_remain_strict(self):
+        for slot, unsnapped, delta in (("B", True, -2.002), ("B", True, 0.502),
+                                        ("B", True, 0.6), ("B", False, -1.2),
+                                        ("A", True, 0.002), ("D", True, -1.2)):
+            with self.subTest(slot=slot, unsnapped=unsnapped, delta=delta):
+                plan = mapped_plan()
+                plan["cues"][slot]["unsnapped"] = unsnapped
+                plan["cues"][slot]["time_s"] += delta
+                with self.assertRaisesRegex(ValueError, slot + " timestamp disagrees"):
+                    cue_maps.validate_automatic_plan(plan)
+
     def test_database_audit_reports_legacy_32_bar_go_without_modifying_database(self):
         with tempfile.TemporaryDirectory() as home:
             path = Path(home) / "library.sqlite3"

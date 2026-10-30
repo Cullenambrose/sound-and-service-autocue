@@ -52,6 +52,14 @@ preferences are independent. Exact known v6.1 label templates migrate when setti
 are normalized; saved cue plans and existing Serato tags require reanalysis/review.
 Unmapped legacy `GO -N` countdowns are blocked from export rather than silently moved.
 
+Automatic validation accepts exact unsnapped START pickups from one bar before
+their structural anchor through a quarter bar after it; other pads retain their
+strict grid-timestamp tolerance. This validation window does not move cues.
+M4A BeatGrid fallback messages distinguish missing atoms, decoding errors and
+binary parsing errors. For the four-track **read-only** MBP regression command
+(copies only, optional full-Music SHA-256 verification), see
+[the October 30 handoff](docs/PM%20BOT%20READ%20ME.md#mbp-read-only-acceptance-command).
+
 **Single-track QA write (DJ MacBook Pro only, Serato closed):**
 
 ```bash

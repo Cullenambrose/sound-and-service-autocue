@@ -1,9 +1,14 @@
 import copy
+import base64
 import json
 import math
+import struct
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from serato_grid import diagnose, reconcile
+from serato_grid import diagnose, reconcile, read_beatgrid
 
 
 class GridDiagnosticsTests(unittest.TestCase):
@@ -129,3 +134,63 @@ class GridDiagnosticsTests(unittest.TestCase):
                                (self.grid, 0), (self.grid, True), (self.grid, math.nan)):
             with self.subTest(grid=grid, duration=duration), self.assertRaises(ValueError):
                 diagnose(grid, self.times, duration)
+
+
+class M4ABeatGridTests(unittest.TestCase):
+    def test_real_freeform_atom_wrapping_padding_and_detected_octaves_preserve_serato_ruler(self):
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import ENVELOPE_PREFIX, MP4_BEATGRID_KEY
+        from web.fixtures import m4a
+        from serato_grid import parse_beatgrid
+
+        binary = b"\x01\x00" + struct.pack(">Iff", 1, 0.045958, 84.0002) + b"\x00"
+        encoded = base64.b64encode(ENVELOPE_PREFIX + b"Serato BeatGrid\x00" + binary)
+        for text in (encoded, encoded.rstrip(b"="),
+                     b"\r\n".join(encoded[index:index + 32] for index in range(0, len(encoded), 32))):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "grid.m4a"
+                path.write_bytes(m4a())
+                audio = MP4(path)
+                audio.add_tags()
+                audio[MP4_BEATGRID_KEY] = [MP4FreeForm(text)]
+                audio.save()
+                original = path.read_bytes()
+                messages = []
+                markers = read_beatgrid(path, messages.append)
+                self.assertEqual(markers, parse_beatgrid(binary))
+                self.assertEqual(messages, [])
+                for detected_bpm in (166.885, 168.0004, 42.0001):
+                    grid, _ = reconcile({"t1": 1.0, "bar_s": 240 / detected_bpm}, markers)
+                    self.assertEqual(grid["source"], "serato_beatgrid")
+                    self.assertAlmostEqual(grid["bpm"], 84.0002, delta=0.01)
+                    self.assertAlmostEqual(grid["t1"], 0.045958, places=6)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_text_values_and_explicit_missing_decode_and_parse_diagnostics(self):
+        from types import SimpleNamespace
+        from serato_tags import ENVELOPE_PREFIX, MP4_BEATGRID_KEY
+        binary = b"\x01\x00" + struct.pack(">Iff", 1, 0.5, 84.0) + b"\x00"
+        valid = base64.b64encode(ENVELOPE_PREFIX + b"Serato BeatGrid\x00" + binary).decode("ascii")
+        cases = [
+            ({MP4_BEATGRID_KEY: [valid]}, None),
+            ({}, "key missing"),
+            ({MP4_BEATGRID_KEY: []}, "key missing"),
+            ({MP4_BEATGRID_KEY: ["%%" + valid]}, "decode failed"),
+            ({MP4_BEATGRID_KEY: ["abcde"]}, "decode failed"),
+            ({MP4_BEATGRID_KEY: [base64.b64encode(b"wrong envelope")]}, "decode failed"),
+            ({MP4_BEATGRID_KEY: [b"\xff"]}, "decode failed"),
+            ({MP4_BEATGRID_KEY: [base64.b64encode(ENVELOPE_PREFIX + b"Serato BeatGrid\x00bad")]},
+             "parse failed"),
+        ]
+        for tags, failure in cases:
+            with self.subTest(failure=failure), patch("mutagen.mp4.MP4", return_value=SimpleNamespace(tags=tags)):
+                messages = []
+                markers = read_beatgrid("synthetic.m4a", messages.append)
+                if failure:
+                    self.assertIsNone(markers)
+                    self.assertEqual(len(messages), 1)
+                    self.assertIn(failure, messages[0])
+                    self.assertIn(MP4_BEATGRID_KEY, messages[0])
+                else:
+                    self.assertEqual(markers, [{"pos": 0.5, "bpm": 84.0}])
+                    self.assertEqual(messages, [])

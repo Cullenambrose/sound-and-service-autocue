@@ -1,5 +1,70 @@
 # PM BOT READ ME
 
+## October 30: M4A import diagnostics and long START pickup validation
+
+Scope is deliberately narrow: **no cue-placement rules, pad labels, or music
+tags changed**. The M4A importer now handles ASCII strings as well as
+`MP4FreeForm` bytes through the shared envelope decoder, with strict base64
+validation, optional padding and whitespace/newlines. Missing/empty canonical
+`----:com.serato.dj:beatgrid`, decode failure and binary parse failure have
+distinct fallback diagnostics. Envelope removal leaves the same binary payload
+as MP3 GEOB parsing. Tests confirm an imported 84 BPM ruler wins over 166.885,
+168 and 42 BPM detections without changing phase.
+
+The standard canonical atom/envelope already worked in the previous synthetic
+fixture. The real You Make My Dreams atom is **not available on this Air**, so
+its exact failure cause is not yet confirmed; no alternate atom keys or binary
+headers were guessed. Le Freak and Mambo No.5 are also absent. The user approved
+synthetic fixes with deferred MBP verification instead of supplying those files.
+
+Automatic-plan validation allows an unsnapped START from one bar before its
+existing structural downbeat through one quarter bar after it (plus the existing
+0.501 ms rounding allowance). Every other cue retains the strict timing
+tolerance. No time or structural anchor is moved to pass validation. Synthetic
+full-planner regressions confirm 0.6/0.9-bar energy pickups preserve their exact
+milliseconds and the aligned-word phrase anchor. Out-of-window STARTs and
+non-START pads carrying `unsnapped` still fail the automatic guard.
+
+### MBP read-only acceptance command
+
+Close Serato and other music/library writers to prevent unrelated changes during
+the before/after comparison. Run from this checkout on the MBP:
+
+```bash
+git pull origin v6
+PYTHONPATH=.:engine:web .venv/bin/python scripts/verify_crate_dry_run.py \
+  --verify-music-tree
+```
+
+This script finds exactly one of each named track in `~/Music/Master Music`,
+copies them to temporary storage outside Music, calls `analyze(..., gemini=False)`
+with the normal cache **outside Music**, and never invokes a tag writer. Set
+`--cache-dir` if the dry run used a different cache. Cached lyric/model evidence
+is reused where available; absent analyzers/evidence are explicitly reported.
+No artist/title is sent for a fresh lyric lookup.
+
+It dumps every M4A tag key, imported marker positions/BPM, selected ruler, first
+WhisperX cached word, refined onset, START anchor/downbeat/delta, full grid
+diagnostics and eight-pad time/ms/bar tables. Its exit status fails for:
+
+- Mystic START not 23221 ms, EXIT not bar 40, or OUT not bar 81.
+- Mambo START not 22743 ms, EXIT not bar 30, or OUT not bar 80.
+- Dreams not using the Serato ruler within 0.01 BPM of 84.
+- Analysis failure or missing START/EXIT/OUT, including Le Freak.
+- SHA-256 differences, added or removed files in the monitored Music tree.
+
+`--verify-music-tree` hashes all regular files beneath Music before and after,
+including unrelated files, and can take time on a large library. Without that
+flag only the four originals are monitored. Hashing does not follow directory
+symlinks. Cache/temp locations inside Music are refused. SHA verification also
+runs when analysis fails. The MBP output is still needed before asserting
+real-file fixes or baseline-identical results; synthetic tests are not that proof.
+
+Air validation: `pytest engine web` passed **361 tests plus 232 subtests**;
+all **16 Node tests** passed. SHA-256 before/after matched for all **99 files**
+currently beneath this Air's Music folder, with no additions/removals.
+No real-track analysis or tag writes were performed in this follow-up.
+
 ## Latest follow-up: grid diagnostics and portable export regression
 
 **Still not performance-ready.** This is additional pre-MBP hardening, not a

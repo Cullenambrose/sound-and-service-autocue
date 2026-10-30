@@ -269,11 +269,12 @@ def validate_automatic_plan(plan):
         if expected_time < -1e-6:
             errors.append(slot + " precedes the audio")
         time = cue.get("time_s")
-        tolerance = 0.000501
+        minimum_delta, maximum_delta = -0.000501, 0.000501
         if cue.get("unsnapped") and spec["meaning"] == "start":
-            tolerance = float(plan["grid"]["bar_s"]) / 2 + 0.000501
+            bar_s = float(plan["grid"]["bar_s"])
+            minimum_delta, maximum_delta = -bar_s - 0.000501, bar_s / 4 + 0.000501
         if (not isinstance(time, (int, float)) or not math.isfinite(time)
-                or abs(time - expected_time) > tolerance):
+                or not minimum_delta <= time - expected_time <= maximum_delta):
             errors.append(slot + " timestamp disagrees with its grid position")
         meaning = MEANINGS[spec["meaning"]]
         anchor = end if spec.get("end_fallback") else events.get(meaning["source"], {}).get("bar")

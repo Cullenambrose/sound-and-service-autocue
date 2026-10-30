@@ -122,7 +122,7 @@ class SeratoGridTests(unittest.TestCase):
             audio.save()
             messages = []
             self.assertIsNone(serato_grid.read_beatgrid(path, messages.append))
-            self.assertTrue(any("Malformed" in message for message in messages))
+            self.assertTrue(any("decode failed" in message for message in messages))
 
     def test_unsupported_format_has_explicit_diagnostic(self):
         messages = []
