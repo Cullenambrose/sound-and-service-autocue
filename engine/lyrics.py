@@ -3,17 +3,31 @@ Gives: first sung word -> START (pickup rule), repeated hook line -> 1st/last ch
 import json, os, re, math
 from collections import Counter, defaultdict
 import numpy as np
-R = "/workspace/research/dj-auto-cues/proof/real"
+from synced_lyrics import align_synced_lyrics
+
+R = os.environ.get("AUTOCUE_ANALYSIS_ROOT", "/workspace/research/dj-auto-cues/proof/real")
 norm = lambda s: re.sub(r"[^a-z0-9ñáéíóú' ]", "", s.lower()).strip()
 
-def load(nn):
-    p = f"{R}/out/words/{nn}.json"
+def load(nn, root=None):
+    root = root or R
+    p = f"{root}/out/words/{nn}.json"
     if not os.path.exists(p): return None
-    w = json.load(open(p)); lr = f"{R}/out/lrclib/{nn}.json"
+    w = json.load(open(p)); lr = f"{root}/out/lrclib/{nn}.json"
     w["lrclib"] = (json.load(open(lr)) or {}).get("plainLyrics") if os.path.exists(lr) else None
-    st = f"{R}/out/allin1/{nn}.stems_env.npz"
+    st = f"{root}/out/allin1/{nn}.stems_env.npz"
     w["stems"] = dict(np.load(st)) if os.path.exists(st) else None
     return w
+
+def synced_chorus_alignment(nn, grid, root=None):
+    root = root or R
+    word_path = f"{root}/out/words/{nn}.json"
+    lyric_path = f"{root}/out/lrclib_synced/{nn}.json"
+    if not os.path.exists(word_path) or not os.path.exists(lyric_path):
+        return {"status": "rejected", "reason": "cached word timings or synced lyrics are unavailable",
+                "choruses": [], "matched_lines": 0}
+    words = json.load(open(word_path)).get("words", [])
+    lyrics = (json.load(open(lyric_path)) or {}).get("syncedLyrics")
+    return align_synced_lyrics(lyrics, words, grid["bar_s"])
 
 def first_sung(w, min_run=4, gap=3.0):
     """first word that starts a run of >= min_run words with gaps < gap s (skips lone tags/ad-libs)"""

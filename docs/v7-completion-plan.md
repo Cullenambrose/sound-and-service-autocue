@@ -1,0 +1,762 @@
+# v7 completion and validation plan
+
+## Goal and boundaries
+
+Make v7 reliable for reviewed library preparation, then measure cue accuracy before bulk use.
+Passing unit tests is not evidence that the musical choices are correct.
+
+## Development board
+
+This is the persistent backlog. Status is updated only after implementation and verification.
+Items within each milestone are ordered by priority, not promises of a delivery date.
+The detailed acceptance criteria for v7 fixes follow this board.
+
+Definition of done: implementation persists in the repository, focused regression tests pass,
+related documentation is updated, and limitations are recorded. "Done" on an individual story
+does not mean the milestone or v7 release is complete. Model promotion additionally requires a
+held-out listening benchmark, not merely passing software tests.
+
+### Milestone A: safe v7 review candidate
+
+| ID | Story / deliverable | Depends on | Status |
+|---|---|---|---|
+| A01 | Preserve evidence-backed START; remove forced dance intro lengths and assumed drops | None | Done: regression verified |
+| A02 | Re-resolve mapped cue dependencies after Gemini changes; reject contradictory anchor moves | None | Done: regression verified |
+| A03 | Reject old-map picks after a Gemini map switch; preserve original baseline | None | Done: regression verified |
+| A04 | Validate malformed Gemini responses without losing the local plan | None | Done: regression verified |
+| A05 | Recover credential configuration; show safe credential/model status in Settings and CLI | None | Status/configuration implemented; historical credential recovery blocked |
+| A06 | Add request eligibility, richer evidence, versioned caches, bounded spending and usage reconciliation | A03, A04, A05 | Implemented + offline tests passed; live validation blocked by A05 |
+| A07 | Unify timing/offsets across browser, export, corrections and scoring | None | Done: automated + browser verified |
+| A08 | Strengthen outro evidence, insufficient-window handling and final automatic-plan validation | A01, A02, A07 | Partial real-audio evidence: 24 plans; 23 low-confidence EXIT cues; listening calibration pending |
+| A09 | Protect unsaved reviews; make save/navigation safe; fix stale waveform decode races | None | Done: automated + browser verified |
+| A10 | Add true multiresolution waveform caching, matching overview colours and browser regression tests | A09 | Done: automated + generated-audio browser verified |
+| A11 | Harden Serato grids, retain provenance, protect imported grids in experiments | None | 31 real grids imported; 17 detector comparisons (target 20 unmet); M4A parse gap fixed; Serato UI check pending |
+| A12 | Implement section-wise remix lyric alignment with rejection tests | None | Done: local-match and planner integration regressions verified |
+| A13 | Benchmark and optimize WhisperX without weakening vocal/outro verification | A08 | Preliminary 24-plan lyrics-step timings: median 58.47 s, range 30.61–1263.94 s; one unavailable-word result; quality review pending |
+| A14 | Migrate staged audio to centrally resolved relative paths | None | Done: migration, moved-library playback and processing/removal regressions verified |
+| A15 | Adapt library scoring, baseline/AI comparison and answer-key export | A03, A07 | Done: regression, export CLI and synthetic-metadata browser checks verified |
+| A16 | Update docs/version labels; fresh-audio, browser, backup/restore and Serato end-marker checks | A01–A15 | v7 labels/docs, isolated review browser check and exact-byte MP3/M4A copy restores verified; real Serato playback/end-marker check pending |
+
+### Milestone B: library intelligence and imported anchors
+
+| ID | Story / acceptance criterion | Depends on | Status |
+|---|---|---|---|
+| B01 | Read-only, resumable metadata inventory: explicit roots, progress, errors, counts; no audio/model jobs during scan | None | 45-song real sample scanned: 41 MP3/4 M4A, 0 audio read errors; full library not scanned |
+| B02 | Import existing cues and grids with format/version tests and known/unknown provenance; never mutate tags | B01, A11 | Real sample: 43 Markers2 tracks, 314 cues/2 loops, 31 grids; M4A envelope fixed; Tempo Map/CuePoints remain unsupported evidence |
+| B03 | Deduplicate recordings and group alternate mixes; freeze reproducible track-level dataset splits | B01 | Implemented + generated-audio tests passed; metadata grouping remains a review candidate |
+| B04 | Cache beat/bar-aligned features with extractor versions and quality flags; checkpoint interrupted jobs | B02 | Real sample: 38 feature-ready tracks, 7 skipped for no usable grid, 0 extraction errors; grids unverified |
+| B05 | Switchable imported-anchor-assisted detector; compare candidate recall and review corrections to audio-only | B02, A08, A15 | Compared 38 tracks: 317 audio-only/592 assisted candidates; 275 imported hints; human recall/corrections unmeasured |
+| B06 | Build reviewed event-label UI (drop/build/breakdown/chorus/other), annotation provenance and uncertain/skip states | B02, A09 | Isolated 40-song local queue prepared and browser checked; 24 plans; no human labels collected |
+| B07 | Establish held-out human-reviewed benchmark; group related mixes; report coverage, timing and false positives | B03, B06, A15 | 10 test songs frozen from 45 unique tracks; included in review queue; accuracy gate blocked on human review |
+
+### Milestone C: our local model
+
+| ID | Story / acceptance criterion | Depends on | Status |
+|---|---|---|---|
+| C01 | Dataset builder combines weak transition labels and reviewed event labels; never treats all unmarked bars as negatives | B03, B04, B06 | Implemented + generated-cache fixtures verified; real learning dataset and label collection pending |
+| C02 | Train reproducible lightweight candidate ranker; save seeds, feature schema, parameters, metrics and model artifact | C01, B07 | Implemented + synthetic tests passed; real training/benchmark blocked by reviewed data |
+| C03 | Benchmark a suitably licensed pretrained audio embedding/temporal model against C02; do not train a giant model from scratch | C02 | Backlog |
+| C04 | Integrate chosen local event model behind a switch, with confidence, deterministic cue rules, fallback and rollback | C02, A08 | Backlog |
+| C05 | Active-learning queue prioritizes disagreement, uncertainty and genre gaps; reviewed examples feed versioned retraining | C04, B06 | Backlog |
+| C06 | Evaluate audio-only rules, imported anchors, model without imported markers, and model with markers on untouched held-out songs | C04, B07 | Backlog |
+
+### Milestone D: Gemini-assisted learning operations
+
+| ID | Story / acceptance criterion | Depends on | Status |
+|---|---|---|---|
+| D01 | Durable local job/dataset/experiment registry: bounded workers, resume, cancellation, audit trail and cost limits | B01 | Backlog |
+| D02 | Gemini tools may query dataset summaries and propose bounded experiments; deterministic code executes only approved actions | D01, A06, C02 | Backlog |
+| D03 | Opt-in structured-data annotation assistant: provisional labels, provenance and human confirmation; evaluate hallucinations | B06, A06 | Backlog |
+| D04 | Optional authorized batch evaluation/annotation with reconciled costs; no automatic library upload or audio teacher | D03 | Needs data policy and budget approval |
+| D05 | Model promotion gate, rollback, dataset/model documentation and ongoing genre-specific regression monitoring | C06, D01 | Backlog |
+
+### First implementation pass: verification
+
+- A01: supplied short/odd STARTs and opening intro boundaries are preserved. Unsupported late
+  intro labels and flat/missing energy no longer create a bar-32 START. Real early energy entries
+  are not rounded to a preferred phrase length or promoted into assumed drops.
+- A02: mapped Gemini edits are transactional and use the shared resolver. Reproduced first-drop
+  24 / last-drop 57 moved to 56: the last-drop lead now shortens to 16 bars (bar 40), rather than
+  colliding at bar 24. Contradictory event picks are rejected with a review flag. Custom/disabled
+  pads survive; chorus lead-ins cannot precede START.
+- A03: old-map picks are discarded on a switch, concerns retain their original-map context, and
+  `gemini.baseline` saves an independent rules-only plan for future scoring.
+- A04: malformed structured replies and API envelopes report an error without changing local cues.
+  Confidence/types and response usage/text shapes are checked. Thinking text is not parsed as the
+  answer. Spending/accounting guarantees remain explicitly unfinished in A06.
+- Verification: 75 engine unittest cases and the separate 13-case legacy test harness passed;
+  20 web/server tests passed; JavaScript syntax and `git diff --check` passed.
+- No live Gemini requests, new audio analyses, library scans, training jobs, or tag writes were run.
+  Fresh-audio musical validation and real Serato compatibility remain release gates.
+
+### Second implementation pass: timing and editor safety
+
+- A07: shared Python conversions and matching browser conversions now include grid offsets in
+  both directions. Section/lyric boundaries, feature windows, cue timestamps, waveform markers,
+  variant adoption, correction events and Serato exports use the same audio-time convention.
+  Review saves refresh stored cue times; fractional/end-of-song bars are not truncated.
+  Scoring compares audio times using the reviewed grid/tempo when known, including comparisons
+  between plans with different grids. Old beat-only marks retain their compatibility fallback.
+- A09: navigation, close/Escape and map changes offer save/discard/cancel for unsaved bars and
+  names; reload/navigation uses the browser warning. Saves block concurrent editing/navigation
+  and duplicate submissions; a failure leaves edits available for retry. Storage errors return
+  an explicit API error and roll back the track update. Custom map labels survive review saves.
+  Audio fetches are cancellable and decode results commit only for the current load.
+- Scripted browser checks on an isolated three-track synthetic library covered offset preview
+  and exact-end adoption; name-only cancel/discard; failed-save retry; save-and-continue; close
+  and Escape; map-change cancel; undo returning to a clean review; unload prevention; serialized
+  slow saves; and a deliberately delayed old decode resolving after the next track was ready.
+  Zoom in/out, beat nudging/undo and actual audio seeking at the offset-adjusted cue also passed.
+  Cancelling a pending play by pausing/navigating no longer leaves an unhandled playback promise;
+  other playback failures are surfaced as notifications.
+- Verification: 85 engine unittest cases plus 13 legacy checks, 24 server tests and two Node
+  timing tests passed. Python/browser timing tests share positive/negative-offset, missing-offset,
+  preroll, fractional-bar and exact-end fixtures. JavaScript syntax and diff checks passed.
+- This does not complete A10's cached multiresolution waveform work or A15's full scoring workflow.
+  Existing incorrectly saved timestamps are not silently migrated; fresh review is required.
+  Live Gemini, real-audio accuracy, and real Serato playback remain unverified release gates.
+
+### Third implementation pass: current checkpoint
+
+- A05: environment, `.env.local`, `.env` and explicit `AUTOCUE_ENV_FILE` configuration are
+  parsed without executing shell files. Settings and CLI report source/model/configured status
+  without exposing credentials. Current and known previous project locations did not yield the
+  historical credential. Configured status never claims verified live access.
+- A06: uncertainty eligibility, explicit cue meanings/units, BPM, compact energy neighborhoods,
+  structured response schema, low thinking and versioned request caching are implemented.
+  Process-serialized persistent reservations, usage reconciliation, atomic cache writes and
+  fail-closed accounting protect paid work. Timeout/unknown usage requires operator reconciliation;
+  cost overruns block further spending. Model-specific pricing is verified through December 1,
+  2026, after which paid requests are disabled pending a pricing update. No live call was made.
+- A10: versioned disk waveform pyramids support bounded overview/detail requests. The editor
+  no longer decodes full audio for its waveform. Matching frequency colours use one rendering
+  helper. Zoom requests are debounced, cancellable and guarded against stale results.
+  On one generated four-minute track: first cache build/open 2,759 ms; cached open after a page
+  reload 84 ms with zero browser decodes; old browser decode/filter benchmark 767 ms.
+  These are individual local observations, not a general latency guarantee. Zoom reached level 0
+  (about 5.8 ms buckets); overview pan, error notification, nudging/undo and track navigation
+  were exercised on the isolated browser fixture at port 8783.
+- A11: malformed/nonfinite/out-of-order grids are rejected with diagnostics; plan grids retain
+  BPM/source/provenance without assuming Serato data was manually checked. Kick-grid experiments
+  cannot replace an imported Serato grid. MP3 ID3 fixture readback passes without file mutation;
+  user-provided sample interoperability remains pending.
+- Latest full-suite run: 110 engine tests plus 13 legacy checks, 26 web tests and six Node tests
+  passed. Later focused Node/syntax/diff checks also passed.
+- No real library scan, model training, music upload, paid request or user tag write occurred.
+
+### Fourth implementation pass: portable library
+
+- A14: new imports store library-relative staged audio paths. A central resolver is used by
+  built-in/external processing, detailed waveforms, playback and removal. Startup migrates legacy
+  absolute paths to the current library's staged copy, preferring it even when an old copy exists.
+  Original music links remain separate and are never used as a staged-audio fallback.
+- Missing/corrupt paths are reported without erasing unrelated analysis errors. Migration is
+  idempotent; path-traversal and staged symlink tests protect original files. Failed file deletions
+  retain their database entries and report explicit partial-batch errors.
+- Verification: 33 server tests passed, including moving a complete SQLite/audio library,
+  playback bytes, built-in and external processor paths, existing review/export regressions,
+  symlink/traversal rejection, missing-file recovery and deletion failure. Six waveform and
+  11 Serato-grid tests also passed after the latest robustness changes.
+
+### Fifth implementation pass: cue integrity, outro evidence and transcription reuse
+
+- A08: the automatic resolver snapshots event evidence independently of pad assignments.
+  Disabled/remapped pads no longer erase START/outro anchors. Automatic output is checked for
+  first/last event order, track bounds, derived offsets, labels, disabled pads, timing consistency,
+  vocal boundaries and configured EXIT windows. Gemini validation failures preserve the local
+  plan. Deliberate single-drop repeats retain explicit shared-event warnings.
+- Quiet vocal returns use an adaptive threshold capped at the previous absolute threshold.
+  Invalid/unsupported word endings cannot extend a boundary through a silent tail. The detected
+  boundary remains conservative about stem leakage/reverb; it is not a trained vocal classifier.
+  New envelopes retain final partial frames. Incomplete/invalid old envelopes remain unverified.
+  Real-audio calibration, leakage/missed-vocal evaluation and listening sign-off are still pending.
+- Review now exposes vocal evidence, rejected-word counts and the distinction between an
+  instrumental outro and an end-of-song fallback. Empty pads explain unavailable mix windows.
+  Browser checks covered all three evidence states on generated tracks; zoom reached a 1.875 s
+  viewport with roughly 5.8 ms buckets; beat nudge/undo, unsaved-name protection and local save/reopen
+  passed with relative staged paths. The cancel handler closed a clean review when dispatched.
+  Native Escape generated a key event but no native cancel event in this automated browser
+  session, so native Escape behavior was not verified by this pass.
+- A13: web analysis and manifest/one-file transcription share one lazily loaded small CPU/int8
+  WhisperX model, with serialized access and at most two recently used language aligners.
+  Each track still detects its own language from the vocal window and transcribes/aligns the
+  full audio. Failed model/aligner loads are retryable; failed per-file alignment records no longer
+  suppress a subsequent retry. Successful per-file caches still skip work.
+- Model-reuse fixtures verify one model load across five tracks, language changes, bounded
+  aligner retention, unchanged full-track word offsets, concurrency serialization and retries.
+  These are orchestration tests, not a measured real-model speedup or an audio-quality benchmark.
+- Verification: 127 engine tests plus 13 legacy checks, 34 server tests and nine Node tests
+  passed. JavaScript syntax and diff checks passed. The generated-audio helper was stopped and
+  its temporary library/cache removed; the unrelated server at port 8772 was left untouched.
+- No full-library processing, model training, paid Gemini call, music upload or original tag write
+  was performed.
+
+### Sixth implementation pass: remix alignment and honest evaluation
+
+- A12: lyrics align through ordered local phrase matches instead of one forced global offset.
+  Fixtures cover inserted breaks, deleted lines, repeated/reordered remix blocks, malformed word
+  timings and rejected unsupported sections. Repeated-lyric chorus candidates use only matched
+  audio spans, never projected lyrics in unheard sections. Planner integration is tested.
+  These are synthetic timing tests; real remix listening accuracy is not yet established.
+- A15: current-library reports and schema-2 exports carry independent rules/assisted predictions
+  and reusable explicit human answer keys. Partial reviews merge across timing-grid changes.
+  Reanalysis preserves targets. Historical reviewed plans without saved automatic predictions
+  are unavailable, not retroactively relabelled as rules-only or assisted predictions.
+- Positioned targets and explicit empty targets have separate denominators, including positioned
+  breakdowns by map. Missing predictions fail; omitted human targets remain unknown. Incompatible
+  cue meanings/maps are excluded from timing comparisons, with separate map classification and
+  exported per-cue reasons. Cost covers saved evaluated runs, not lifetime/provider billing.
+- The scoring CLI accepts a current-library JSON export and writes a detailed Markdown report;
+  legacy external marks remain supported. README and cue-logic documentation describe the workflow.
+- Verification: 149 engine tests plus 13 legacy checks, 37 server tests and 11 Node tests passed.
+  Syntax and diff checks passed. Browser verification used isolated synthetic metadata only:
+  independent rules/assisted errors, explicit empty targets, saved-run costs and schema-2 export.
+  No measured musical accuracy, live Gemini request or real Serato sign-off is claimed.
+
+### Seventh implementation pass: read-only metadata inventory
+
+- B01: a standalone CLI accepts explicit, disjoint source directories and a separate private
+  SQLite inventory outside those roots. It reads tags/audio headers only, checkpoints each
+  completed entry and supports bounded audio-attempt batches, pause/resume, scan-ID recovery,
+  counts, discovered bytes and explicit bounded error details. No web import or model job starts.
+- Indexed durable queues avoid sorting the entire pending library on every file. A process lock
+  rejects concurrent writers. File identity/timestamps are checked before/after reads; queued paths
+  traverse directory descriptors without following symlinks. Missing/replaced roots fail visibly.
+  Entry errors persist and require a new scan to revisit; resume handles unfinished work only.
+- Verification: 19 inventory cases use generated WAV headers/ID3 tags and temporary directories,
+  covering byte-preserving reads, nested roots, interruptions, failures, changed files, symlinks,
+  special files, concurrent access, unrelated-database protection, bounded errors and CLI exit codes.
+  The latest full engine run passes 168 tests plus 13 legacy checks. Last server/Node runs passed
+  37 and 11 tests respectively. No actual music-library root was supplied or scanned.
+- Existing marker import, provenance classification, grouping and training remain separate stories.
+
+### Eighth implementation pass: imported annotation evidence (paused for restart)
+
+- B02 implementation is saved in `engine/imported_anchors.py`, with shared Serato envelopes
+  in `engine/serato_tags.py` reused by the existing web writer. Inventory metadata extractor v2
+  preserves native Serato Markers2 cue/loop records, BeatGrid markers and raw source payloads
+  with hashes, container/field provenance and unknown authorship. Nothing is promoted to a
+  human answer key or mapped to AutoCue's pad meanings.
+- Generated MP3/AIFF/WAV/FLAC/M4A fixtures verify read-only extraction. CuePoints JSON is retained
+  without guessing its schema/units or asserting Mixed In Key authorship. Legacy tags and
+  unknown entries are preserved; malformed/conflicting tags remain visible. Oversized sources
+  retain size/hash only and report errors. Inventory progress reports separate annotation errors
+  and unsupported counts plus bounded diagnostics, without raw payloads.
+- Verification before the pause: the first 10 importer tests, all 19 inventory tests and all
+  37 server tests passed. Two additional importer regressions (ID3 v2.3/v2.4 and bounded
+  unsupported diagnostics) and stricter wrapper validation were subsequently added.
+- The outstanding checks completed before restart: all 180 engine tests plus 13 legacy checks
+  passed, including the final importer edits. `git diff --check` reported no whitespace errors,
+  and `.venv/bin/python engine/library_inventory.py --help` completed successfully. The latest
+  server run passed all 37 tests. Real-library validation remains separate from these checks.
+- No real library root was scanned, no Gemini request/upload/training was initiated, and no
+  original music tags were written. All work remains uncommitted on disk; preserve the existing
+  dirty worktree. Real Serato/MIK samples and CuePoints schema validation still gate B02 sign-off.
+- Next: finish validation, then continue the library-intelligence backlog. Do not silently
+  substitute fixture success for real-library compatibility or musical-accuracy evidence.
+
+### Ninth implementation pass: deduplication and frozen dataset splits
+
+- B03: `engine/dataset_splits.py` reads only completed inventory scans, hashes file bytes locally
+  to collapse exact copies, and retains every source path for each unique byte sequence.
+- Tracks with normalized artist/title metadata share a conservative grouping key after recognized
+  trailing mix/version labels are removed. Groups are explicitly marked as requiring review; they
+  are not asserted song-identity truth. Missing artist/title falls back to the exact audio hash.
+- A supplied seed and train/validation/test ratios deterministically assign each group to one split.
+  The versioned JSON snapshot records source roots, paths, hashes, grouping methods, exclusions,
+  settings and split assignments. Existing output files are never overwritten; source files and
+  inventory rows are not changed.
+- Verification: all 37 focused dataset-split, inventory and imported-anchor tests passed; syntax
+  and diff checks passed. Generated fixtures cover exact duplicate collapse, alternate mix
+  grouping, stable and seed-sensitive split assignments, incomplete scans, changed source
+  detection, CLI output and immutable manifest behavior. No real library was scanned; metadata-
+  group accuracy and final group review remain prerequisites before treating a split as a
+  held-out benchmark.
+
+### Tenth implementation pass: resumable beat/bar feature cache
+
+- B04: `engine/feature_cache.py` consumes a frozen B03 manifest and uses either an explicit
+  SHA-keyed grid file or one supported constant-tempo imported Serato grid. Variable-tempo,
+  malformed, conflicting and missing grids are skipped with explicit quality flags; imported
+  grids remain unverified.
+- The extractor reuses the existing 50 fps peak/RMS/low-mid-high analysis and aggregates frames
+  into offset-aware bars. Compressed per-track artifacts record bar indices/times, coverage,
+  energy, grid provenance, source audio hash, bar extractor/base feature/schema versions and
+  FFmpeg version.
+- A locked SQLite checkpoint records queued/running/done/skipped/error jobs. A bounded run can be
+  resumed with the same manifest, grids, extractor settings and decoder version; failures only
+  retry with `--retry-errors`. Source paths are opened without following symlinks, checked against
+  inventory fingerprints, and rehashed against the frozen dataset after decode.
+- Verification: 70 focused feature-cache, dataset, inventory, imported-anchor, grid, timing
+  and analysis tests ran; 68 passed and 2 optional tests were skipped. This includes synthetic
+  feature fixtures and an actual FFmpeg decode of generated audio; compilation and CLI help
+  checks passed. No real library feature run occurred. Full extraction remains gated on an
+  approved compute/storage budget, usable reviewed grids, and quality review.
+
+### Eleventh implementation pass: imported-anchor candidate comparison
+
+- B05: `engine/anchor_detector.py` reads only the frozen dataset and completed B04 cache. Its
+  switch selects audio-only candidates, the union of audio candidates and imported Serato
+  Markers2 cue positions, or both pools side by side. The deterministic audio-only baseline scores
+  bar boundaries using local RMS/low-band energy ratios; imported loop records and unsupported
+  marker formats are not treated as event candidates.
+- Imported markers remain untyped. Reports preserve exact marker times, names, source field/hash,
+  and distance to the nearest grid bar; marker names and pad indices never determine event class.
+  Local audio evidence is attached where available, but does not promote an imported marker to a
+  verified event.
+- Optional evaluation consumes only schema-2 exports with explicit `human_review` answer keys.
+  It reports positioned-target and baseline-correction coverage per slot at a stated tolerance.
+  A correction is identified from the saved baseline when its meaning differs, its position
+  differs by over one beat, or it has no saved position. This measures candidate coverage, not
+  reduced human effort; missing baselines remain unknown, and independence of review targets
+  from imported tags is unknown.
+- Verification: synthetic feature arrays cover audio scoring, and a generated WAV exercises the
+  B03/B04-to-B05 path, hash association, untyped marker provenance, switchable candidate pools,
+  paired review metrics and report output. No real library was scanned or processed. Real
+  sample compatibility and musical benefit remain unverified.
+
+### Twelfth implementation pass: human-reviewed event labels
+
+- B06: the local waveform review now records drop/build/breakdown/chorus/other annotations at the
+  playhead, with exact seconds, optional offset-aware bar, certainty, notes, human-review source,
+  grid snapshot and UTC timestamp. These records are independent of cue edits and imported Serato
+  markers. Labels can be retracted from active review while their provenance remains in history.
+- Track review state distinguishes pending, in-progress, complete, uncertain and skipped. A
+  complete review with no labels is an explicit no-target-events decision; uncertain and skipped
+  states are preserved rather than inferred as negative examples. Labels remain local in SQLite.
+- The versioned `autocue-event-labels.json` export provides track hashes, taxonomy, review state,
+  active and retracted annotations, and provenance for later B07 dataset work.
+- Verification: generated server fixtures cover offset/grid snapshots, gridless second-based
+  labels, uncertainty/skip state, export, retraction, invalid inputs and local-token protection.
+  UI checks cover taxonomy, certainty, state controls, rendering and note escaping. Forty web
+server tests and seven Node review/UI tests passed; app JavaScript syntax and a static HTML
+accessibility snapshot passed. No real review labels or music library were processed.
+
+### Thirteenth implementation pass: held-out event benchmark workflow
+
+- B07: `engine/event_benchmark.py` joins the frozen B03 manifest, B06 event-label export, and B05
+candidate report by exact audio SHA-256. It restricts scoring to the frozen test split and
+completed human-review tracks, verifies each track's split against its related-mix group, and
+reports test-group coverage plus any metadata grouping review requirement.
+- Matching is ordered and one-to-one within a stated tolerance (four beats from the saved review
+grid by default, with a two-second fallback for gridless reviews). Reports include target recall,
+candidate precision, unmatched candidate counts, timing errors and per-event-type target recall.
+The detector is generic: event-type classification is not evaluated. Uncertain event positions
+are not positive or negative examples; candidates near them are excluded from false-positive
+counts. Incomplete/uncertain/skipped tracks are excluded, while a complete zero-label review is
+explicit and candidate positions on it count as false positives.
+- The benchmark refuses malformed hashes, duplicate tracks/reviews, missing split groups,
+nonfinite positions, and group/split mismatches. It makes no model-promotion claim and cannot
+verify whether detector settings were tuned on the test results.
+- Verification: synthetic fixtures exercise held-out-only joins, related-mix group reporting,
+complete/uncertain/skipped review semantics, grid and fallback tolerances, one-to-one matching,
+recall/precision/timing/false-positive output, malformed inputs and non-overwriting report
+writes. No actual completed test-group reviews are available yet; therefore a real benchmark
+and musical-accuracy estimate remain blocked.
+
+### Fourteenth implementation pass: positive/weak/unlabeled learning dataset
+
+- C01: `engine/event_dataset.py` combines the frozen B03 manifest, verified B04 feature artifacts,
+  and a B06 human-label export. It retains grouped train/validation assignments, input/artifact
+  hashes, extractor/grid provenance and deterministic bar RMS/low-band/coverage samples with
+  local audio evidence. Test groups are reserved without exporting their features or labels.
+- Weak audio-change/imported-anchor hints stay untyped and separate from human event targets.
+  Only certain, active annotations from complete human reviews yield event targets. Exact times,
+  notes, source annotation grids and timestamps survive feature-grid mapping. Uncertain labels
+  mask their nearest bar; incomplete labels are preserved without a target, and uncertain/skipped
+  tracks are excluded.
+- Unmarked bars remain unlabeled, including complete zero-label reviews. No negative examples
+  are inferred. Partial bars below 95% coverage are ineligible, validation rows cannot become
+  training samples, and weak labels are never validation targets. The default build is bounded
+  to 20 feature tracks; missing/deferred tracks and unmapped labels have explicit counts.
+- Output is an immutable, atomic local JSON snapshot outside source roots and the feature cache.
+  Fixture checks cover label separation, uncertainty/retraction, coverage thresholds, offset/time
+  mapping, reserved test data, train/validation isolation, bounded deterministic output, path safety,
+  and a generated-WAV inventory/cache/builder flow with artifact-tamper rejection. All 48 focused
+  dataset-builder, benchmark, anchor, feature-cache, split and import tests passed; compilation,
+  virtualenv CLI help and diff checks passed. No real library was processed or model trained.
+  No real library was processed or model trained.
+
+### Fifteenth implementation pass: positive-only event candidate ranker
+
+- C02: `engine/event_ranker.py` fits deterministic diagonal positive prototypes from eligible,
+  certain human-positive training labels only. Weak candidates and unlabeled bars do not enter
+  fitting and are never treated as negatives. The versioned artifact records the exact dataset
+  hash, seed, feature schema, normalization/variance parameters, training groups and sufficiency
+  warnings.
+- Validation diagnostics rank weak candidate bars and report recall@k and hit ranks against
+  certain validation targets. A separate `rank` command emits uncalibrated similarity-ranked
+  candidates only; it does not emit event predictions or probabilities. The rank command requires
+  the exact training dataset snapshot and cannot access the reserved test split. Model and report
+  writes are immutable and protect their inputs.
+- Synthetic tests cover positive-only fitting, ignored weak/unlabeled rows, deterministic output,
+  validation ranking, group-split and test-data leakage rejection, insufficient positives,
+  malformed artifacts, immutable writes and snapshot matching. These tests verify software
+  behavior only. No real learning data, completed reviewed test groups, benchmark result or
+  model-promotion evidence is available; the B07 held-out gate remains pending.
+
+### Real-library evidence pass: October 22, 2026 (stopped early by request)
+
+Cullen approved stopping the expensive batch rather than waiting several more hours.
+Final saved results are **26 attempted, 24 successful plans, 2 grid failures**; 19 sample
+tracks have no saved analysis result. A plan completing does not imply every analyzer succeeded.
+The successful plans include 16 VOCAL and 8 DROP maps. This is preliminary evidence, not
+completion of the original 45-song run or a human accuracy benchmark.
+
+- Safety: the 45-song sample (41 MP3/4 M4A) and Serato data were read-only. All 48
+  manifest files still match sizes/SHA-256 after validation. No audio upload or Gemini
+  calls were enabled. All outputs, caches, dataset and review copies are outside Git,
+  under `~/Library/Application Support/AutoCue/v7-evidence-2026-10-22/`.
+- Crates: Disco Dance Party has 20/224 entries present; SILENTDisco has 25/427 present,
+  398 outside the sample and 4 outside the mapped prefix. Missing sample coverage is not
+  an importer error. No separate original ten-song set was identifiable.
+- Importer: 43 Markers2 tracks contain 314 cues/2 loops; 31 legacy BeatGrids parse
+  (30 MP3, 1 M4A). The real M4A envelope gap was fixed with generated-file regression
+  tests. Serato Tempo Map exists on all 45 tracks but remains unsupported: observed
+  disagreement with legacy grids makes guessed decoding unsafe. MIK records remain
+  hints, not labels. Independent CuePoints comparisons agreed within 60 ms for 274/312
+  cue times; several constant-shift outliers need review.
+- Grid comparison: 17 tracks, 16 Serato grids adopted, one half/double-tempo discrepancy;
+  10 beat-phase differences exceed 30 ms and 4 estimated downbeat phases differ.
+  These compare embedded tags against detected grids, not the Serato UI.
+  The requested 20-track target and real Serato playback check remain unmet.
+- Runtime: successful-plan wall median 742.55 s (12.38 min), max 5112.06 s (85.20 min).
+  Lyrics-step median 58.47 s, range 30.61–1263.94 s. These are step timings, not a claim
+  of 24 valid transcripts: one plan flags unavailable words and one unavailable sections.
+  M2 Air/8 GB memory pressure and heavy swapping make this unsuitable as a routine workflow.
+- Failures: Don Toliver / Body and Timbaland / Say Something fail the detected-grid
+  fit before imported-grid reconciliation, despite having Serato grids. Preserve these
+  failures; a fallback policy needs deliberate follow-up, not a silent workaround.
+- Outro: 23/24 canonical H cues have confidence below 0.6; 22 plans infer an outro from
+  fade and 5 report no vocal-free outro. These are review flags, not measured errors.
+- B05: lightweight FFmpeg/bar extraction took about 182 s; candidate comparison about
+  0.2 s. Of 275 imported hints on 38 ready tracks, 61 have an audio-only candidate
+  within one bar; median nearest audio candidate distance is 13.23 s. The assisted
+  pool includes hints by construction. This is hint agreement, NOT musical recall or
+  evidence that assisted candidates are correct. Seven tracks lack a usable grid.
+- Copy-only write test: MP3 and M4A audio hashes stayed unchanged; undo restored exact
+  bytes and full restore recovered copied audio/Serato folders exactly. A legacy
+  Markers_ MP3 correctly refused writing. Test START/EXIT cues replaced existing slots
+  on the disposable M4A copy, then restored; this is not cue merging or a listening test.
+- Validation: 85 focused importer/grid/inventory/web tests passed. The web library
+  loaded 40 unreviewed tracks with no source links (sample writeback unavailable).
+  Search and the existing plan/event-review editor were exercised in the browser.
+
+#### Cullen's local review
+
+The local evidence folder contains **`PM BOT READ ME.md`** with detailed handoff,
+`review-queue.json`, `steps2-3-report.json`, `anchor-comparison.json`, and
+`dataset-v7-sample.json`. Keep these private and local. The queue contains all ten
+frozen test songs, 24 analyzed plans and 16 failed/not-analyzed songs. Do not mark
+unprocessed songs as successfully analyzed.
+
+Start the isolated review app (no model jobs start automatically):
+
+```sh
+AUTOCUE_WEB_DATA="$HOME/Library/Application Support/AutoCue/v7-evidence-2026-10-22/review-web" \
+AUTOCUE_PORT=8771 .venv/bin/python web/server.py
+```
+
+Open `http://127.0.0.1:8771` (not the HTML file directly).
+Search `HELD-OUT TEST` for the ten frozen songs. Keep test labels out of training
+and candidate tuning. Search a title, click **Review**, then:
+
+1. Listen around GO/H and the last vocal return; correct EXIT or mark uncertainty,
+   especially for the five no-vocal-free-outro plans. Save actual listening decisions,
+   not imported automatic cues as answer keys.
+2. Verify grid/downbeat phase in Serato on copies for the reported mismatches.
+3. Use **Human event labels** for drop/build/breakdown/chorus/other and set the
+   review state only after the whole song is covered; uncertain/skip are valid.
+4. Export human event reviews for the held-out benchmark. Do not launch another
+   expensive analysis batch or write tags to the sample.
+
+### Follow-up: slow grids and bounded cache investigation (October 24, 2026)
+
+- Root cause of the two grid failures: detected-bar fitting imposed a three-second
+  upper bound (80 BPM), excluding the 73 BPM track and rejecting the 80 BPM track's
+  fitted 3.00085-second bar. The upper bound now covers 60 BPM; the existing fast
+  range through 240 BPM is preserved. No imported-grid fallback was added.
+- Replaying actual cached Beat This outputs now fits Body at 73.000 BPM and Say
+  Something at 79.977 BPM; both reach and adopt their existing Serato grids.
+  These are grid-stage rechecks, not newly completed full-song plans. Original
+  first-pass failure evidence and the 26/24/2 counts above remain unchanged.
+- Three non-test songs replayed entirely from private copies of successful caches
+  in 0.030–0.043 seconds, with identical cue bars and no model calls. This verifies
+  warm-cache reuse, not cold-run acceleration. Valid empty allin1 section results
+  are now cached too, avoiding unnecessary repeated model inference.
+- Donna Summer's missing words came from detected language `la` with no default
+  alignment model. Alignment errors are still saved for diagnostics/retry, but now
+  fail the lyrics progress step explicitly and enter pipeline notes. No forced
+  language or fabricated word timing was introduced.
+- Rasputin's section-analysis exception mentions a ragged NumPy array. The installed
+  madmom decoder's heterogeneous Viterbi-result conversion was subsequently reproduced
+  with synthetic activations, without neural models. A one-line dependency patch now
+  selects directly from scores; setup applies it idempotently in the private `.venv`.
+  A synthetic regression checks finite ordered beats and the winning 4/4 result
+  against a single-meter decoder. See [install notes](INSTALL.md) for existing installs.
+- An offline ten-second cached-spectrogram microprofile (non-test Rasputin) completed
+  in 1.78 s after 0.56 s model loading, with about 486 MB process peak RSS. It produced
+  section labels but no beats on that short excerpt. The hard-limited process exited
+  in 5.52 s; no full song or batch was rerun. The default was already four threads,
+  so no thread policy or other speculative runtime optimization was introduced.
+  Full-track post-patch verification and long-input memory profiling remain pending.
+- Local evidence: `grid-cache-followup.json` in the existing private evidence folder.
+  No full batch, cold analyzer run, sample write, or audio upload was performed.
+
+### Full-track decoder follow-up: October 24, 2026
+
+- Ran the full non-test Rasputin cached spectrogram (186.25 s, shape
+  `4 x 18625 x 81`) offline, with a 120-second subprocess limit. The first
+  run finished inference but its evidence serializer incorrectly assumed a
+  non-null BPM. After fixing that local serializer, one bounded retry finished
+  in 116.20 s overall: 1.12 s model load, 105.61 s inference/postprocessing,
+  peak process RSS 1,597,243,392 bytes (about 1.60 GB). Both logs are retained.
+- The patched decoder returned nine ordered, finite section spans covering the
+  track, without the previous ragged-array exception. This closes the real-track
+  exception reproduction/recovery check, not musical section accuracy.
+- **Quality caveat:** allin1 returned only one beat and one downbeat (`15.6 s`),
+  with no tempo estimate. Those outputs are not usable grid evidence. Existing
+  Beat This cache contains 394 beats/99 downbeats; the planner still uses its
+  grid and does not substitute allin1's missing tempo.
+- Rebuilt a separate follow-up plan using the recovered sections and disposable
+  copies of existing audio-feature/stem/word/beat caches. No further model calls
+  occurred; the grid was unchanged and the missing-sections flag disappeared.
+  C/D/E moved from bars 12/28/44 to 15/31/47; F moved 48 to 79; G/H stayed at
+  85/93. A/B also changed (0/4 to -1/3). These are unreviewed choices, not proven
+  improvements; a negative grid-bar index alone is not a negative audio time.
+- No LRCLIB cache existed, so the follow-up explicitly disabled text lookup and
+  used no synced lyrics. Original artist/title tags were present; equivalence to
+  the first run's live text response cannot be established. This is not a fully
+  controlled section-only accuracy comparison.
+- Original results, caches and review queue remain unchanged; the 26/24/2 batch
+  counts are not rewritten. Separate local evidence files:
+  `sections-fulltrack-check.json`, `sections-fulltrack-check.log`,
+  `evidence sections-fulltrack-check-retry.log`, `rasputin-recovered-plan.json`.
+  All 48 original manifest files still match sizes and both recorded SHA-256s.
+- Next gate: Cullen should listen to the recovered chorus/START choices versus
+  the original plan, especially F's large move. Runtime remains expensive;
+  this cached-section check excludes demixing, transcription and feature extraction
+  and does not establish a cold-pipeline speedup. No additional batch is authorized
+  by these results.
+
+### Controlled listening preparation: October 25, 2026
+
+The Rasputin section comparison now has a controlled cache-only pair: identical
+features/stems/words/beats/grid/metadata/configuration and **no synced lyrics in
+either arm**; only the section spans differ (empty versus recovered). No models
+or network lookups ran. This isolates the effect of sections on current rules,
+but is not a reconstruction of the historical live LRCLIB response or a quality score.
+The track is in the training split; held-out songs remain untouched.
+
+| Cue | Without sections | With recovered sections | Shift |
+|---|---|---|---|
+| A / INTRO | 0:02.004 | 0:00.129 | -1.875 s |
+| B / START | 0:09.505 | 0:07.630 | -1.875 s |
+| C | 0:24.507 | 0:30.132 | +5.625 s |
+| D | 0:54.510 | 1:00.136 | +5.626 s |
+| E | 1:24.514 | 1:30.139 | +5.625 s |
+| F / LAST CHORUS | 1:32.015 | 2:30.146 | +58.131 s |
+| G / GO | 2:41.398 | 2:41.398 | unchanged |
+| H / EXIT | 2:56.399 | 2:56.399 | unchanged |
+
+Local outputs in the existing private evidence folder:
+`rasputin-controlled-comparison.json`, `rasputin-listening-times.tsv`,
+and a separate `rasputin-comparison-web/` library with one unreviewed track,
+two existing-format variant lanes, and no source writeback link. Original
+input-cache hashes and original queue database hash were checked unchanged.
+No human event reviews/annotations existed in the original queue at preparation.
+
+Start this comparison separately from the 40-song queue:
+
+```sh
+AUTOCUE_WEB_DATA="$HOME/Library/Application Support/AutoCue/v7-evidence-2026-10-22/rasputin-comparison-web" \
+AUTOCUE_PORT=8772 .venv/bin/python web/server.py
+```
+
+Open `http://127.0.0.1:8772`, click **Review**, and compare the
+**Without sections (controlled)** and **With recovered sections (controlled)**
+lanes. Browser validation confirmed both columns and loaded local audio
+(186.253 s, no media error); it did not establish musical correctness.
+The temporary validation server was stopped afterward.
+
+Listen first around F's two positions, then START, then the C/D/E family and final
+vocal/EXIT window. **Comparison-table cue buttons apply that candidate to the
+editable cue; they are not audition-only buttons.** Use transport/waveform to
+audition, and save only choices actually reviewed by ear. The separate library
+keeps these edits away from the original queue. Do not treat either automatic
+variant as a human answer key or promote rules based on confidence alone.
+
+### External gates
+
+- Confirm actual library roots before any 20k-song scan; begin with a representative read-only pilot.
+- Find earlier credential configuration or safely reconfigure; verify live access only after cost protections.
+- Supply real Mixed In Key/Serato-tagged sample files for interoperability checks.
+- Review benchmark examples by ear. Existing automatic markers alone cannot certify accuracy.
+- Approve a measured compute/storage budget before full feature extraction or training.
+- Any transmission to Google needs a separate data-permission and budget decision.
+- Verify real Serato playback/write behavior on copies. Commit/tag only when requested.
+
+Preserve reviewed cues, source audio, existing Serato data, custom maps, and verified backups.
+Do not bulk re-analyze or write tags while fixing the implementation. Use isolated libraries and
+copies for end-to-end tests. No new paid requests until credential discovery and spending controls
+are verified. Do not record credentials in logs, documentation, source control, or test fixtures.
+
+## 1. Restore predictable Google credential discovery
+
+- Locate the previously configured credential using configuration locations and presence checks,
+  not credential searches in conversation text or output of secret values.
+- Check the prior project location and intended local launch configuration. If the original
+  environment is unavailable, report that limitation rather than saying no key was ever supplied.
+- Unify credential and model configuration across the UI, built-in pipeline, and supported CLI.
+  Distinguish shell-environment configuration from configuration available when launched in VS Code.
+- Show configured/missing status, configuration source (never the value), selected model, and
+  last request error in Settings. A configured key is not necessarily a valid key.
+
+Acceptance: environment and supported local configuration work under the normal launcher;
+missing/invalid credentials are actionable and never exposed. A separately authorized live smoke
+test checks model access after the protections in step 4.
+
+## 2. Fix START and introduce final cue validation
+
+- Remove the unsupported minimum 16-bar/32-bar fallback that overrides short dance intros.
+  Retain evidence-backed section, vocal, energy, and grid decisions; flag uncertain starts.
+- Keep START detection separate from intro mix-length preferences.
+- Reuse one dependency-resolution and validation path after initial planning, map rebuilding,
+  Gemini changes, and experiment planning. Do not silently rewrite manual review edits.
+- Validate bounds, first/last event ordering, derived offsets, vocal-free boundaries, labels,
+  disabled/custom pads, and permitted end-of-song exceptions. Do not require all pad letters
+  to be chronologically ordered: lead-ins can legitimately precede other pads.
+- Make single-drop duplicate behavior explicit; avoid redundant default pads where practical,
+  while preserving intentionally customized duplicate meanings.
+
+Acceptance: short-intro fixtures keep evidence-backed START; intro lengths remain 32, 16, 8,
+then 4 beats by default. Anchor changes cannot recreate invalid lead-ins or contradictory labels.
+
+## 3. Unify timing, outro evidence, and Serato output
+
+- Use the same bar/time conversion, including offset_ms and fractional end positions, in
+  planning, browser preview, corrections, experiment scoring, and tag export.
+- Validate whole-track vocal evidence; account for missing coverage, stem leakage, short returns,
+  reverb, and transcription hallucinations. Avoid treating a single absolute threshold as proof
+  of a vocal-free ending. Show evidence and review warnings.
+- Preserve the distinction between EXIT at an instrumental outro and EXIT-END at song end.
+  Handle insufficient space for the user's selected minimum mix length explicitly.
+- Verify EXIT-END round-trips and behaves usefully in Serato; do not silently shift it earlier
+  if Serato cannot use an exact end marker.
+- Preserve beatgrid source/BPM/provenance in plans. Validate malformed/nonfinite grids and
+  report unsupported formats and variable-tempo cases.
+- Prevent optional kick-grid experiments from silently replacing an imported trusted grid.
+
+Acceptance: preview, saved corrections, and exported cues agree within 1 ms for supported fixtures;
+late vocals invalidate earlier outros; missing evidence is unverified; exact-end behavior is tested
+on a disposable Serato-compatible file and checked in Serato before release.
+
+## 4. Make Gemini reliable and economical
+
+- Prevent old-map slot picks from being applied after DROP/VOCAL switching. Include both map
+  alternatives in a structured request, or discard incompatible picks; avoid unconditional extra calls.
+- Run assistance only for eligible uncertainty/review cases, not every confidently analyzed track.
+- Supply BPM, timing units, cue meanings, configured lengths, vocal evidence, and compact bar-energy
+  context. Preserve an unassisted baseline for meaningful rules-only versus AI comparisons.
+- Validate response types, finite confidence ranges, candidate membership, and map applicability.
+  Malformed responses and transport failures must preserve the baseline and surface a clear error.
+- Route accepted changes through step 2's final validator.
+- Version cache keys by prompt/schema/model/settings. Separate cache reuse from newly incurred cost.
+- Replace the approximate cap claim with bounded request settings, model-aware pricing,
+  preflight budget reservation, safe accounting for concurrent requests, and actual usage reconciliation
+  including reasoning tokens. Report accounting failures and overruns; block further spending.
+  An application budget is not a provider-enforced billing guarantee.
+- Test timeouts, invalid keys, missing models, truncated JSON, cache invalidation, spending limits,
+  and malformed replies before a minimal approved live request.
+
+Acceptance: no semantic slot reuse across maps, no invalid cue sets, no repeated paid request for
+identical eligible inputs, and visible model/cost/error status. Keep default off until a reviewed
+rules-only versus Gemini comparison demonstrates benefit.
+
+## 5. Harden the review editor and waveform
+
+- Warn before discarding unsaved edits on navigation/close/map changes; offer save, discard, cancel.
+- Make save/navigation atomic from the user's perspective, including error/retry handling.
+- Prevent stale fetch/decode results from overwriting the active track; guard all shared waveform state.
+- Use cached multiresolution waveform data for real interactive opening, rather than only a placeholder.
+  Keep frequency-band colours consistent between detail and overview; avoid unnecessary main-thread work.
+- Verify snap units, labels, undo/redo, seek, audition-stop behavior, follow during actual playback,
+  save-and-next, rapid navigation, and failure states with browser tests.
+
+Acceptance: edits cannot be lost without confirmation; rapid navigation never shows another track's
+waveform; reopening cached data avoids full audio decoding for initial editing. Record opening latency
+on a fixed test track before and after, and preserve existing playback/editor behavior.
+
+## 6. Complete the unfinished analysis work
+
+- Section-wise lyric alignment: support remix edits/repeats with ordered local matches and reject
+  unsupported spans; do not force a global match or silently accept a weak alignment.
+- WhisperX speed: reuse models/aligners safely, eliminate unnecessary language-detection work, and
+  evaluate timestamp-preserving vocal-window transcription. Do not skip vocal analysis merely because
+  the track is DROP: outro verification still needs it. Keep quality and full-analysis fallbacks.
+- Relative audio paths: migrate staged-library paths to a documented DATA-relative representation
+  and resolve centrally across processing, playback, export, and removal. Keep originals separate.
+- Scoring: adapt the current library/answer-key workflow rather than relying on hardcoded legacy paths;
+  score in time with grid offsets, include per-cue failures, and compare saved rules-only/AI variants.
+
+Acceptance: moved-library fixture works end to end; representative remix alignment tests pass;
+measure runtime and timestamp quality before/after optimization; scoring runs with fixtures now and
+with user-reviewed marks when available. Report absent ground truth rather than invent an accuracy score.
+
+## 7. Integrate existing Mixed In Key/Serato anchors
+
+- Verify current official export behavior and supported versions before promising interoperability.
+- Read existing cues as non-destructive input; retain provenance and never assume every Serato cue is
+  Mixed In Key-generated or a drop.
+- Combine candidate anchors with imported grids and audio evidence; do not map incoming pad numbers
+  directly to our meanings. Preserve source markers for comparison and backup.
+- Add a switchable UI mode and import summary. Test parsers with fixtures first.
+
+Acceptance: actual user-prepared sample files validate marker/grid import; compare resulting cues
+against reviewed targets. Real compatibility/quality sign-off remains blocked until samples exist.
+
+### Learning from existing energy cues
+
+Use Mixed In Key cues as weak labels for candidate musical changes, not ground-truth drop labels.
+Record incoming cue time/name, grid, provenance, and audio features around each marker. Preserve
+uncertainty about the original generating tool when tags do not establish it. A track-level energy
+rating is not a per-section energy curve.
+
+First measure whether imported markers improve candidate recall and reduce manual corrections.
+Have the user classify a small sample as drop, build, breakdown, chorus, or other before tuning
+rules. Begin with threshold/ranking calibration rather than training a new model on a small dataset.
+Unmarked positions are not automatically negative examples.
+
+If enough reviewed data accumulates, train a lightweight candidate ranker using permitted local
+data. Split evaluation by track and keep alternate mixes of the same song together to prevent
+leakage. Compare audio-only, imported-anchor-assisted, and reviewed-label-calibrated systems on
+held-out tracks. Never score imported cues as both the training source and independent proof of
+accuracy; user-reviewed targets remain the final evaluation reference.
+
+## 8. Release checks and listening test
+
+- Update stale version labels, setup instructions, configuration docs, and limitations. Keep legacy
+  module filenames where renaming would add compatibility risk.
+- Correct checklist statuses to distinguish implemented, partially implemented, verified, and blocked.
+- Run engine/web suites, JavaScript checks, focused browser tests, and a fresh-audio end-to-end case.
+- Replan a fixed cached track set without altering library results, then run an approved batch on copies.
+  Include short intros, chorus-led house, multiple/single drops, vocal returns, vocals to the end,
+  instrumentals, remixes, and imported Serato/Mixed In Key data.
+- Review at least 10 representative tracks by ear and save expected cues. Report per-cue timing errors,
+  mix-window compliance, false vocal-free outros, collisions, runtime, and AI cost/benefit.
+- Verify backup/write/restore on copies and real Serato compatibility. Stop test services and remove
+  temporary test libraries. Commit/tag only when requested.
+
+Release gate: no known cue-ordering, timing/export, edit-loss, or budget-accounting blockers;
+latest rules tested on real audio; limitations documented; reviewed accuracy measured.
+Until then describe the build as a v7 review candidate, not a completed release.
+
+## Dependencies and external inputs
+
+Steps 2–4 are prerequisites for trusting AI-generated cue plans. Step 3 is a prerequisite for
+tag-write sign-off. Step 5 is a prerequisite for safe batch review. Step 6's scoring implementation
+can proceed before marks exist, but accuracy claims require reviewed marks.
+
+External inputs: access to the previous credential configuration (or safe reconfiguration if lost),
+approval for a minimal paid live Gemini test, Mixed In Key/Serato sample files, user listening decisions,
+and a real Serato end-marker/write check. Everything else can be implemented and fixture-tested locally.
