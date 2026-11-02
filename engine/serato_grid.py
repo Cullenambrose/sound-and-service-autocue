@@ -18,6 +18,68 @@ MULTI_MARKER_TOLERANCE = 0.005  # relative tempo spread allowed across a multi-m
 DIAGNOSTICS_VERSION = 1
 ALIGNMENT_TOLERANCE_BEATS = 0.25
 MIN_REGION_DOWNBEATS = 4
+TEMPOMAP_RECORD_SIZE = 33  # bytes per Serato Tempo Map marker
+
+
+def parse_tempomap(data):
+    """Decode a Serato Tempo Map into [{pos, bpm}, ...]; None if malformed.
+    
+    Tempo Map format (Serato DJ Pro 5.0+):
+    - Version: 4 bytes (e.g., 0x02000001)
+    - Markers: 33-byte records
+      - 8 bytes: position in seconds (double) - only for first marker
+      - 4 bytes: beat count (int) - only for first marker  
+      - 8 bytes: sample offset from first marker (long) - 0 for first, relative for others
+      - 8 bytes: BPM at this marker (double)
+      - 8 bytes: beat duration (double) - typically 0.25 (quarter note)
+      - 1 byte: flags/unknown
+    
+    This represents variable-tempo tracks (e.g., live drums). Unlike BeatGrid, which assumes constant
+    tempo, Tempo Map markers can have different BPMs.
+    """
+    if not isinstance(data, bytes) or len(data) < 37:  # version(4) + one marker(33)
+        return None
+    
+    version = struct.unpack(">I", data[:4])[0]
+    if version not in (0x02000001,):  # Only known version so far
+        return None
+    
+    markers = []
+    offset = 4
+    first_marker_pos = None
+    
+    while offset + TEMPOMAP_RECORD_SIZE <= len(data):
+        try:
+            pos_field = struct.unpack(">d", data[offset:offset+8])[0]
+            beat_count = struct.unpack(">I", data[offset+8:offset+12])[0]
+            samples = struct.unpack(">Q", data[offset+12:offset+20])[0]
+            bpm = struct.unpack(">d", data[offset+20:offset+28])[0]
+            beat_dur = struct.unpack(">d", data[offset+28:offset+36])[0]
+            # byte at offset+36 is flags, currently unused
+            
+            # First marker uses pos_field; subsequent use samples relative to first
+            if not markers:
+                first_marker_pos = pos_field
+                actual_pos = pos_field
+            else:
+                actual_pos = first_marker_pos + (samples / 44100.0)  # Assuming 44.1kHz
+            
+            if not (math.isfinite(actual_pos) and actual_pos >= 0 and
+                    math.isfinite(bpm) and bpm > 0 and
+                    math.isfinite(beat_dur) and beat_dur > 0):
+                return None
+            
+            markers.append({"pos": actual_pos, "bpm": bpm, "beat_count": beat_count if not markers else None})
+            
+        except (struct.error, ValueError):
+            return None
+        
+        offset += TEMPOMAP_RECORD_SIZE
+    
+    if not markers:
+        return None
+    
+    return markers
 
 
 def parse_beatgrid(data):
@@ -66,32 +128,54 @@ def read_beatgrid(path, on_diagnostic=None):
         report("Serato beatgrid import requires mutagen; using detected grid.")
         return None
     if suffix == ".m4a":
-        from serato_tags import MP4_BEATGRID_KEY, vorbis_decode
+        from serato_tags import MP4_BEATGRID_KEY, MP4_TEMPOMAP_KEY, vorbis_decode
         try:
             tags = MP4(str(path)).tags
             if tags is None:
                 report(f"M4A file has no tags; using detected grid.")
                 return None
-            values = tags.get(MP4_BEATGRID_KEY, [])
         except (MutagenError, OSError) as err:
             report(f"Could not read M4A tags ({type(err).__name__}); using detected grid.")
             return None
+        
+        # Try beatgrid first, then fall back to tempomap
+        values = tags.get(MP4_BEATGRID_KEY, [])
+        if values:
+            try:
+                # MP4FreeForm is a bytes subclass; ensure we have bytes for vorbis_decode
+                raw_value = values[0]
+                if hasattr(raw_value, '__bytes__'):
+                    raw_value = bytes(raw_value)
+                payload = vorbis_decode(raw_value, "Serato BeatGrid")
+            except (ValueError, UnicodeError, TypeError) as err:
+                report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}, {type(err).__name__}): "
+                       f"invalid base64 text or envelope header; trying tempomap.")
+                values = []  # Fall through to tempomap
+            else:
+                markers = parse_beatgrid(payload)
+                if markers is None:
+                    report(f"Serato beatgrid parse failed ({MP4_BEATGRID_KEY}): malformed binary; trying tempomap.")
+                else:
+                    return markers
+        
+        # Try tempomap if beatgrid wasn't found or failed
+        values = tags.get(MP4_TEMPOMAP_KEY, [])
         if not values:
-            report(f"Serato beatgrid key missing ({MP4_BEATGRID_KEY}); using detected grid.")
+            report(f"Neither beatgrid ({MP4_BEATGRID_KEY}) nor tempomap ({MP4_TEMPOMAP_KEY}) found; "
+                   "using detected grid.")
             return None
         try:
-            # MP4FreeForm is a bytes subclass; ensure we have bytes for vorbis_decode
             raw_value = values[0]
             if hasattr(raw_value, '__bytes__'):
                 raw_value = bytes(raw_value)
-            payload = vorbis_decode(raw_value, "Serato BeatGrid")
+            payload = vorbis_decode(raw_value, "Serato Tempo Map")
         except (ValueError, UnicodeError, TypeError) as err:
-            report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}, {type(err).__name__}): "
+            report(f"Serato tempomap decode failed ({MP4_TEMPOMAP_KEY}, {type(err).__name__}): "
                    f"invalid base64 text or envelope header; using detected grid.")
             return None
-        markers = parse_beatgrid(payload)
+        markers = parse_tempomap(payload)
         if markers is None:
-            report(f"Serato beatgrid parse failed ({MP4_BEATGRID_KEY}): malformed or unsupported binary BeatGrid; "
+            report(f"Serato tempomap parse failed ({MP4_TEMPOMAP_KEY}): malformed or unsupported binary; "
                    "using detected grid.")
         return markers
     try:
@@ -99,53 +183,95 @@ def read_beatgrid(path, on_diagnostic=None):
     except ID3NoHeaderError:
         return None
     except (MutagenError, OSError):
-        report("Could not read Serato beatgrid tag; using detected grid.")
+        report("Could not read Serato tags; using detected grid.")
         return None
+    
+    # Try BeatGrid first
     for frame in tags.getall("GEOB"):
         if frame.desc == "Serato BeatGrid":
             markers = parse_beatgrid(frame.data)
             if markers is None:
-                report("Malformed or unsupported Serato beatgrid tag; using detected grid.")
+                report("Malformed or unsupported Serato beatgrid tag; trying tempomap.")
+            else:
+                return markers
+            break
+    
+    # Fall back to Tempo Map if BeatGrid wasn't found or failed
+    for frame in tags.getall("GEOB"):
+        if frame.desc == "Serato Tempo Map":
+            markers = parse_tempomap(frame.data)
+            if markers is None:
+                report("Malformed or unsupported Serato tempomap tag; using detected grid.")
             return markers
+    
     return None
 
 
 def grid_from_markers(markers):
-    """(t1, bar_s, note) for a constant-tempo Serato grid, or (None, None, reason). Bar = 4 beats from marker 1."""
+    """(t1, bar_s, note) for a constant-tempo Serato grid, or (None, None, reason). Bar = 4 beats from marker 1.
+    
+    Handles both BeatGrid (with beats_to_next) and Tempo Map (with direct BPM per marker) formats.
+    Variable-tempo maps are rejected as unsupported.
+    """
     if not markers:
         return None, None, "no beatgrid markers"
+    
+    # Detect format: BeatGrid has beats_to_next, Tempo Map has bpm on all markers
+    is_tempomap = "beats_to_next" not in markers[0] and all("bpm" in m for m in markers)
+    
     try:
         if any(type(marker["pos"]) not in (int, float) for marker in markers):
-            return None, None, "Serato beatgrid positions must be numeric"
+            return None, None, "Serato marker positions must be numeric"
         positions = [float(marker["pos"]) for marker in markers]
         if any(not math.isfinite(position) or position < 0 for position in positions):
-            return None, None, "Serato beatgrid positions must be finite and nonnegative"
+            return None, None, "Serato marker positions must be finite and nonnegative"
         if any(right <= left for left, right in zip(positions, positions[1:])):
-            return None, None, "Serato beatgrid markers are out of order"
-        final_bpm = float(markers[-1]["bpm"])
-        if not math.isfinite(final_bpm) or final_bpm <= 0:
-            return None, None, "Serato beatgrid tempo is invalid"
-        if any(type(marker.get("beats_to_next")) is not int or not 0 < marker["beats_to_next"] <= 0xFFFFFFFF
-               for marker in markers[:-1]):
-            return None, None, "Serato beatgrid beat counts are invalid"
+            return None, None, "Serato markers are out of order"
+        
+        if is_tempomap:
+            # Tempo Map: all markers have BPM directly
+            bpms = [float(marker["bpm"]) for marker in markers]
+            if any(not math.isfinite(bpm) or bpm <= 0 for bpm in bpms):
+                return None, None, "Serato tempo map BPMs are invalid"
+            if not 60.0 <= min(bpms) and max(bpms) <= 220.0:
+                return None, None, f"Serato tempo map BPMs ({min(bpms):.1f}-{max(bpms):.1f}) are implausible"
+            
+            # Check if essentially constant tempo
+            avg_bpm = sum(bpms) / len(bpms)
+            if max(bpms) - min(bpms) > MULTI_MARKER_TOLERANCE * avg_bpm:
+                return None, None, (f"Serato tempo map changes tempo (range {min(bpms):.1f}-{max(bpms):.1f} BPM, "
+                                    f"{len(markers)} markers); keeping the detected grid")
+            bpm = bpms[0]
+        else:
+            # BeatGrid: validate beats_to_next fields
+            final_bpm = float(markers[-1]["bpm"])
+            if not math.isfinite(final_bpm) or final_bpm <= 0:
+                return None, None, "Serato beatgrid tempo is invalid"
+            if any(type(marker.get("beats_to_next")) is not int or not 0 < marker["beats_to_next"] <= 0xFFFFFFFF
+                   for marker in markers[:-1]):
+                return None, None, "Serato beatgrid beat counts are invalid"
+            
+            if len(markers) == 1:
+                bpm = final_bpm
+            else:
+                tempos = []
+                for current, following in zip(markers, markers[1:]):
+                    beats = current.get("beats_to_next")
+                    if not beats or following["pos"] <= current["pos"]:
+                        return None, None, "Serato beatgrid markers are out of order"
+                    tempos.append(60.0 * beats / (following["pos"] - current["pos"]))
+                tempos.append(final_bpm)
+                if max(tempos) - min(tempos) > MULTI_MARKER_TOLERANCE * min(tempos):
+                    return None, None, "Serato beatgrid changes tempo; keeping the detected grid"
+                bpm = tempos[0]
+        
+        if not 60.0 <= bpm <= 220.0:
+            return None, None, f"Serato tempo {bpm:.1f} BPM is implausible"
+    
     except (ValueError, TypeError, KeyError):
-        return None, None, "Serato beatgrid markers are malformed"
+        return None, None, "Serato markers are malformed"
+    
     first = markers[0]
-    if len(markers) == 1:
-        bpm = final_bpm
-    else:
-        tempos = []
-        for current, following in zip(markers, markers[1:]):
-            beats = current.get("beats_to_next")
-            if not beats or following["pos"] <= current["pos"]:
-                return None, None, "Serato beatgrid markers are out of order"
-            tempos.append(60.0 * beats / (following["pos"] - current["pos"]))
-        tempos.append(final_bpm)
-        if max(tempos) - min(tempos) > MULTI_MARKER_TOLERANCE * min(tempos):
-            return None, None, "Serato beatgrid changes tempo; keeping the detected grid"
-        bpm = tempos[0]
-    if not 60.0 <= bpm <= 220.0:
-        return None, None, f"Serato beatgrid tempo {bpm:.1f} BPM is implausible"
     return float(first["pos"]), 240.0 / float(bpm), ""
 
 

@@ -346,6 +346,123 @@ class SeratoGridTests(unittest.TestCase):
         self.assertFalse(grid["provenance"]["detected_tempo_agrees"])
         self.assertIn("double-time", note.lower())
 
+    def test_parse_real_tempomap_payload(self):
+        """Real Serato Tempo Map from 'You Make My Dreams' (live drums, variable tempo)."""
+        import base64
+        
+        # Real payload from Serato DJ Pro 5.0
+        b64_payload = """YXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtAABTZXJhdG8gVGVtcG8gTWFwAAIAAAE/+AAAAAAA
+AAAAABQAAAAAAAAAAEBURDQAAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAAWgEBUeBRgAAAA
+P9AAAAAAAAABAAAAAAAAAAAAAAAAAAAtAEBUF8XAAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAA
+AAA8AEBU0RWgAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAACOgEBUr86AAAAAP9AAAAAAAAAB
+AAAAAAAAAAAAAAAAAACdgEBVA/dAAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAADKgEBU25Pg
+AAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAFoAEBVAJhAAAAAP9AAAAAAAAABAAAAAAAAAAAA
+AAAAAAGcgEBU3rygAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAG6gEBU/dCAAAAAP9AAAAAA
+AAABAAAAAAAAAAAAAAAAAAHYgEBU4GAgAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAIFgEBV
+ElogAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAIUgEBUzkwgAAAAP9AAAAAAAAABAAAAAAAA
+AAAAAAAAAAIygEBVBy4AAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAJnAEBVPO5gAAAAP9AA
+AAAAAAABAAAAAAAAAAAAAAAAAAJ2AEBUs1tgAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAKU
+AEBU+fWgAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAMigEBVDv2AAAAAP9AAAAAAAAABAAAA
+AAAAAAAAAAAAAANXAEBVCOfgAAAAP9AAAAAAAAABAAAAAAAAAAAAAAAAAAPAAEBU8G9gAAAA
+P9AAAAAAAAABAAAAAAAAAAA=""".replace('\n', '')
+        
+        # Decode the envelope and body
+        raw = b64_payload.encode("ascii") + b"=" * (-len(b64_payload) % 4)
+        decoded = base64.b64decode(raw)
+        envelope = b"application/octet-stream\x00\x00Serato Tempo Map\x00"
+        self.assertTrue(decoded.startswith(envelope))
+        body = decoded[len(envelope):]
+        
+        # Parse it
+        markers = serato_grid.parse_tempomap(body)
+        self.assertIsNotNone(markers, "Tempo map should parse successfully")
+        self.assertEqual(len(markers), 20, "Should have 20 markers")
+        
+        # Check first marker
+        self.assertAlmostEqual(markers[0]["pos"], 1.5, places=2)
+        self.assertAlmostEqual(markers[0]["bpm"], 81.066, places=2)
+        
+        # Check BPM range
+        bpms = [m["bpm"] for m in markers]
+        self.assertGreater(min(bpms), 80)
+        self.assertLess(max(bpms), 86)
+        avg_bpm = sum(bpms) / len(bpms)
+        self.assertAlmostEqual(avg_bpm, 83.36, delta=0.5)
+        
+        # Most importantly: NOT ~167 BPM (double-time)
+        self.assertLess(avg_bpm, 90, "Average BPM should be around 84, not 167")
+        
+        # This is variable tempo (live drums), so grid_from_markers should reject it
+        t1, bar_s, reason = serato_grid.grid_from_markers(markers)
+        self.assertIsNone(t1)
+        self.assertIn("changes tempo", reason.lower())
+        self.assertIn("keeping the detected grid", reason.lower())
+
+    def test_m4a_tempomap_is_read_when_beatgrid_missing(self):
+        """M4A with only Tempo Map (no BeatGrid) should parse correctly."""
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_TEMPOMAP_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        # Create a simple constant-tempo map at 84 BPM
+        # (In practice, tempo maps are variable, but test a constant one)
+        def make_tempomap_body(markers_data):
+            """markers_data: [(pos, bpm), ...]"""
+            import struct
+            body = struct.pack(">I", 0x02000001)  # version
+            for i, (pos, bpm) in enumerate(markers_data):
+                # First marker uses pos_field, others use samples
+                if i == 0:
+                    pos_field = pos
+                    beat_count = 0
+                    samples = 0
+                else:
+                    pos_field = 0.0
+                    beat_count = 0
+                    # samples relative to first marker
+                    samples = int((pos - markers_data[0][0]) * 44100)
+                
+                body += struct.pack(">d", pos_field)  # position
+                body += struct.pack(">I", beat_count)  # beat count
+                body += struct.pack(">Q", samples)  # samples
+                body += struct.pack(">d", bpm)  # BPM
+                body += struct.pack(">d", 0.25)  # beat duration
+                body += b"\x01"  # flags
+            return body
+        
+        tempomap_body = make_tempomap_body([(0.5, 84.0), (2.0, 84.1)])
+        envelope = b"application/octet-stream\x00\x00Serato Tempo Map\x00"
+        payload = envelope + tempomap_body
+        
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tempomap.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_TEMPOMAP_KEY] = [MP4FreeForm(base64.b64encode(payload).rstrip(b"="))]
+            audio.save()
+            
+            markers = serato_grid.read_beatgrid(path)
+            self.assertIsNotNone(markers)
+            self.assertEqual(len(markers), 2)
+            self.assertAlmostEqual(markers[0]["bpm"], 84.0, places=1)
+
+    def test_variable_tempomap_reports_clear_diagnostic(self):
+        """Variable-tempo map should report that it's keeping detected grid."""
+        # Simulate a variable tempo map
+        markers = [
+            {"pos": 1.0, "bpm": 80.0},
+            {"pos": 2.0, "bpm": 85.0},  # 5 BPM variation
+        ]
+        
+        t1, bar_s, reason = serato_grid.grid_from_markers(markers)
+        self.assertIsNone(t1)
+        self.assertIn("changes tempo", reason.lower())
+        self.assertIn("keeping the detected grid", reason.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
