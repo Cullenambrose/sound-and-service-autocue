@@ -68,18 +68,26 @@ def read_beatgrid(path, on_diagnostic=None):
     if suffix == ".m4a":
         from serato_tags import MP4_BEATGRID_KEY, vorbis_decode
         try:
-            values = (MP4(str(path)).tags or {}).get(MP4_BEATGRID_KEY, [])
-        except (MutagenError, OSError):
-            report("Could not read Serato beatgrid tag; using detected grid.")
+            tags = MP4(str(path)).tags
+            if tags is None:
+                report(f"M4A file has no tags; using detected grid.")
+                return None
+            values = tags.get(MP4_BEATGRID_KEY, [])
+        except (MutagenError, OSError) as err:
+            report(f"Could not read M4A tags ({type(err).__name__}); using detected grid.")
             return None
         if not values:
-            report(f"Serato beatgrid key missing or empty ({MP4_BEATGRID_KEY}); using detected grid.")
+            report(f"Serato beatgrid key missing ({MP4_BEATGRID_KEY}); using detected grid.")
             return None
         try:
-            payload = vorbis_decode(values[0], "Serato BeatGrid")
-        except (ValueError, UnicodeError):
-            report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}): invalid base64 text or envelope header; "
-                   "using detected grid.")
+            # MP4FreeForm is a bytes subclass; ensure we have bytes for vorbis_decode
+            raw_value = values[0]
+            if hasattr(raw_value, '__bytes__'):
+                raw_value = bytes(raw_value)
+            payload = vorbis_decode(raw_value, "Serato BeatGrid")
+        except (ValueError, UnicodeError, TypeError) as err:
+            report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}, {type(err).__name__}): "
+                   f"invalid base64 text or envelope header; using detected grid.")
             return None
         markers = parse_beatgrid(payload)
         if markers is None:
@@ -146,6 +154,9 @@ def reconcile(detected, markers):
 
     Bar k starts at pos0 + k * 240 / bpm. The grid phase is never shifted toward detected downbeats or legacy
     (e.g. Mixed In Key) cue points; detected-tempo disagreement is only reported.
+    
+    When the detected tempo is approximately 2x or 0.5x the Serato tempo, the Serato grid is trusted,
+    as this indicates a likely detection error (double-time or half-time detection).
     """
     t1, bar_s, reason = grid_from_markers(markers)
     if t1 is None:
@@ -156,6 +167,11 @@ def reconcile(detected, markers):
         raise ValueError("Detected grid must have finite timing and a positive bar duration.")
     ratio = bar_s / detected_bar
     agrees = abs(ratio - 1.0) <= SERATO_TEMPO_TOLERANCE
+    # Check if detected is double-time or half-time relative to Serato
+    # ratio = 2.0 means bar_s is 2x detected_bar, so Serato BPM is 0.5x detected → detected is double-time
+    # ratio = 0.5 means bar_s is 0.5x detected_bar, so Serato BPM is 2x detected → detected is half-time
+    is_double_time = abs(ratio / 2.0 - 1.0) <= SERATO_TEMPO_TOLERANCE
+    is_half_time = abs(ratio / 0.5 - 1.0) <= SERATO_TEMPO_TOLERANCE
     grid = dict(detected)
     grid.update({"source": "serato_beatgrid", "t1": round(t1, 6), "bar_s": round(bar_s, 8),
                  "bpm": round(240.0 / bar_s, 4), "offset_ms": 0.0,
@@ -163,8 +179,17 @@ def reconcile(detected, markers):
                                 "user_verified": False, "detected_tempo_agrees": agrees,
                                 "detected_grid": dict(detected)}})
     if not agrees:
-        return grid, (f"used the Serato beatgrid as the bar ruler ({240.0 / bar_s:.2f} BPM); the detected tempo "
-                      f"({240.0 / detected_bar:.1f} BPM) disagrees, so review the grid in Serato")
+        serato_bpm = 240.0 / bar_s
+        detected_bpm = 240.0 / detected_bar
+        if is_double_time:
+            return grid, (f"used the Serato beatgrid as the bar ruler ({serato_bpm:.2f} BPM); the detected tempo "
+                          f"({detected_bpm:.1f} BPM) is approximately double-time, likely a detection error")
+        elif is_half_time:
+            return grid, (f"used the Serato beatgrid as the bar ruler ({serato_bpm:.2f} BPM); the detected tempo "
+                          f"({detected_bpm:.1f} BPM) is approximately half-time, likely a detection error")
+        else:
+            return grid, (f"used the Serato beatgrid as the bar ruler ({serato_bpm:.2f} BPM); the detected tempo "
+                          f"({detected_bpm:.1f} BPM) disagrees, so review the grid in Serato")
     shift = ((t1 - float(detected["t1"]) + bar_s / 2) % bar_s) - bar_s / 2
     return grid, f"used the Serato beatgrid (first beat {shift:+.2f}s from the detected downbeat)"
 

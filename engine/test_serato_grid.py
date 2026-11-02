@@ -35,10 +35,11 @@ class SeratoGridTests(unittest.TestCase):
         self.assertIn("used the Serato beatgrid", note)
 
     def test_tempo_disagreement_still_uses_serato_grid_as_ruler(self):
-        grid, note = serato_grid.reconcile(self.detected, [{"pos": 0.2, "bpm": 62.0}])
+        # Use 90 BPM vs 124 BPM - disagrees but not 2x or 0.5x
+        grid, note = serato_grid.reconcile(self.detected, [{"pos": 0.2, "bpm": 90.0}])
         self.assertEqual(grid["source"], "serato_beatgrid")
-        self.assertEqual((grid["t1"], grid["bpm"]), (0.2, 62.0))
-        self.assertAlmostEqual(grid["bar_s"], 240 / 62.0, places=6)
+        self.assertEqual((grid["t1"], grid["bpm"]), (0.2, 90.0))
+        self.assertAlmostEqual(grid["bar_s"], 240 / 90.0, places=6)
         self.assertFalse(grid["provenance"]["detected_tempo_agrees"])
         self.assertIn("disagrees", note)
 
@@ -128,6 +129,222 @@ class SeratoGridTests(unittest.TestCase):
         messages = []
         self.assertIsNone(serato_grid.read_beatgrid("track.flac", messages.append))
         self.assertTrue(any("MP3" in message for message in messages))
+
+    def test_m4a_beatgrid_at_84_bpm_is_read_correctly(self):
+        """M4A with Serato BeatGrid at 84 BPM should be read with source=serato_beatgrid."""
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        payload = b"application/octet-stream\x00\x00Serato BeatGrid\x00" + frame([{"pos": 0.25, "bpm": 84.0}])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "84bpm.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(base64.b64encode(payload).rstrip(b"="))]
+            audio.save()
+            
+            markers = serato_grid.read_beatgrid(path)
+            self.assertIsNotNone(markers)
+            self.assertEqual(len(markers), 1)
+            self.assertAlmostEqual(markers[0]["pos"], 0.25, places=3)
+            self.assertAlmostEqual(markers[0]["bpm"], 84.0, places=2)
+            
+            # Reconcile with a detected grid and verify source
+            detected = {"source": "beat_this_downbeats", "t1": 0.2, "bar_s": 2.857, "bpm": 84.0, "offset_ms": 0.0}
+            grid, note = serato_grid.reconcile(detected, markers)
+            self.assertEqual(grid["source"], "serato_beatgrid")
+            self.assertAlmostEqual(grid["bpm"], 84.0, places=1)
+
+    def test_m4a_beatgrid_with_newlines_in_base64_is_decoded(self):
+        """M4A BeatGrid with newlines in base64 should decode correctly."""
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        payload = b"application/octet-stream\x00\x00Serato BeatGrid\x00" + frame([{"pos": 1.0, "bpm": 120.0}])
+        encoded = base64.b64encode(payload)
+        # Add newlines every 64 chars (as Serato sometimes does)
+        encoded_with_newlines = b"\n".join([encoded[i:i+64] for i in range(0, len(encoded), 64)])
+        
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "newlines.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(encoded_with_newlines)]
+            audio.save()
+            
+            markers = serato_grid.read_beatgrid(path)
+            self.assertIsNotNone(markers)
+            self.assertAlmostEqual(markers[0]["bpm"], 120.0, places=2)
+
+    def test_m4a_beatgrid_without_padding_is_decoded(self):
+        """M4A BeatGrid without base64 padding should decode correctly."""
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        payload = b"application/octet-stream\x00\x00Serato BeatGrid\x00" + frame([{"pos": 0.5, "bpm": 128.0}])
+        encoded = base64.b64encode(payload).rstrip(b"=")  # Strip padding
+        
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nopad.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(encoded)]
+            audio.save()
+            
+            markers = serato_grid.read_beatgrid(path)
+            self.assertIsNotNone(markers)
+            self.assertAlmostEqual(markers[0]["bpm"], 128.0, places=2)
+
+    def test_m4a_malformed_envelope_reports_decode_failure(self):
+        """M4A BeatGrid with wrong envelope header should report decode failed."""
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        # Wrong envelope header
+        payload = b"wrong/header\x00\x00Serato BeatGrid\x00" + frame([{"pos": 0.5, "bpm": 128.0}])
+        
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad_envelope.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(base64.b64encode(payload))]
+            audio.save()
+            
+            messages = []
+            markers = serato_grid.read_beatgrid(path, messages.append)
+            self.assertIsNone(markers)
+            self.assertTrue(any("decode failed" in msg for msg in messages))
+
+    def test_m4a_malformed_binary_reports_parse_failure(self):
+        """M4A BeatGrid with malformed binary should report parse failed."""
+        import base64
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        # Correct envelope but malformed BeatGrid binary
+        payload = b"application/octet-stream\x00\x00Serato BeatGrid\x00\xff\xff\xff\xff"
+        
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad_binary.m4a"
+            path.write_bytes(fixtures.m4a())
+            audio = MP4(path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(base64.b64encode(payload))]
+            audio.save()
+            
+            messages = []
+            markers = serato_grid.read_beatgrid(path, messages.append)
+            self.assertIsNone(markers)
+            self.assertTrue(any("parse failed" in msg for msg in messages))
+
+    def test_m4a_missing_key_reports_key_missing(self):
+        """M4A without BeatGrid key should report key missing."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "no_key.m4a"
+            path.write_bytes(fixtures.m4a())
+            # Don't add any tags
+            
+            messages = []
+            markers = serato_grid.read_beatgrid(path, messages.append)
+            self.assertIsNone(markers)
+            # Should report either "no tags" or "key missing"
+            self.assertTrue(any("no tags" in msg.lower() or "key missing" in msg.lower() for msg in messages))
+
+    def test_mp3_and_m4a_parity_for_same_beatgrid(self):
+        """MP3 GEOB and M4A freeform should give identical results for the same BeatGrid."""
+        import base64
+        from mutagen.id3 import ID3, GEOB
+        from mutagen.mp4 import MP4, MP4FreeForm
+        from serato_tags import MP4_BEATGRID_KEY
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from web import fixtures
+        
+        beatgrid_binary = frame([{"pos": 1.5, "bpm": 100.0}])
+        
+        with tempfile.TemporaryDirectory() as directory:
+            # Create MP3 with GEOB
+            mp3_path = Path(directory) / "test.mp3"
+            tags = ID3()
+            tags.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato BeatGrid", data=beatgrid_binary))
+            tags.save(mp3_path)
+            mp3_markers = serato_grid.read_beatgrid(mp3_path)
+            
+            # Create M4A with freeform
+            m4a_path = Path(directory) / "test.m4a"
+            m4a_path.write_bytes(fixtures.m4a())
+            payload = b"application/octet-stream\x00\x00Serato BeatGrid\x00" + beatgrid_binary
+            audio = MP4(m4a_path)
+            if audio.tags is None:
+                audio.add_tags()
+            audio[MP4_BEATGRID_KEY] = [MP4FreeForm(base64.b64encode(payload).rstrip(b"="))]
+            audio.save()
+            m4a_markers = serato_grid.read_beatgrid(m4a_path)
+            
+            # Both should give identical markers
+            self.assertEqual(mp3_markers, m4a_markers)
+            self.assertAlmostEqual(mp3_markers[0]["bpm"], 100.0, places=2)
+
+    def test_double_time_detection_reports_likely_error(self):
+        """When detected tempo is ~2x Serato, report as likely detection error."""
+        markers = [{"pos": 0.5, "bpm": 84.0}]
+        # Detected grid is approximately double-time (168 BPM vs 84 BPM)
+        detected = {"source": "beat_this_downbeats", "t1": 0.5, "bar_s": 240.0 / 168.0, "bpm": 168.0, "offset_ms": 0.0}
+        
+        grid, note = serato_grid.reconcile(detected, markers)
+        self.assertEqual(grid["source"], "serato_beatgrid")
+        self.assertAlmostEqual(grid["bpm"], 84.0, places=1)
+        self.assertIn("double-time", note.lower())
+        self.assertIn("detection error", note.lower())
+
+    def test_half_time_detection_reports_likely_error(self):
+        """When detected tempo is ~0.5x Serato, report as likely detection error."""
+        markers = [{"pos": 0.5, "bpm": 166.0}]
+        # Detected grid is approximately half-time (83 BPM vs 166 BPM)
+        detected = {"source": "beat_this_downbeats", "t1": 0.5, "bar_s": 240.0 / 83.0, "bpm": 83.0, "offset_ms": 0.0}
+        
+        grid, note = serato_grid.reconcile(detected, markers)
+        self.assertEqual(grid["source"], "serato_beatgrid")
+        self.assertAlmostEqual(grid["bpm"], 166.0, places=1)
+        self.assertIn("half-time", note.lower())
+        self.assertIn("detection error", note.lower())
+
+    def test_exact_double_time_case_84_vs_166(self):
+        """Real-world case: Serato 84 BPM, detected 166.885 BPM (double-time)."""
+        markers = [{"pos": 0.25, "bpm": 84.0}]
+        # Detected is ~2x
+        detected = {"source": "beat_this_downbeats", "t1": 0.2, "bar_s": 240.0 / 166.885, "bpm": 166.885, "offset_ms": 0.0}
+        
+        grid, note = serato_grid.reconcile(detected, markers)
+        self.assertEqual(grid["source"], "serato_beatgrid")
+        self.assertAlmostEqual(grid["bpm"], 84.0, places=1)
+        self.assertFalse(grid["provenance"]["detected_tempo_agrees"])
+        self.assertIn("double-time", note.lower())
 
 
 if __name__ == "__main__":
