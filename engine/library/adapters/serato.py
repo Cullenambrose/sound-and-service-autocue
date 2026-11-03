@@ -273,13 +273,16 @@ class SeratoAdapter(DJSoftwareAdapter):
         *,
         overwrite: bool = False,
         apply: bool = False,
+        db_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Write a Serato crate file.
         
         This follows the same safety patterns as tag_gate:
         - Refuses if Serato is running
         - Requires explicit --apply flag for actual writes
-        - Creates backup before any overwrite
+        - Backs up ENTIRE Subcrates folder before ANY write
+        - Verifies backups byte-for-byte
+        - Logs to audit database
         - Returns dry-run preview by default
         
         Args:
@@ -288,6 +291,7 @@ class SeratoAdapter(DJSoftwareAdapter):
             serato_dir: Optional path to _Serato_ directory. If None, searches standard locations.
             overwrite: If True, allow overwriting existing .crate file
             apply: If True, actually write. If False (default), dry-run only.
+            db_path: Database path for audit logging.
             
         Returns:
             Dict with operation results and crate metadata.
@@ -299,6 +303,9 @@ class SeratoAdapter(DJSoftwareAdapter):
         import serato_database
         import shutil
         import time
+        import hashlib
+        import filecmp
+        from .. import db
         
         # 1. Check if Serato is running
         if self.detect_running():
@@ -327,7 +334,6 @@ class SeratoAdapter(DJSoftwareAdapter):
         
         # 4. Check for existing crate
         crate_exists = crate_path.exists()
-        backup_path = None
         
         if crate_exists and not overwrite:
             raise FileExistsError(
@@ -347,21 +353,44 @@ class SeratoAdapter(DJSoftwareAdapter):
                 "tracks": tracks,
             }
         
-        # 6. Create backup if overwriting
-        if crate_exists:
-            # Back up the entire Subcrates folder
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            backup_dir = Path.home() / ".autocue" / "backups" / "subcrates" / timestamp
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            
-            backup_path = backup_dir / crate_path.name
-            shutil.copy2(crate_path, backup_path)
-            
-            # Verify backup
-            if not backup_path.exists():
-                raise RuntimeError(f"Backup verification failed: {backup_path}")
+        # 6. ALWAYS back up the ENTIRE Subcrates folder before ANY write
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_base = Path.home() / ".autocue" / "backups" / timestamp
+        backup_subcrates_dir = backup_base / "Subcrates"
+        backup_subcrates_dir.mkdir(parents=True, exist_ok=True)
         
-        # 7. Write the crate
+        # Copy entire Subcrates folder
+        if subcrates_dir.exists():
+            for item in subcrates_dir.iterdir():
+                if item.is_file() and item.suffix == '.crate':
+                    dest = backup_subcrates_dir / item.name
+                    shutil.copy2(item, dest)
+        
+        # 7. Verify backup byte-for-byte
+        backup_verified = True
+        verification_errors = []
+        
+        for item in subcrates_dir.iterdir():
+            if item.is_file() and item.suffix == '.crate':
+                backup_file = backup_subcrates_dir / item.name
+                if not backup_file.exists():
+                    verification_errors.append(f"Missing backup: {item.name}")
+                    backup_verified = False
+                    continue
+                
+                # Verify using filecmp (byte-for-byte comparison)
+                if not filecmp.cmp(item, backup_file, shallow=False):
+                    verification_errors.append(f"Backup mismatch: {item.name}")
+                    backup_verified = False
+        
+        if not backup_verified:
+            raise RuntimeError(
+                f"Backup verification failed: {', '.join(verification_errors)}"
+            )
+        
+        backup_path = str(backup_subcrates_dir)
+        
+        # 8. Write the crate
         try:
             result = serato_database.write_crate(
                 crate_path,
@@ -370,17 +399,43 @@ class SeratoAdapter(DJSoftwareAdapter):
             )
         except Exception as e:
             # Restore backup if write failed
-            if backup_path and backup_path.exists():
-                shutil.copy2(backup_path, crate_path)
+            if backup_subcrates_dir.exists():
+                # Restore the specific crate file
+                backup_crate = backup_subcrates_dir / crate_path.name
+                if backup_crate.exists():
+                    shutil.copy2(backup_crate, crate_path)
             raise RuntimeError(f"Failed to write crate: {e}")
         
-        # 8. Return success result
+        # 9. Write audit log
+        change_id = None
+        if db_path:
+            try:
+                with db.get_db(db_path) as conn:
+                    before_summary = f"existing crate ({len(tracks)} tracks)" if crate_exists else "new crate"
+                    after_summary = f"{len(tracks)} tracks"
+                    
+                    change_id = db.log_change(
+                        conn,
+                        path=str(crate_path),
+                        adapter=self.name,
+                        operation="write_crate",
+                        before_summary=before_summary,
+                        after_summary=after_summary,
+                        backup_path=backup_path,
+                    )
+            except Exception as e:
+                # Log failure is not fatal, but report it
+                print(f"Warning: Failed to log change to database: {e}")
+        
+        # 10. Return success result
         return {
             "success": True,
             "name": result['name'],
             "path": result['path'],
             "track_count": result['track_count'],
             "file_size": result['file_size'],
-            "backup_path": str(backup_path) if backup_path else None,
+            "backup_path": backup_path,
+            "backup_verified": backup_verified,
             "overwrote_existing": crate_exists,
+            "change_id": change_id,
         }

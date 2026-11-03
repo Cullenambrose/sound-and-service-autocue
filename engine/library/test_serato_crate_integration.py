@@ -166,11 +166,14 @@ class TestSeratoAdapterWriteCrate:
             
             # Should have created backup
             assert result['backup_path'] is not None
-            backup_path = Path(result['backup_path'])
-            assert backup_path.exists()
+            backup_dir = Path(result['backup_path'])
+            assert backup_dir.exists()
+            assert backup_dir.is_dir()
             
-            # Verify backup contains original data
-            backup_parsed = serato_database.parse_crate(backup_path)
+            # Verify backup contains original data (backup_path is now the Subcrates directory)
+            backup_crate = backup_dir / "Backup.crate"
+            assert backup_crate.exists()
+            backup_parsed = serato_database.parse_crate(backup_crate)
             assert backup_parsed['track_count'] == 1
             
             # Verify new crate has new data
@@ -230,6 +233,169 @@ class TestSeratoAdapterWriteCrate:
             
             crate_path = serato_dir / "Subcrates" / "House%%Deep.crate"
             assert crate_path.exists()
+    
+    def test_always_backs_up_entire_subcrates_folder(self):
+        """Test that ENTIRE Subcrates folder is backed up before ANY write."""
+        adapter = SeratoAdapter(process_checker=lambda: False)
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            serato_dir = Path(tmpdir) / "_Serato_"
+            serato_dir.mkdir()
+            subcrates_dir = serato_dir / "Subcrates"
+            subcrates_dir.mkdir()
+            
+            # Create some existing crates
+            existing_crates = ["Existing1.crate", "Existing2.crate", "Existing3.crate"]
+            for crate_name in existing_crates:
+                crate_path = subcrates_dir / crate_name
+                # Write a simple crate
+                import serato_database
+                serato_database.write_crate(crate_path, ['/existing.mp3'])
+            
+            # Write a NEW crate (not overwriting)
+            result = adapter.write_crate(
+                name="NewCrate",
+                tracks=['/new.mp3'],
+                serato_dir=serato_dir,
+                apply=True,
+            )
+            
+            # Verify backup was created
+            assert result['backup_path'] is not None
+            backup_dir = Path(result['backup_path'])
+            assert backup_dir.exists()
+            
+            # Verify ALL existing crates were backed up
+            for crate_name in existing_crates:
+                backup_crate = backup_dir / crate_name
+                assert backup_crate.exists(), f"Expected backup of {crate_name}"
+    
+    def test_backup_verification_byte_for_byte(self):
+        """Test that backups are verified byte-for-byte."""
+        adapter = SeratoAdapter(process_checker=lambda: False)
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            serato_dir = Path(tmpdir) / "_Serato_"
+            serato_dir.mkdir()
+            subcrates_dir = serato_dir / "Subcrates"
+            subcrates_dir.mkdir()
+            
+            # Create an existing crate
+            import serato_database
+            existing_crate = subcrates_dir / "Existing.crate"
+            serato_database.write_crate(existing_crate, ['/track1.mp3', '/track2.mp3'])
+            
+            # Write a new crate
+            result = adapter.write_crate(
+                name="NewCrate",
+                tracks=['/new.mp3'],
+                serato_dir=serato_dir,
+                apply=True,
+            )
+            
+            # Verify backup_verified flag is True
+            assert result['backup_verified'] is True
+            
+            # Verify backup exists and matches original
+            backup_dir = Path(result['backup_path'])
+            backup_crate = backup_dir / "Existing.crate"
+            assert backup_crate.exists()
+            
+            # Verify byte-for-byte match using filecmp
+            import filecmp
+            assert filecmp.cmp(existing_crate, backup_crate, shallow=False)
+    
+    def test_audit_log_on_crate_write(self):
+        """Test that every applied crate write logs to audit database."""
+        adapter = SeratoAdapter(process_checker=lambda: False)
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            serato_dir = tmpdir / "_Serato_"
+            serato_dir.mkdir()
+            subcrates_dir = serato_dir / "Subcrates"
+            subcrates_dir.mkdir()
+            
+            # Create test database
+            test_db = tmpdir / "test.db"
+            from library import db
+            db.migrate(str(test_db))
+            
+            # Write a new crate
+            result = adapter.write_crate(
+                name="TestCrate",
+                tracks=['/track1.mp3', '/track2.mp3'],
+                serato_dir=serato_dir,
+                apply=True,
+                db_path=str(test_db),
+            )
+            
+            # Verify audit log was created
+            assert result['change_id'] is not None
+            
+            # Verify audit record in database
+            with db.get_db(str(test_db)) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM changes WHERE id = ?",
+                    (result['change_id'],)
+                )
+                change = cursor.fetchone()
+                
+                assert change is not None
+                assert change['adapter'] == 'serato'
+                assert change['operation'] == 'write_crate'
+                assert 'TestCrate.crate' in change['path']
+                assert '2 tracks' in change['after_summary']
+                assert change['backup_path'] is not None
+    
+    def test_audit_log_distinguishes_new_vs_overwrite(self):
+        """Test that audit log distinguishes new crates from overwrites."""
+        adapter = SeratoAdapter(process_checker=lambda: False)
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            serato_dir = tmpdir / "_Serato_"
+            serato_dir.mkdir()
+            subcrates_dir = serato_dir / "Subcrates"
+            subcrates_dir.mkdir()
+            
+            test_db = tmpdir / "test.db"
+            from library import db
+            db.migrate(str(test_db))
+            
+            # Write initial crate
+            result1 = adapter.write_crate(
+                name="Test",
+                tracks=['/track1.mp3'],
+                serato_dir=serato_dir,
+                apply=True,
+                db_path=str(test_db),
+            )
+            
+            # Overwrite it
+            result2 = adapter.write_crate(
+                name="Test",
+                tracks=['/track1.mp3', '/track2.mp3'],
+                serato_dir=serato_dir,
+                overwrite=True,
+                apply=True,
+                db_path=str(test_db),
+            )
+            
+            # Verify both are logged
+            with db.get_db(str(test_db)) as conn:
+                cursor = conn.cursor()
+                
+                # First write (new crate)
+                cursor.execute("SELECT * FROM changes WHERE id = ?", (result1['change_id'],))
+                change1 = cursor.fetchone()
+                assert 'new crate' in change1['before_summary']
+                
+                # Second write (overwrite)
+                cursor.execute("SELECT * FROM changes WHERE id = ?", (result2['change_id'],))
+                change2 = cursor.fetchone()
+                assert 'existing crate' in change2['before_summary']
 
 
 class TestCLIWriteCrate:
