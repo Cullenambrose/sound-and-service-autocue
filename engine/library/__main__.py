@@ -313,6 +313,236 @@ def crates_command(args):
     return 0
 
 
+def match_command(args):
+    """Match requested songs against library database."""
+    from . import matcher
+    
+    # Load request list
+    request_path = Path(args.request_file)
+    if not request_path.exists():
+        print(f"Error: Request file not found: {request_path}", file=sys.stderr)
+        return 1
+    
+    # Parse input (JSON or CSV)
+    if request_path.suffix.lower() == ".json":
+        with open(request_path) as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "tracks" in data:
+                requests = data["tracks"]
+            elif isinstance(data, list):
+                requests = data
+            else:
+                print("Error: JSON must be a list or object with 'tracks' key", file=sys.stderr)
+                return 1
+    elif request_path.suffix.lower() == ".csv":
+        import csv
+        requests = []
+        with open(request_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                requests.append({"artist": row.get("artist", ""), "title": row.get("title", "")})
+    else:
+        print(f"Error: Unsupported format. Use .json or .csv", file=sys.stderr)
+        return 1
+    
+    # Load library
+    with db.get_db(args.db) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, path, title, artist, album, genre, bpm, key FROM tracks")
+        library_tracks = [dict(row) for row in cursor.fetchall()]
+    
+    print(f"Loaded {len(library_tracks)} tracks from library")
+    print(f"Matching {len(requests)} requested songs...")
+    
+    # Configure matching
+    config = matcher.MatchConfig(
+        prefer_clean=not args.prefer_dirty,
+        prefer_intro=not args.no_prefer_intro,
+        min_confidence=args.min_confidence,
+        fuzzy_threshold=args.fuzzy_threshold,
+    )
+    
+    # Match each request
+    results = []
+    for i, req in enumerate(requests, 1):
+        result = matcher.match_track(req, library_tracks, config)
+        results.append(result)
+        
+        status_sym = {"matched": "✓", "ambiguous": "~", "missing": "✗"}[result.status]
+        print(f"[{i}/{len(requests)}] {status_sym} {req.get('artist', '')} - {req.get('title', '')} ({result.confidence:.2f})")
+    
+    # Output results - clean internal fields before serialization
+    def clean_track(track):
+        """Remove internal fields from track dict."""
+        if track is None:
+            return None
+        return {k: v for k, v in track.items() if not k.startswith("_")}
+    
+    output = {
+        "results": [
+            {
+                "request": r.request,
+                "status": r.status,
+                "confidence": r.confidence,
+                "matched_track": clean_track(r.matched_track),
+                "candidates": [clean_track(c) for c in r.candidates] if args.include_candidates else [],
+                "reason": r.reason,
+            }
+            for r in results
+        ],
+        "summary": {
+            "total": len(results),
+            "matched": sum(1 for r in results if r.status == "matched"),
+            "ambiguous": sum(1 for r in results if r.status == "ambiguous"),
+            "missing": sum(1 for r in results if r.status == "missing"),
+        }
+    }
+    
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(output, f, indent=2)
+        print(f"\nResults written to {args.output}")
+    else:
+        print("\n" + json.dumps(output, indent=2))
+    
+    return 0
+
+
+def build_crate_plan_command(args):
+    """Build a crate plan from match results."""
+    from . import matcher
+    
+    # Load match results
+    match_path = Path(args.match_file)
+    if not match_path.exists():
+        print(f"Error: Match file not found: {match_path}", file=sys.stderr)
+        return 1
+    
+    with open(match_path) as f:
+        match_data = json.load(f)
+    
+    # Reconstruct match results
+    results = []
+    for r in match_data["results"]:
+        result = matcher.MatchResult(
+            request=r["request"],
+            status=r["status"],
+            confidence=r["confidence"],
+            matched_track=r.get("matched_track"),
+            candidates=r.get("candidates", []),
+            reason=r.get("reason"),
+        )
+        results.append(result)
+    
+    # Load do-not-play list if provided
+    do_not_play_results = []
+    if args.do_not_play:
+        dnp_path = Path(args.do_not_play)
+        if not dnp_path.exists():
+            print(f"Warning: Do-not-play file not found: {dnp_path}", file=sys.stderr)
+        else:
+            # Parse do-not-play list
+            if dnp_path.suffix.lower() == ".json":
+                with open(dnp_path) as f:
+                    dnp_data = json.load(f)
+                    if isinstance(dnp_data, dict) and "tracks" in dnp_data:
+                        dnp_requests = dnp_data["tracks"]
+                    elif isinstance(dnp_data, list):
+                        dnp_requests = dnp_data
+                    else:
+                        print("Warning: Do-not-play JSON must be a list or object with 'tracks' key", file=sys.stderr)
+                        dnp_requests = []
+            elif dnp_path.suffix.lower() == ".csv":
+                import csv
+                dnp_requests = []
+                with open(dnp_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        dnp_requests.append({"artist": row.get("artist", ""), "title": row.get("title", "")})
+            else:
+                print("Warning: Do-not-play must be .json or .csv", file=sys.stderr)
+                dnp_requests = []
+            
+            # Match do-not-play against library
+            with db.get_db(args.db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, path, title, artist, album, genre, bpm, key FROM tracks")
+                library_tracks = [dict(row) for row in cursor.fetchall()]
+            
+            config = matcher.MatchConfig(min_confidence=0.6)  # Lower threshold for do-not-play
+            for dnp_req in dnp_requests:
+                dnp_result = matcher.match_track(dnp_req, library_tracks, config)
+                do_not_play_results.append(dnp_result)
+    
+    # Extract request order from original results
+    request_order = [r.request for r in results]
+    
+    # Build plan
+    plan = matcher.build_crate_plan(
+        results,
+        do_not_play_results,
+        request_order,
+        crate_name=args.crate_name
+    )
+    
+    # Output plan
+    output = {
+        "crate_name": plan.metadata["crate_name"],
+        "ordered_track_ids": plan.ordered_track_ids,
+        "matched": [
+            {
+                "request": r.request,
+                "track": r.matched_track,
+                "confidence": r.confidence,
+            }
+            for r in plan.matched
+        ],
+        "ambiguous": [
+            {
+                "request": r.request,
+                "track": r.matched_track,
+                "candidates": r.candidates[:3],
+                "confidence": r.confidence,
+            }
+            for r in plan.ambiguous
+        ],
+        "missing": [
+            {
+                "request": r.request,
+                "reason": r.reason,
+            }
+            for r in plan.missing
+        ],
+        "do_not_play_found": [
+            {
+                "id": t["id"],
+                "artist": t.get("artist"),
+                "title": t.get("title"),
+            }
+            for t in plan.do_not_play_found
+        ],
+        "metadata": plan.metadata,
+    }
+    
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(output, f, indent=2)
+        print(f"Crate plan written to {args.output}")
+    else:
+        print(json.dumps(output, indent=2))
+    
+    # Print summary
+    print(f"\n=== Crate Plan Summary ===")
+    print(f"Crate: {plan.metadata['crate_name']}")
+    print(f"Matched: {plan.metadata['matched_count']}/{plan.metadata['total_requested']}")
+    print(f"Ambiguous: {plan.metadata['ambiguous_count']}")
+    print(f"Missing: {plan.metadata['missing_count']}")
+    print(f"Do-not-play found: {plan.metadata['do_not_play_found']}")
+    print(f"Tracks in crate: {len(plan.ordered_track_ids)}")
+    
+    return 0
+
+
 def main(argv=None):
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -371,6 +601,69 @@ def main(argv=None):
         help="Just list crates without importing"
     )
     
+    # match command
+    match_parser = subparsers.add_parser(
+        "match",
+        help="Match requested songs against library database"
+    )
+    match_parser.add_argument(
+        "request_file",
+        help="JSON or CSV file with requested tracks"
+    )
+    match_parser.add_argument(
+        "--output", "-o",
+        help="Output file for match results (default: stdout)"
+    )
+    match_parser.add_argument(
+        "--prefer-dirty",
+        action="store_true",
+        help="Prefer dirty/explicit versions over clean"
+    )
+    match_parser.add_argument(
+        "--no-prefer-intro",
+        action="store_true",
+        help="Don't prefer intro edits"
+    )
+    match_parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.7,
+        help="Minimum confidence threshold (0.0-1.0, default: 0.7)"
+    )
+    match_parser.add_argument(
+        "--fuzzy-threshold",
+        type=float,
+        default=0.8,
+        help="Fuzzy matching threshold (0.0-1.0, default: 0.8)"
+    )
+    match_parser.add_argument(
+        "--include-candidates",
+        action="store_true",
+        help="Include candidate tracks in output"
+    )
+    
+    # build-crate-plan command
+    crate_plan_parser = subparsers.add_parser(
+        "build-crate-plan",
+        help="Build a crate plan from match results"
+    )
+    crate_plan_parser.add_argument(
+        "match_file",
+        help="JSON file with match results from 'match' command"
+    )
+    crate_plan_parser.add_argument(
+        "--output", "-o",
+        help="Output file for crate plan (default: stdout)"
+    )
+    crate_plan_parser.add_argument(
+        "--do-not-play",
+        help="JSON or CSV file with do-not-play list"
+    )
+    crate_plan_parser.add_argument(
+        "--crate-name",
+        help="Name for the crate (default: Generated Crate)"
+    )
+    
     args = parser.parse_args(argv)
     
     # Expand db path
@@ -387,6 +680,10 @@ def main(argv=None):
         return import_serato_command(args)
     elif args.command == "crates":
         return crates_command(args)
+    elif args.command == "match":
+        return match_command(args)
+    elif args.command == "build-crate-plan":
+        return build_crate_plan_command(args)
     
     return 1
 
