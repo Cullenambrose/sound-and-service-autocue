@@ -543,6 +543,70 @@ def build_crate_plan_command(args):
     return 0
 
 
+def write_crate_command(args):
+    """Write a new Serato crate file."""
+    # Get adapter
+    adapter = get_adapter("serato")
+    if not adapter:
+        print("Error: Serato adapter not found", file=sys.stderr)
+        return 1
+    
+    # Resolve serato_dir early if provided, for use in both read and write
+    resolved_serato_dir = None
+    if hasattr(args, 'serato_dir') and args.serato_dir:
+        resolved_serato_dir = Path(args.serato_dir).expanduser().resolve()
+        if resolved_serato_dir.name != "_Serato_":
+            resolved_serato_dir = resolved_serato_dir / "_Serato_"
+    
+    # Parse track list
+    if args.from_file:
+        # Read tracks from file (one path per line)
+        try:
+            with open(args.from_file, 'r') as f:
+                tracks = [line.strip() for line in f if line.strip()]
+        except OSError as e:
+            print(f"Error reading track list file: {e}", file=sys.stderr)
+            return 1
+    elif args.from_crate:
+        # Read tracks from existing crate
+        tracks = adapter.read_crate(args.from_crate, serato_dir=resolved_serato_dir)
+        if not tracks:
+            print(f"Error: Crate '{args.from_crate}' not found or empty", file=sys.stderr)
+            return 1
+        print(f"Read {len(tracks)} tracks from existing crate '{args.from_crate}'")
+    else:
+        print("Error: Must specify either --from or --from-crate", file=sys.stderr)
+        return 1
+    
+    if not tracks:
+        print("Error: No tracks to write", file=sys.stderr)
+        return 1
+    
+    # Execute write (using resolved_serato_dir from above)
+    try:
+        result = adapter.write_crate(
+            name=args.name,
+            tracks=tracks,
+            serato_dir=resolved_serato_dir,
+            overwrite=args.overwrite,
+            apply=args.apply,
+            db_path=args.db,
+        )
+        
+        print(json.dumps(result, indent=2))
+        
+        if result.get("dry_run"):
+            print("\nDry-run mode. Use --apply to write.")
+        else:
+            print("\nWrite successful!")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main(argv=None):
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -664,6 +728,39 @@ def main(argv=None):
         help="Name for the crate (default: Generated Crate)"
     )
     
+    # write-crate command
+    write_crate_parser = subparsers.add_parser(
+        "write-crate",
+        help="Write a new Serato crate file"
+    )
+    write_crate_parser.add_argument(
+        "name",
+        help="Crate name (supports nested with %% separator, e.g. 'House%%Deep')"
+    )
+    write_crate_parser.add_argument(
+        "--from",
+        dest="from_file",
+        help="File containing track paths (one per line)"
+    )
+    write_crate_parser.add_argument(
+        "--from-crate",
+        help="Copy tracks from existing crate name"
+    )
+    write_crate_parser.add_argument(
+        "--serato-dir",
+        help="Path to Serato directory (defaults to search standard locations)"
+    )
+    write_crate_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually write the crate (default is dry-run)"
+    )
+    write_crate_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting existing crate file"
+    )
+    
     args = parser.parse_args(argv)
     
     # Expand db path
@@ -684,6 +781,8 @@ def main(argv=None):
         return match_command(args)
     elif args.command == "build-crate-plan":
         return build_crate_plan_command(args)
+    elif args.command == "write-crate":
+        return write_crate_command(args)
     
     return 1
 
