@@ -138,45 +138,46 @@ def read_beatgrid(path, on_diagnostic=None):
             report(f"Could not read M4A tags ({type(err).__name__}); using detected grid.")
             return None
         
-        # Try beatgrid first, then fall back to tempomap
-        values = tags.get(MP4_BEATGRID_KEY, [])
-        if values:
+        # Try beatgrid first
+        beatgrid_values = tags.get(MP4_BEATGRID_KEY, [])
+        
+        if beatgrid_values:
             try:
                 # MP4FreeForm is a bytes subclass; ensure we have bytes for vorbis_decode
-                raw_value = values[0]
+                raw_value = beatgrid_values[0]
                 if hasattr(raw_value, '__bytes__'):
                     raw_value = bytes(raw_value)
                 payload = vorbis_decode(raw_value, "Serato BeatGrid")
-            except (ValueError, UnicodeError, TypeError) as err:
-                report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}, {type(err).__name__}): "
-                       f"invalid base64 text or envelope header; trying tempomap.")
-                values = []  # Fall through to tempomap
-            else:
-                markers = parse_beatgrid(payload)
-                if markers is None:
-                    report(f"Serato beatgrid parse failed ({MP4_BEATGRID_KEY}): malformed binary; trying tempomap.")
-                else:
-                    return markers
-        
-        # Try tempomap if beatgrid wasn't found or failed
-        values = tags.get(MP4_TEMPOMAP_KEY, [])
-        if not values:
-            report(f"Neither beatgrid ({MP4_BEATGRID_KEY}) nor tempomap ({MP4_TEMPOMAP_KEY}) found; "
-                   "using detected grid.")
+            except (ValueError, UnicodeError, TypeError):
+                # Beatgrid decode failed - report immediately, don't try tempomap
+                report(f"Serato beatgrid decode failed ({MP4_BEATGRID_KEY}); using detected grid.")
+                return None
+            
+            markers = parse_beatgrid(payload)
+            if markers is not None:
+                return markers
+            # Beatgrid parse failed - report immediately, don't try tempomap
+            report(f"Serato beatgrid parse failed ({MP4_BEATGRID_KEY}); using detected grid.")
             return None
+        
+        # Beatgrid key not present, try tempomap
+        tempomap_values = tags.get(MP4_TEMPOMAP_KEY, [])
+        if not tempomap_values:
+            report(f"Serato beatgrid key missing ({MP4_BEATGRID_KEY}); using detected grid.")
+            return None
+        
         try:
-            raw_value = values[0]
+            raw_value = tempomap_values[0]
             if hasattr(raw_value, '__bytes__'):
                 raw_value = bytes(raw_value)
             payload = vorbis_decode(raw_value, "Serato Tempo Map")
-        except (ValueError, UnicodeError, TypeError) as err:
-            report(f"Serato tempomap decode failed ({MP4_TEMPOMAP_KEY}, {type(err).__name__}): "
-                   f"invalid base64 text or envelope header; using detected grid.")
+        except (ValueError, UnicodeError, TypeError):
+            report(f"Serato tempomap decode failed ({MP4_TEMPOMAP_KEY}); using detected grid.")
             return None
+        
         markers = parse_tempomap(payload)
         if markers is None:
-            report(f"Serato tempomap parse failed ({MP4_TEMPOMAP_KEY}): malformed or unsupported binary; "
-                   "using detected grid.")
+            report(f"Serato tempomap parse failed ({MP4_TEMPOMAP_KEY}); using detected grid.")
         return markers
     try:
         tags = ID3(str(path))
