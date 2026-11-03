@@ -359,3 +359,123 @@ def list_crates(serato_dir: Path) -> List[Path]:
         return []
     
     return sorted(subcrates_dir.rglob('*.crate'))
+
+
+def _write_tlv_record(tag: bytes, value: bytes) -> bytes:
+    """Write a tag-length-value record.
+    
+    Args:
+        tag: 4-byte tag identifier
+        value: Value bytes
+        
+    Returns:
+        Encoded TLV record
+    """
+    if len(tag) != 4:
+        raise ValueError(f"Tag must be exactly 4 bytes, got {len(tag)}")
+    length = len(value)
+    return tag + struct.pack('>I', length) + value
+
+
+def _encode_utf16be(text: str) -> bytes:
+    """Encode text as UTF-16BE.
+    
+    Args:
+        text: Text to encode
+        
+    Returns:
+        UTF-16BE encoded bytes
+    """
+    return text.encode('utf-16-be')
+
+
+def write_crate(crate_path: Path, tracks: List[str], *, overwrite: bool = False) -> Dict[str, Any]:
+    """Write a Serato .crate file.
+    
+    This creates a new .crate file in TLV format with UTF-16BE encoding.
+    The file format matches what Serato DJ Pro writes and what parse_crate() reads.
+    
+    Args:
+        crate_path: Path where the .crate file will be written
+        tracks: List of track file paths (absolute paths)
+        overwrite: If True, allow overwriting an existing .crate file
+        
+    Returns:
+        Dict containing:
+        - path: Written crate file path
+        - name: Crate name
+        - track_count: Number of tracks written
+        - file_size: Size of written file in bytes
+        
+    Raises:
+        ValueError: If crate_path doesn't have .crate extension
+        FileExistsError: If crate file exists and overwrite=False
+        SeratoParseError: If write fails
+    """
+    if crate_path.suffix.lower() != '.crate':
+        raise ValueError(f"Crate path must have .crate extension, got: {crate_path}")
+    
+    if crate_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Crate file already exists: {crate_path}. "
+            f"Use overwrite=True to replace it."
+        )
+    
+    # Build the crate data
+    data = b''
+    
+    # Write version tag
+    data += _write_tlv_record(b'vrsn', _encode_utf16be('1.0/Serato ScratchLive'))
+    
+    # Write crate version tag
+    data += _write_tlv_record(b'tvcn', _encode_utf16be('1.0'))
+    
+    # Write track entries
+    for track_path in tracks:
+        # Normalize to absolute path
+        abs_path = str(Path(track_path).resolve())
+        
+        # Write track entry marker
+        data += _write_tlv_record(b'otrk', b'')
+        
+        # Write track path using ptrk tag
+        data += _write_tlv_record(b'ptrk', _encode_utf16be(abs_path))
+    
+    # Write to file atomically
+    try:
+        # Create parent directory if it doesn't exist
+        crate_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write to temporary file first
+        temp_path = crate_path.with_suffix('.crate.tmp')
+        temp_path.write_bytes(data)
+        
+        # Verify by reading back
+        try:
+            parsed = parse_crate(temp_path)
+            if parsed['track_count'] != len(tracks):
+                raise SeratoParseError(
+                    f"Verification failed: expected {len(tracks)} tracks, "
+                    f"got {parsed['track_count']}"
+                )
+        except Exception as e:
+            temp_path.unlink(missing_ok=True)
+            raise SeratoParseError(f"Failed to verify written crate: {e}")
+        
+        # Atomic rename
+        temp_path.replace(crate_path)
+        
+    except OSError as e:
+        raise SeratoParseError(f"Failed to write crate file: {e}")
+    
+    # Extract crate name from filename
+    crate_name = crate_path.stem
+    if '%%' in crate_name:
+        crate_name = ' › '.join(crate_name.split('%%'))
+    
+    return {
+        'path': str(crate_path),
+        'name': crate_name,
+        'track_count': len(tracks),
+        'file_size': crate_path.stat().st_size,
+    }

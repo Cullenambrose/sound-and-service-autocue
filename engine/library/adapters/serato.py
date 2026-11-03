@@ -264,3 +264,123 @@ class SeratoAdapter(DJSoftwareAdapter):
             return crate_data['tracks']
         except serato_database.SeratoParseError:
             return []
+    
+    def write_crate(
+        self,
+        name: str,
+        tracks: List[str],
+        serato_dir: Optional[Path] = None,
+        *,
+        overwrite: bool = False,
+        apply: bool = False,
+    ) -> Dict[str, Any]:
+        """Write a Serato crate file.
+        
+        This follows the same safety patterns as tag_gate:
+        - Refuses if Serato is running
+        - Requires explicit --apply flag for actual writes
+        - Creates backup before any overwrite
+        - Returns dry-run preview by default
+        
+        Args:
+            name: Crate name (supports nested with %% separator)
+            tracks: List of track file paths to include
+            serato_dir: Optional path to _Serato_ directory. If None, searches standard locations.
+            overwrite: If True, allow overwriting existing .crate file
+            apply: If True, actually write. If False (default), dry-run only.
+            
+        Returns:
+            Dict with operation results and crate metadata.
+            
+        Raises:
+            RuntimeError: If Serato is running or safety checks fail
+            FileExistsError: If crate exists and overwrite=False
+        """
+        import serato_database
+        import shutil
+        import time
+        
+        # 1. Check if Serato is running
+        if self.detect_running():
+            raise RuntimeError(
+                f"Refusing to write crate: {self.name} is currently running. "
+                f"Close {self.name} before modifying crates."
+            )
+        
+        # 2. Find Serato directory
+        if serato_dir is None:
+            serato_dirs = serato_database.find_serato_dirs(Path.home() / "Music")
+            if not serato_dirs:
+                raise RuntimeError(
+                    "Could not find _Serato_ directory. "
+                    "Specify serato_dir explicitly."
+                )
+            serato_dir = serato_dirs[0]
+        
+        serato_dir = Path(serato_dir)
+        if not serato_dir.is_dir():
+            raise RuntimeError(f"Serato directory not found: {serato_dir}")
+        
+        # 3. Build crate path
+        subcrates_dir = serato_dir / "Subcrates"
+        crate_path = subcrates_dir / f"{name}.crate"
+        
+        # 4. Check for existing crate
+        crate_exists = crate_path.exists()
+        backup_path = None
+        
+        if crate_exists and not overwrite:
+            raise FileExistsError(
+                f"Crate file already exists: {crate_path}. "
+                f"Use overwrite=True to replace it."
+            )
+        
+        # 5. Dry-run mode: return preview
+        if not apply:
+            return {
+                "dry_run": True,
+                "name": name,
+                "path": str(crate_path),
+                "track_count": len(tracks),
+                "exists": crate_exists,
+                "would_overwrite": crate_exists and overwrite,
+                "tracks": tracks,
+            }
+        
+        # 6. Create backup if overwriting
+        if crate_exists:
+            # Back up the entire Subcrates folder
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            backup_dir = Path.home() / ".autocue" / "backups" / "subcrates" / timestamp
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            
+            backup_path = backup_dir / crate_path.name
+            shutil.copy2(crate_path, backup_path)
+            
+            # Verify backup
+            if not backup_path.exists():
+                raise RuntimeError(f"Backup verification failed: {backup_path}")
+        
+        # 7. Write the crate
+        try:
+            result = serato_database.write_crate(
+                crate_path,
+                tracks,
+                overwrite=overwrite,
+            )
+        except Exception as e:
+            # Restore backup if write failed
+            if backup_path and backup_path.exists():
+                shutil.copy2(backup_path, crate_path)
+            raise RuntimeError(f"Failed to write crate: {e}")
+        
+        # 8. Return success result
+        return {
+            "success": True,
+            "name": result['name'],
+            "path": result['path'],
+            "track_count": result['track_count'],
+            "file_size": result['file_size'],
+            "backup_path": str(backup_path) if backup_path else None,
+            "overwrote_existing": crate_exists,
+        }
