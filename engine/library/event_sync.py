@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote_plus
 
 from . import db
 from .matcher import match_track, build_crate_plan, MatchConfig, MatchResult
@@ -381,7 +381,7 @@ def build_missing_titles_list(
             
             # Build ZipDJ search URL
             search_query = f"{artist} {title}".strip()
-            zipdj_url = f"https://www.zipdj.com/search?q={quote(search_query)}"
+            zipdj_url = f"https://www.zipdj.com/search?q={quote_plus(search_query)}"
             
             missing.append({
                 "artist": artist,

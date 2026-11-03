@@ -404,6 +404,7 @@ class TestDryRun(unittest.TestCase):
         # Create temporary database
         fd, temp_db = tempfile.mkstemp(suffix=".db")
         os.close(fd)
+        db.migrate(temp_db)
         
         event_data = {
             "inquiry_id": "evt_123",
