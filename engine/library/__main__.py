@@ -543,6 +543,44 @@ def build_crate_plan_command(args):
     return 0
 
 
+def event_sync_command(args):
+    """Sync events from Sound & Service booking site."""
+    from . import event_sync
+    
+    # Resolve serato_dir if provided
+    serato_dir = None
+    if hasattr(args, 'serato_dir') and args.serato_dir:
+        serato_dir = Path(args.serato_dir).expanduser().resolve()
+        if serato_dir.name != "_Serato_":
+            serato_dir = serato_dir / "_Serato_"
+    
+    # Determine locked_only setting
+    locked_only = args.locked_only and not args.all_events
+    
+    try:
+        result = event_sync.sync_events(
+            base_url=args.base_url,
+            db_path=args.db,
+            serato_dir=serato_dir,
+            event_id=args.event,
+            apply=args.apply,
+            locked_only=locked_only,
+            push_status=not args.no_push,
+        )
+        
+        print(f"\n=== Event Sync Complete ===")
+        print(f"Events processed: {result['events_processed']}")
+        
+        if not args.apply:
+            print("\nDry-run mode. Use --apply to write crates and push status.")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def write_crate_command(args):
     """Write a new Serato crate file."""
     # Get adapter
@@ -761,6 +799,46 @@ def main(argv=None):
         help="Allow overwriting existing crate file"
     )
     
+    # event-sync command
+    event_sync_parser = subparsers.add_parser(
+        "event-sync",
+        help="Sync events from Sound & Service booking site"
+    )
+    event_sync_parser.add_argument(
+        "--event",
+        help="Specific event ID to sync (default: all upcoming events)"
+    )
+    event_sync_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually write crates and push status (default is dry-run)"
+    )
+    event_sync_parser.add_argument(
+        "--base-url",
+        default="https://booking.soundandservice.io",
+        help="Base URL for the booking site API (default: https://booking.soundandservice.io)"
+    )
+    event_sync_parser.add_argument(
+        "--serato-dir",
+        help="Path to Serato directory (defaults to search standard locations)"
+    )
+    event_sync_parser.add_argument(
+        "--locked-only",
+        action="store_true",
+        default=True,
+        help="Only process couple-locked events (default: enabled)"
+    )
+    event_sync_parser.add_argument(
+        "--all-events",
+        action="store_true",
+        help="Process all events, including unlocked ones"
+    )
+    event_sync_parser.add_argument(
+        "--no-push",
+        action="store_true",
+        help="Don't push prep status back to booking site"
+    )
+    
     args = parser.parse_args(argv)
     
     # Expand db path
@@ -783,6 +861,8 @@ def main(argv=None):
         return build_crate_plan_command(args)
     elif args.command == "write-crate":
         return write_crate_command(args)
+    elif args.command == "event-sync":
+        return event_sync_command(args)
     
     return 1
 
