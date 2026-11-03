@@ -5,8 +5,8 @@
 import http.server, json, os, sys, time, urllib.parse, glob, mimetypes
 HERE = os.path.dirname(os.path.abspath(__file__))
 MUSIC = os.path.expanduser(os.environ.get("MUSIC_DIR", "~/Music/Master Music"))
-LOG = os.path.join(HERE, "corrections.json")
-DATA = json.load(open(os.path.join(HERE, "data.json")))
+LOG = os.path.abspath(os.environ.get("CORRECTIONS_FILE", os.path.join(HERE, "corrections.json")))
+DATA = json.load(open(os.path.abspath(os.environ.get("DATA_FILE", os.path.join(HERE, "data.json")))))
 FILES = {t["id"]: t["file"] for t in DATA["tracks"]}
 def find(tid):
     name = FILES.get(tid)
@@ -20,6 +20,8 @@ class H(http.server.SimpleHTTPRequestHandler):
     def log_message(s, *a): pass
     def do_GET(s):
         u = urllib.parse.urlparse(s.path)
+        if u.path == "/data.json":
+            return s._json(DATA)
         if u.path == "/corrections":
             return s._json(json.load(open(LOG)) if os.path.exists(LOG) else [])
         if u.path.startswith("/audio/"):

@@ -1,0 +1,11 @@
+--- a/features/downbeats.py
++++ b/features/downbeats.py
+@@ -284,7 +284,7 @@
+         results = list(self.map(_process_dbn, zip(self.hmms,
+                                                   it.repeat(activations))))
+         # choose the best HMM (highest log probability)
+-        best = np.argmax(np.asarray(results)[:, 1])
++        best = np.argmax([score for _, score in results])
+         # the best path through the state space
+         path, _ = results[best]
+         # the state space and observation model of the best HMM

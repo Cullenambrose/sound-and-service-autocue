@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AutoCue · Local library prep</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">AC</span><span>AutoCue<small>LOCAL LIBRARY PREP</small></span></a>
+    <div class="top-actions"><span class="local-badge"><i></i> THIS MAC ONLY</span><button id="cue-maps-open" class="quiet">Cue maps</button><button id="experiments-open" class="quiet">Experiments</button><button id="settings-open" class="quiet">Settings</button></div>
+  </header>
+  <main>
+    <section class="hero">
+      <div><div class="eyebrow">SOUND &amp; SERVICE · V7</div><h1>Get your library<br><em>ready to play.</em></h1>
+        <p>Analyze locally, review every cue, then write only after a verified backup.</p></div>
+      <div class="hero-stat"><strong id="library-count">0</strong><span>TRACKS IN LIBRARY</span></div>
+    </section>
+    <section class="backups-section">
+      <div class="library-head"><div><span class="eyebrow">04 · SAFETY</span><h2>Serato backups</h2></div></div>
+      <div id="backup-list" class="backup-list"><div class="empty-state">A verified backup is created automatically before each Serato write.</div></div>
+    </section>
+
+    <section class="stage">
+      <div class="stage-head"><div><span class="eyebrow">BATCH PROGRESS</span><h2 id="batch-title">Ready when you are</h2></div><span id="batch-count">0 / 0</span></div>
+      <canvas id="runner" height="72" aria-label="Batch progress animation"></canvas>
+      <div id="live" class="live" hidden>
+        <div class="live-head"><strong id="live-name"></strong><span id="live-detail"></span></div>
+        <canvas id="live-wave" height="90" aria-label="Live waveform"></canvas>
+        <div id="live-chips" class="chips"></div>
+      </div>
+      <div class="progress-track"><canvas id="progress-fill" height="3" aria-hidden="true"></canvas></div>
+      <div class="stage-foot"><span id="batch-message">Sound off · reduced motion respected</span><div class="stage-controls"><button id="job-pause" class="quiet" hidden>Pause</button><button id="job-resume" class="quiet" hidden>Resume</button><button id="job-cancel" class="quiet" hidden>Cancel</button><button id="sound-toggle" class="quiet">Sound: Off</button></div></div>
+      <div id="victory" class="victory" hidden><div class="victory-star">✦</div><div><strong id="victory-title">Batch complete</strong><span id="victory-summary"></span></div><button id="start-review" class="button primary">Start review</button></div>
+    </section>
+
+    <div class="columns">
+      <section class="import-card">
+        <div class="section-title"><div><span class="eyebrow">01 · ADD MUSIC</span><h2>Drop a batch</h2></div><span class="round-icon">↓</span></div>
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <div class="drop-graphic">♫</div><strong>Drop songs here</strong>
+          <span>or browse files, folders, or a Serato crate</span>
+          <div class="drop-buttons"><button id="browse-files" class="button secondary">Choose files</button><button id="browse-folder" class="button secondary">Choose folder</button></div>
+          <input id="file-picker" type="file" accept="audio/*,.crate" multiple hidden>
+          <input id="folder-picker" type="file" accept="audio/*" webkitdirectory directory multiple hidden>
+        </div>
+        <div class="path-row"><input id="path-input" type="text" placeholder="Or paste a folder path on this Mac"><button id="path-add" class="button secondary">Add path</button></div>
+        <div class="using-row"><span id="using-settings">Using: Auto map · Gemini tie-break off · Review first</span><button id="settings-inline" class="quiet">Change</button></div>
+        <div id="import-message" class="notice" role="status"></div>
+      </section>
+
+      <section class="crate-card">
+        <div class="section-title"><div><span class="eyebrow">02 · SERATO CRATES</span><h2>Pick a crate</h2></div><span class="round-icon">▤</span></div>
+        <p class="muted">Read-only crate list. Missing songs are skipped; crate files are never changed.</p>
+        <button id="crates-refresh" class="button secondary wide">Find crates on this Mac</button>
+        <div id="crate-list" class="crate-list"><div class="empty-state">Crates load from Music and connected drives.</div></div>
+      </section>
+    </div>
+
+    <section class="library-section">
+      <div class="library-head"><div><span class="eyebrow">03 · YOUR LIBRARY</span><h2>Tracks <span id="visible-count">0</span></h2></div>
+        <div class="filters"><input id="search" type="search" placeholder="Search title or artist">
+          <select id="status-filter"><option value="">All statuses</option><option>Original</option><option>Cues ready</option><option>Needs a look</option><option>In Serato</option><option>Edited by you</option></select>
+          <button id="process-selected" class="button primary">Process selected</button><button id="reanalyze-selected" class="button secondary">Re-analyze anyway</button><button id="remove-selected" class="button secondary" title="Removes tracks, cue reviews, and event labels from this app only; original files are untouched">Remove selected</button><button id="clear-library" class="button secondary" title="Removes every track and its local review data; original files are untouched">Clear library</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all"></th><th>TRACK</th><th>BPM</th><th>MAP</th><th>GENRE</th><th>CUES A–H</th><th>CONF.</th><th>STATUS</th><th></th></tr></thead>
+        <tbody id="track-rows"><tr><td colspan="9" class="empty-state">Add audio or choose a crate to get started.</td></tr></tbody></table></div>
+      <div class="library-actions"><button id="write-reviewed" class="button write-button" disabled>Write reviewed cues to Serato</button><span>Automatic backup + confirmation required before writing</span></div>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status"></div>
+  <dialog id="review-dialog" class="review-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">CUE REVIEW</span><h2 id="review-title"></h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <div class="map-pick"><label>Cue map <select id="map-select"><option value="AUTO">Auto</option><option value="DROP">Drop (EDM)</option><option value="VOCAL">Vocal (chorus)</option></select></label><span id="map-reason" class="muted"></span></div>
+    <div id="gemini-note" class="muted" hidden></div>
+    <div id="outro-note" class="muted"></div>
+    <div class="wave-wrap">
+      <div class="wave-toolbar">
+        <button id="wave-zoom-out" class="button secondary" title="Zoom out (−)">−</button><button id="wave-zoom-in" class="button secondary" title="Zoom in (+)">+</button>
+        <button id="wave-fit" class="button secondary" title="Show the whole track (0)">Fit</button><button id="wave-zoom-bars" class="button secondary" title="16 bars around the playhead">16 bars</button>
+        <button id="wave-zoom-cue" class="button secondary" title="Zoom to the selected cue">To cue</button>
+        <button id="wave-undo" class="button secondary" title="Undo (⌘Z)" disabled>↶</button><button id="wave-redo" class="button secondary" title="Redo (⇧⌘Z)" disabled>↷</button>
+        <label><input type="checkbox" id="wave-follow" checked> Follow playhead</label><label><input type="checkbox" id="wave-audition" checked> Audition edits</label>
+        <span id="wave-readout" class="muted"></span>
+      </div>
+      <canvas id="waveform" height="240"></canvas><canvas id="wave-mini" height="36" aria-label="Track overview"></canvas>
+      <div id="wave-legend" class="wave-legend"></div>
+      <div class="wave-help muted">Scroll to zoom · drag to pan · click to seek · drag a marker to move it (snaps to bars; Shift = beat, Alt = free) · Space play · [ ] nudge a beat (Shift = bar) · 1–8 jump to cue · P play cue · C set cue at playhead · ⌘Z undo</div>
+    </div>
+    <section class="variant-panel" id="variant-panel" hidden>
+      <div class="variant-head"><strong>Algorithm variants</strong><span class="muted">Where each experiment would put the cues. Toggle lanes; click a time to use it.</span></div>
+      <div class="variant-chips" id="variant-chips"></div>
+      <canvas id="variant-lanes" height="10"></canvas>
+      <div class="variant-table-wrap"><table class="variant-table" id="variant-table"></table></div>
+    </section>
+    <div class="audio-controls"><audio id="preview-audio" controls></audio><button id="finder-button" class="button secondary">Show in Finder</button></div>
+    <section class="event-label-panel" aria-labelledby="event-label-heading">
+      <div class="event-label-heading">
+        <div><h3 id="event-label-heading">Human event labels</h3><p class="muted">Label what you hear at the playhead. These research labels are separate from cue edits and imported markers. Complete means the full track was reviewed; uncertain and skipped are never negative labels.</p></div>
+        <a class="button secondary" href="/api/event-reviews/export" download="autocue-event-labels.json">Export labels</a>
+      </div>
+      <div class="event-label-controls">
+        <label>Event
+          <select id="event-label-type">
+            <option value="drop">Drop</option><option value="build">Build</option>
+            <option value="breakdown">Breakdown</option><option value="chorus">Chorus</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label>Certainty
+          <select id="event-label-certainty"><option value="certain">Certain</option><option value="uncertain">Uncertain</option></select>
+        </label>
+        <label class="event-label-note">Note <input id="event-label-note" maxlength="500" placeholder="Optional detail"></label>
+        <button id="add-event-label" class="button primary">Add at playhead</button>
+      </div>
+      <div id="event-label-list" class="event-label-list"></div>
+      <div class="event-review-controls">
+        <label>Track review state
+          <select id="event-review-state">
+            <option value="pending">Not reviewed</option><option value="in_progress">In progress</option>
+            <option value="complete">Complete</option><option value="uncertain">Uncertain</option>
+            <option value="skipped">Skip this track</option>
+          </select>
+        </label>
+        <label class="event-label-note">Review note <input id="event-review-note" maxlength="500" placeholder="Optional context"></label>
+        <button id="save-event-review" class="button secondary">Save state</button>
+        <span id="event-review-status" class="muted" role="status">Loading annotations…</span>
+      </div>
+    </section>
+    <div class="cue-edit-list" id="cue-edit-list"></div>
+    <div class="review-actions"><span id="review-state" class="muted" role="status">Edits stay local until you save.</span><button id="prev-track" class="button secondary" title="Previous track">‹ Prev</button><button id="next-track" class="button secondary" title="Next track (checks for unsaved edits)">Next ›</button><button id="save-next" class="button secondary" title="Save this review, then open the next track">Save &amp; next</button><button id="save-cues" class="button primary">Save review</button></div>
+  </dialog>
+  <dialog id="unsaved-review-dialog" class="settings-dialog" aria-labelledby="unsaved-review-title">
+    <div class="dialog-head"><h2 id="unsaved-review-title">Unsaved cue edits</h2></div>
+    <p class="muted">Save this review before leaving, discard these changes, or keep editing.</p>
+    <div class="dialog-foot"><button class="button secondary" data-review-leave="cancel" autofocus>Keep editing</button><button class="button secondary" data-review-leave="discard">Discard changes</button><button class="button primary" data-review-leave="save">Save and continue</button></div>
+  </dialog>
+  <dialog id="settings-dialog" class="settings-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">PREFERENCES</span><h2>Batch settings</h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <label class="setting-row"><span><strong>Gemini tie-break</strong><small>For uncertain plans only. Sends cue/grid numbers, compact energy summaries, genre, artist and title (never audio) to Google. Local lifetime budget defaults to $3; not a provider-enforced billing cap.</small></span><input id="gemini-toggle" type="checkbox"></label>
+    <p id="gemini-status" class="muted" role="status"></p>
+    <label class="setting-row"><span><strong>Review strictness</strong><small>Lower confidence cues are marked for review.</small></span><select id="strictness"><option value="relaxed">Relaxed</option><option value="standard">Standard</option><option value="strict">Strict</option></select></label>
+    <div class="dialog-foot"><span>Serato writes always require backup and a separate confirmation.</span><button id="settings-save" class="button primary">Save settings</button></div>
+  </dialog>
+  <dialog id="experiments-dialog" class="experiments-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">ALGORITHM LAB</span><h2>What is working?</h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <p class="cue-map-intro">Every analysis runs the baseline plus the experiments you switch on, and keeps all their cues. Review your songs as usual: your saved cues are the answer key. Newly switched-on experiments apply to songs you analyze or re-analyze next.</p>
+    <div class="experiment-list" id="experiment-list"></div>
+    <div class="experiment-report" id="experiment-report"></div>
+    <div class="dialog-foot"><a id="experiment-export" class="button secondary" href="/api/experiments/export" download="autocue-experiments.json">Export all data</a><button id="experiments-save" class="button primary">Save experiment choices</button></div>
+  </dialog>
+  <dialog id="cue-map-dialog" class="cue-map-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">YOUR WORKFLOW · CUE MAPS</span><h2>Make every cue yours.</h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <p class="cue-map-intro">Choose what each pad finds, what it says, and its Serato color. These defaults apply to new analyses; existing tracks change only when re-analyzed.</p>
+    <div class="cue-map-toolbar">
+      <div class="map-tabs" role="tablist" aria-label="Cue map">
+        <button class="map-tab active" data-map-tab="VOCAL" role="tab" aria-selected="true">Chorus &amp; vocals</button>
+        <button class="map-tab" data-map-tab="DROP" role="tab" aria-selected="false">Electronic &amp; drops</button>
+      </div>
+      <label class="map-mode">Choose automatically
+        <select id="cue-map-mode" aria-label="Cue map selection">
+          <option value="AUTO">Auto-select map</option><option value="VOCAL">Always use vocal map</option><option value="DROP">Always use electronic map</option>
+        </select>
+      </label>
+    </div>
+    <div id="cue-map-summary" class="cue-map-summary"></div>
+    <div class="cue-map-toolbar">
+      <label>Intro lengths (beats)<input id="mix-intro" type="text" placeholder="32, 16, 8, 4"></label>
+      <label>GO lengths before outro (beats)<input id="mix-go" type="text" placeholder="32, 16, 8, 4"></label>
+      <label>EXIT mix lengths after outro begins (beats)<input id="mix-exit" type="text" placeholder="32, 16, 8, 4"></label>
+    </div>
+    <label class="cue-enabled"><input id="mix-end-fallback" type="checkbox"> If no vocal-free outro fits, place GO before song end and EXIT at song end</label>
+    <p class="field-hint">Both maps use these preferences, largest first. Use multiples of 4 beats (4 beats = 1 bar). Normally EXIT begins after the final detected vocal, including later vocal returns. With the end-of-song fallback, GO may contain vocals and EXIT-END has no mix time afterward. Missing vocal analysis is flagged as unverified. A mix window is not necessarily the full length to the end of the file.</p>
+    <div id="cue-map-rows" class="cue-map-rows"></div>
+    <div class="serato-color-note"><span class="serato-color-sample"></span><span><strong>Serato colors, matched.</strong> Palette swatches show the Pro/Lite appearance; saved metadata uses Serato’s corresponding RGB value.</span></div>
+    <div class="cue-map-footer">
+      <button id="cue-map-defaults" class="quiet">Restore defaults</button><button id="cue-map-copy" class="quiet">Copy this map to the other tab</button>
+      <span class="spacer"></span><button id="cue-map-cancel" class="button secondary">Cancel</button><button id="cue-map-save" class="button primary">Save cue maps</button>
+    </div>
+  </dialog>
+  <dialog id="crate-dialog" class="settings-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">READ-ONLY SERATO CRATE</span><h2 id="crate-title"></h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <div class="crate-song-actions"><label><input id="crate-select-all" type="checkbox" checked> Select all available</label><span id="crate-song-count"></span></div>
+    <div id="crate-songs" class="crate-songs"></div>
+    <div class="dialog-foot"><span>Missing files are disabled and will be skipped.</span><button id="process-crate" class="button primary">Process selected songs</button></div>
+  </dialog>
+  <script src="/timing.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

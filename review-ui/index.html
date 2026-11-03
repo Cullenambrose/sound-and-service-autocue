@@ -47,13 +47,14 @@ kbd{background:#2a2f3a;border-radius:4px;padding:1px 5px;font-size:12px}
 <audio id="au" preload="none"></audio>
 <script>
 const SLOTS=["A","B","C","D","E","F","G","H","intro","outro"];
+const slotList=t=>t.cue_order||SLOTS;
 const LABEL={B:"START",C:"1st Chorus",D:"Last Chorus",E:"E (empty)",F:"F (empty)",G:"GO",H:"EXIT",intro:"Intro loop",outro:"Outro loop"};
 const COL={auto:"#22c55e",google:"#3b82f6",empty:"#6b7280",user:"#f59e0b",suggest:"#3b82f6"};
 let D,cur=null,armed=null,sel=null,state=JSON.parse(localStorage.getItem("cueReview")||"{}");
 let vS=0,vL=1,HI=null,hiFor=null; // view start/length (s); hi-res envelope
 const $=id=>document.getElementById(id),au=$("au");
 const save=()=>localStorage.setItem("cueReview",JSON.stringify(state));
-function items(t){const o={};for(const s of "ABCDEFGH")o[s]={...t.cues[s]};for(const l of t.loops)o[l.loop]={beat:l.bar==null?null:l.bar*4,source:l.source,why:l.why,loop:true};return o}
+function items(t){const o={};for(const s of "ABCDEFGH")o[s]={...t.cues[s]};for(const l of t.loops||[])o[l.loop]={beat:l.bar==null?null:l.bar*4,source:l.source,why:l.why,loop:true};return o}
 function st(t){return state[t.id]||(state[t.id]={})}
 function eff(t,s){const o=items(t)[s],u=st(t)[s];return u?{...o,beat:u.beat,source:u.beat==null?"empty":(u.changed?"user":o.source),decided:true}:o}
 // Beat grid: uses t.beats / t.downbeats (seconds) if data.json ever has them, else the constant grid t1 + n*bar_s/4.
@@ -66,10 +67,10 @@ function downInfo(t,beat){ // how far a cue is from the nearest downbeat
  const ds=x-near,dbeats=ds/bs(t);return {ok:Math.abs(ds)<0.005,ds,dbeats,nb:Math.round(nb)}}
 function fracTxt(b){b=Math.abs(b);const r=Math.round(b*4)/4,w=Math.floor(r),f=r-w,F={0:"",0.25:"¼",0.5:"½",0.75:"¾"}[f];if(r===0)return (b).toFixed(2)+" beat";return (w?w:"")+(F||"")+(r===1?" beat":" beats")}
 function dbTxt(t,beat){const i=downInfo(t,beat);if(i.ok)return `<span class="db on">✓ on downbeat</span>`;return `<span class="db off">${i.ds>0?"+":"−"}${Math.abs(i.ds).toFixed(2)} s / ${fracTxt(i.dbeats)} ${i.ds>0?"late":"early"}</span>`}
-function nameOf(t,s){if(s!=="A")return LABEL[s];const b=eff(t,"B").beat,a=eff(t,"A").beat;return a==null||b==null?"A "+(t.cues.A.name||""):"A "+((b-a)/4)+"BS"}
+function nameOf(t,s){const item=items(t)[s];if(item.name)return item.name;if(s!=="A")return LABEL[s];const b=eff(t,"B").beat,a=eff(t,"A").beat;return a==null||b==null?"A "+(t.cues.A.name||""):"A "+((b-a)/4)+"BS"}
 async function log(ev){try{await fetch("/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(ev)})}catch(e){ev.unsent=1;(state._unsent=state._unsent||[]).push(ev)}save()}
 function grid(){$("grid").style.display="grid";$("view").style.display="none";$("home").style.display="none";$("title").textContent="Cue Review · "+D.tracks.length+" tracks";
- $("grid").innerHTML=D.tracks.map(t=>`<div class="tile" onclick="openT('${t.id}')"><div class="n">${t.id} · ${t.bpm} BPM</div><div class="t">${t.name}</div><div class="dots">${SLOTS.filter(s=>!"EF".includes(s)).map(s=>`<span class="dot ${st(t)[s]?"d":""}"></span>`).join("")}</div></div>`).join("")}
+ $("grid").innerHTML=D.tracks.map(t=>`<div class="tile" onclick="openT('${t.id}')"><div class="n">${t.id} · ${t.bpm} BPM</div><div class="t">${t.name}${t.map_type?` · v6 ${t.map_type}`:""}</div><div class="dots">${slotList(t).filter(s=>!"EF".includes(s)).map(s=>`<span class="dot ${st(t)[s]?"d":""}"></span>`).join("")}</div></div>`).join("")}
 function openT(id){cur=D.tracks.find(t=>t.id===id);armed=null;sel=null;au.src="/audio/"+id;vS=0;vL=cur.dur;HI=null;hiFor=null;loadHi(cur);
  $("grid").style.display="none";$("view").style.display="block";$("home").style.display="";$("title").textContent=cur.id+" · "+cur.name;location.hash=id;render()}
 // ---- high-res waveform: decode the track in the browser (WebAudio), build a min/max envelope at 2000 bins/s
@@ -79,9 +80,10 @@ async function loadHi(t){$("wavestat").textContent="Loading detailed waveform…
   let peak=1e-6;for(let i=0;i<n;i++){let lo=1,hi=-1;const a=Math.floor(i*step),b=Math.floor((i+1)*step);for(let j=a;j<b;j++){let v=0;for(const ch of chs)v+=ch[j];v/=chs.length;if(v<lo)lo=v;if(v>hi)hi=v}mn[i]=lo;mx[i]=hi;peak=Math.max(peak,hi,-lo)}
   if(cur!==t)return;HI={R,mn,mx,peak,n};hiFor=t.id;$("wavestat").textContent="";draw()}
  catch(e){$("wavestat").textContent="Detailed waveform unavailable (showing overview)";}}
-function render(){draw();const t=cur;$("cues").innerHTML=SLOTS.map(s=>{const c=eff(t,s),fixed="EF".includes(s);
+function render(){draw();const t=cur;$("cues").innerHTML=slotList(t).map(s=>{const c=eff(t,s),fixed=!t.editable_slots&&"EF".includes(s);
  const pos=c.beat==null?"—":`bar ${Math.floor(c.beat/4)}${c.beat%4?"."+(c.beat%4+1):""} · ${fmt(tOf(t,c.beat))}`;
  const srcName={auto:"Auto",google:"Google suggestion",empty:"Empty",user:"You",suggest:"Suggestion"}[c.source];
+ const v5=t.v5_cues&&t.v5_cues[s]?`v5: ${t.v5_cues[s].name||"—"}${t.v5_cues[s].bar==null?"":` @ bar ${t.v5_cues[s].bar}`}`:"";
  return `<div class="row ${sel===s?"sel":""}" onclick="pick('${s}',event)"><span class="tag" style="color:${COL[c.source]}">${nameOf(t,s)}</span><span class="src" style="background:${COL[c.source]}33;color:${COL[c.source]}">${srcName}${c.decided?" ✓":""}</span><span class="pos">${pos}</span>${c.beat==null||fixed?"":dbTxt(t,c.beat)}
  ${fixed?"":`<button class="btn" ${c.beat==null?"disabled":""} onclick="play('${s}')">▶ Play</button>
  <button class="btn" ${c.beat==null?"disabled":""} onclick="zoomCue('${s}')">🔍 Zoom to cue</button>
@@ -90,8 +92,8 @@ function render(){draw();const t=cur;$("cues").innerHTML=SLOTS.map(s=>{const c=e
  <button class="btn" onclick="act('${s}','beat',-1)">−1 beat</button><button class="btn" onclick="act('${s}','beat',1)">+1 beat</button>
  <button class="btn" ${c.beat==null||downInfo(t,c.beat).ok?"disabled":""} onclick="act('${s}','snap')">Snap to downbeat</button>
  <button class="btn warn" onclick="act('${s}','clear')">Clear</button><button class="btn ${armed===s?"on":""}" onclick="arm('${s}')">${armed===s?"Tap waveform…":"Set here"}</button>`}
- <div class="why">${c.why||""}</div></div>`}).join("")}
-function pick(s,e){if("EF".includes(s))return;if(sel!==s){sel=s;if(e&&e.target.tagName!=="BUTTON")render();else{document.querySelectorAll(".row").forEach((r,i)=>r.classList.toggle("sel",SLOTS[i]===s));draw()}}}
+ <div class="why">${c.why||""}${v5?` · ${v5}`:""}</div></div>`}).join("")}
+function pick(s,e){if(!cur.editable_slots&&"EF".includes(s))return;if(sel!==s){sel=s;if(e&&e.target.tagName!=="BUTTON")render();else{document.querySelectorAll(".row").forEach((r,i)=>r.classList.toggle("sel",slotList(cur)[i]===s));draw()}}}
 function fmt(x){return Math.floor(x/60)+":"+(x%60).toFixed(2).padStart(5,"0")}
 function act(s,a,d){const t=cur,c=eff(t,s),from=c.beat;let to=from;sel=s;
  if(a==="bar"||a==="beat"){if(from==null)return;to=from+(a==="bar"?4*d:d)}else if(a==="snap"){if(from==null)return;to=downInfo(t,from).nb}else if(a==="clear")to=null;

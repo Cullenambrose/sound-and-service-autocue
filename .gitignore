@@ -99,3 +99,8 @@ genre_tags.json
 # Local run state
 stats.json
 *.log
+web-data/
+tests/fixtures/crates/
+tests/fixtures/library-sample/
+
+.venv-separator/

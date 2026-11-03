@@ -2,6 +2,12 @@
 
 Ordered for proof → prep app → Booth Buddy handoff. Dates are targets, not promises.
 
+## v6 implementation status
+
+- Implemented a separate v6 plan builder, synced-lyrics cache/alignment, resumable manifest-based WhisperX runner, drop/genre map selection, review export, and review-mark scorer.
+- v6 remains opt-in; Gemini is disabled unless explicitly enabled and will only consider low-confidence candidate bars.
+- Validation against the stress set and a v5-vs-v6 score still requires the machine-local stress manifest, cached analysis/features/stems, WhisperX input stems, and review-page `corrections.json`. None of those data files are in this repository checkout.
+
 ## 1. v5 evaluation (next)
 
 - Collect **~50+** Cullen marks on the stress-crate review page (localhost:8766), not only the 18 cues on 4 songs.
