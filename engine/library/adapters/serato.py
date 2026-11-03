@@ -215,10 +215,52 @@ class SeratoAdapter(DJSoftwareAdapter):
             "markers_v1": result["markers_v1"],
         }
     
-    def list_crates(self) -> List[str]:
-        """List Serato crates. Not yet implemented."""
-        raise NotImplementedError("Serato crate listing not yet implemented")
+    def list_crates(self, serato_dir: Optional[Path] = None) -> List[str]:
+        """List Serato crates from _Serato_/Subcrates directory.
+        
+        Args:
+            serato_dir: Optional path to _Serato_ directory. If None, searches standard locations.
+            
+        Returns:
+            List of crate names.
+        """
+        import serato_database
+        
+        if serato_dir is None:
+            # Search standard locations
+            serato_dirs = serato_database.find_serato_dirs(Path.home() / "Music")
+            if not serato_dirs:
+                return []
+            serato_dir = serato_dirs[0]
+        
+        crate_files = serato_database.list_crates(serato_dir)
+        return [crate.stem for crate in crate_files]
     
-    def read_crate(self, name: str) -> List[str]:
-        """Read a Serato crate. Not yet implemented."""
-        raise NotImplementedError("Serato crate reading not yet implemented")
+    def read_crate(self, name: str, serato_dir: Optional[Path] = None) -> List[str]:
+        """Read a Serato crate and return track paths.
+        
+        Args:
+            name: Crate name (without .crate extension)
+            serato_dir: Optional path to _Serato_ directory. If None, searches standard locations.
+            
+        Returns:
+            List of track file paths.
+        """
+        import serato_database
+        
+        if serato_dir is None:
+            # Search standard locations
+            serato_dirs = serato_database.find_serato_dirs(Path.home() / "Music")
+            if not serato_dirs:
+                return []
+            serato_dir = serato_dirs[0]
+        
+        crate_path = serato_dir / "Subcrates" / f"{name}.crate"
+        if not crate_path.exists():
+            return []
+        
+        try:
+            crate_data = serato_database.parse_crate(crate_path)
+            return crate_data['tracks']
+        except serato_database.SeratoParseError:
+            return []
