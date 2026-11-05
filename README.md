@@ -28,6 +28,9 @@ index and explicitly reviewed exact-file matches. Start with the
 [catalog demo and handoff](docs/CATALOG.md). This first slice accepts a documented
 JSON schema; the original vendor CSV adapter and real-export reconciliation
 remain unverified. Nothing is auto-matched, copied or analyzed by indexing.
+Reviewed matches can now be explicitly staged as hash-verified app-local copies,
+then sent to the existing analysis and cue editor. Staging has durable retry
+receipts, preserves catalog provenance and does not enable original-file writes.
 
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)

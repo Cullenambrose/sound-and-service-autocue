@@ -61,7 +61,7 @@
 
     <section id="catalog-section" class="library-section">
       <div class="library-head"><div><span class="eyebrow">CATALOG · READ-ONLY SOURCES</span><h2>Find your exact versions</h2></div></div>
-      <p class="muted">Import a schema-v1 catalog snapshot, index only a folder you select, then review each file match. No copying, analysis or tag writes.</p>
+      <p class="muted">Import a schema-v1 catalog snapshot, index only a folder you select, then review each file match. Indexing and matching do not copy, analyze or write audio. Staging a reviewed match makes a verified app-local copy only.</p>
       <div class="columns">
         <div class="import-card">
           <label for="catalog-upload">Catalog snapshot JSON</label>
@@ -85,6 +85,13 @@
         <button id="catalog-download" class="button secondary">Download pending decision</button>
         <button id="catalog-discard" class="quiet">Discard pending request</button>
       </div>
+      <div id="catalog-stage-pending" class="catalog-pending" hidden>
+        <strong>Unacknowledged staging request retained on this browser.</strong>
+        <button id="catalog-stage-retry" class="button secondary">Retry staging request</button>
+        <button id="catalog-stage-download" class="button secondary">Download pending staging request</button>
+        <button id="catalog-stage-discard" class="quiet">Discard staging request</button>
+      </div>
+      <button id="catalog-matches-refresh" class="quiet">Refresh match and cue status</button>
       <h3 id="catalog-crate-title">Choose a catalog crate</h3>
       <div class="path-row"><input id="catalog-song-search" type="search" aria-label="Filter songs in this crate" placeholder="Filter this crate by artist, title or version"></div>
       <div id="catalog-songs"></div>
@@ -105,6 +112,7 @@
   <div id="toast" class="toast" role="status"></div>
   <dialog id="review-dialog" class="review-dialog">
     <div class="dialog-head"><div><span class="eyebrow">CUE REVIEW</span><h2 id="review-title"></h2></div><button class="icon-button" data-close aria-label="Close">×</button></div>
+    <div id="review-origin" class="muted"></div>
     <div class="map-pick"><label>Cue map <select id="map-select"><option value="AUTO">Auto</option><option value="DROP">Drop (EDM)</option><option value="VOCAL">Vocal (chorus)</option></select></label><span id="map-reason" class="muted"></span></div>
     <div id="gemini-note" class="muted" hidden></div>
     <div id="outro-note" class="muted"></div>

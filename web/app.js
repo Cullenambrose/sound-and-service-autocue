@@ -260,6 +260,9 @@ async function openReview(hash) {
   $("#preview-audio").pause();
   activeTrack = track;
   $("#review-title").textContent = displayName(activeTrack);
+  $("#review-origin").textContent = (track.catalog_sources || []).map(source =>
+    `Catalog ${source.snapshot_id.slice(0, 10)} / ${source.song_id} · match revision ${source.decision.revision} · original ${source.source_path}`
+  ).join(" | ");
   $("#preview-audio").src = activeTrack.url;
   $("#cue-edit-list").innerHTML = "ABCDEFGH".split("").map((slot, i) => {
     const cue = activeTrack.cues?.[slot] || {};

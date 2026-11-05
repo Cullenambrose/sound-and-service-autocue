@@ -80,6 +80,15 @@ def initialize(db):
         CREATE TABLE IF NOT EXISTS catalog_match_receipts (
             request_id TEXT PRIMARY KEY, body_json TEXT NOT NULL, receipt_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS catalog_staged_tracks (
+            snapshot_id TEXT NOT NULL, song_id TEXT NOT NULL, decision_revision INTEGER NOT NULL,
+            track_hash TEXT NOT NULL, provenance_json TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY(snapshot_id,song_id,decision_revision),
+            FOREIGN KEY(snapshot_id,song_id) REFERENCES catalog_songs(snapshot_id,source_id)
+        );
+        CREATE TABLE IF NOT EXISTS catalog_staging_receipts (
+            request_id TEXT PRIMARY KEY, body_json TEXT NOT NULL, receipt_json TEXT NOT NULL
+        );
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(library_roots)")}
     if "scan_revision" not in columns:
@@ -358,6 +367,22 @@ def file_records(db):
     root_map = {row["id"]: row for row in db.execute("SELECT * FROM library_roots")}
     return [file_record(row, root_map[row["root_id"]])
             for row in db.execute("SELECT * FROM library_files ORDER BY root_id,relative_path")]
+
+
+def reviewed_file(db, body):
+    decision = db.execute("SELECT * FROM catalog_match_decisions WHERE snapshot_id=? AND song_id=?",
+                          (body["snapshot_id"], body["song_id"])).fetchone()
+    if not decision or (decision["revision"], decision["file_id"], decision["content_hash"]) != (
+            body["decision_revision"], body["file_id"], body["content_hash"]):
+        raise Conflict("Reviewed match changed or is missing; reload the crate before staging.")
+    row = db.execute("SELECT * FROM library_files WHERE id=?", (decision["file_id"],)).fetchone()
+    if not row:
+        raise Conflict("Reviewed file is no longer indexed.")
+    root = db.execute("SELECT * FROM library_roots WHERE id=?", (row["root_id"],)).fetchone()
+    file = file_record(row, root)
+    if file["state"] != "available" or file["content_hash"] != decision["content_hash"]:
+        raise Conflict("Reviewed file changed or is unavailable; rescan and review before staging.")
+    return file, dict(decision)
 
 
 def candidates(song, files):

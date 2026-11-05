@@ -4,7 +4,7 @@ import struct
 AUDIO = bytes(range(256)) * 8
 
 
-def tagged_wav(version="Clean"):
+def tagged_wav(version="Clean", *, seconds=2, rate=8000):
     import io
     import wave
     from mutagen.wave import WAVE
@@ -13,8 +13,8 @@ def tagged_wav(version="Clean"):
     with wave.open(stream, "wb") as target:
         target.setnchannels(1)
         target.setsampwidth(2)
-        target.setframerate(8000)
-        target.writeframes(b"\0\0" * 16000)
+        target.setframerate(rate)
+        target.writeframes(b"\0\0" * (rate * seconds))
     stream.seek(0)
     audio = WAVE(stream)
     audio.add_tags()

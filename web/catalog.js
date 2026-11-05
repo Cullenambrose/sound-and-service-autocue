@@ -1,5 +1,5 @@
 (() => {
-  let outbox, snapshot = "", crate = null, allCrates = [], busy = false, generation = 0, fileOffset = 0;
+  let outbox, stageOutbox, snapshot = "", crate = null, allCrates = [], busy = false, generation = 0, fileOffset = 0;
   const status = (message, failed = false) => {
     $("#catalog-status").textContent = message;
     $("#catalog-status").classList.toggle("catalog-error", failed);
@@ -7,6 +7,7 @@
   const request = (url, body) => api(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   function pending() {
     $("#catalog-pending").hidden = !outbox?.pending;
+    $("#catalog-stage-pending").hidden = !stageOutbox?.pending;
   }
   async function action(run) {
     if (busy) return;
@@ -83,6 +84,13 @@
         <h4>${index + 1}. ${escapeHtml(song.artist)} — ${escapeHtml(song.title)} ${escapeHtml(song.version || "")}</h4>
         <p class="muted">Source ID ${escapeHtml(song.id)} · ${escapeHtml(item.state)}${item.decision ? ` · reviewed revision ${item.revision} · ${escapeHtml(item.decision.note)}` : " · no reviewed file selection"} · BPM ${escapeHtml(song.bpm ?? "unknown")} · Key ${escapeHtml(song.key ?? "unknown")}</p>
         ${item.selected_file ? `<p class="muted">Reviewed file: ${escapeHtml(item.selected_file.path)} · ${escapeHtml(item.selected_file.state)} · SHA-256 ${escapeHtml(item.decision.content_hash)}</p>` : ""}
+        <div class="path-row">
+          <button class="button secondary" data-catalog-stage="${index}" ${item.state === "exact" ? "" : "disabled"}>Stage reviewed copy</button>
+          ${item.staged_track?.state === "available" ? `
+            <button class="button secondary" data-catalog-process="${index}">Analyze staged copy</button>
+            <button class="button secondary" data-catalog-review="${index}" ${item.staged_track.has_plan ? "" : "disabled"}>Review cues</button>` : ""}
+        </div>
+        <p class="muted">${item.staged_track ? `Staged copy: ${escapeHtml(item.staged_track.state)} · ${escapeHtml(item.staged_track.status || "not in analysis library")}${item.staged_track.error ? " · " + escapeHtml(item.staged_track.error) : ""}` : "Not staged for cue review."} Staging does not start analysis or link the original for Serato writes.</p>
         <label>File candidate <select data-catalog-choice="${index}"><option value="">Choose deliberately; nothing is selected automatically</option>${item.candidates.map((file, i) =>
           `<option value="${i}" ${file.state === "available" ? "" : "disabled"}>${escapeHtml(file.path)} · ${escapeHtml(file.state)} · ${file.metadata_equal ? "tags agree (review required)" : "VERSION CONFLICT"}</option>`).join("")}</select></label>
         <p class="muted">Matching tags do not prove the recording/edit. Listen and verify elsewhere before accepting. A version conflict requires an explicit override and note.</p>
@@ -93,6 +101,7 @@
     }).join("") || '<p class="muted">No songs in this source crate.</p>';
     function choose(index, missing) {
       return action(async () => {
+        if (stageOutbox?.pending) throw new Error("Resolve the pending staging request before changing a match.");
         const item = data.songs[index], value = $(`[data-catalog-choice="${index}"]`).value;
         if (!missing && value === "") throw new Error("Choose a candidate before accepting a reviewed file.");
         const file = missing ? null : item.candidates[Number(value)];
@@ -110,6 +119,29 @@
     }
     $$("[data-catalog-accept]").forEach(button => button.onclick = () => choose(Number(button.dataset.catalogAccept), false));
     $$("[data-catalog-missing]").forEach(button => button.onclick = () => choose(Number(button.dataset.catalogMissing), true));
+    $$("[data-catalog-stage]").forEach(button => button.onclick = () => action(async () => {
+      if (outbox?.pending) throw new Error("Resolve the pending match decision before staging.");
+      const item = data.songs[Number(button.dataset.catalogStage)];
+      stageOutbox.prepare({snapshot_id:selectedSnapshot, song_id:item.song.id,
+        decision_revision:item.revision, file_id:item.decision.file_id, content_hash:item.decision.content_hash});
+      pending();
+      await sendStagePending();
+    }));
+    $$("[data-catalog-process]").forEach(button => button.onclick = () => action(async () => {
+      const item = data.songs[Number(button.dataset.catalogProcess)];
+      if (!confirm("Analyze this app-local copy with your current analysis settings (including the saved Gemini toggle)? Models may download weights; LRCLIB may query artist/title. No original tags are written. Already analyzed tracks are not forced to rerun.")) return;
+      await queueTracks([item.staged_track.hash]);
+      status("Analysis request submitted. Follow batch progress, then refresh match and cue status.");
+      await loadSongs();
+    }));
+    $$("[data-catalog-review]").forEach(button => button.onclick = () => action(async () => {
+      const hash = data.songs[Number(button.dataset.catalogReview)].staged_track.hash;
+      const library = await api("/api/library");
+      tracks = library.tracks;
+      renderTracks();
+      if (!tracks.some(track => track.hash === hash)) throw new Error("Staged track was removed. Refresh match and cue status.");
+      await openReview(hash);
+    }));
     filterSongs();
   }
   function filterSongs() {
@@ -117,10 +149,19 @@
     $$(".catalog-song").forEach(song => { song.hidden = !song.dataset.catalogSearch.includes(query); });
   }
   async function sendPending() {
+    if (stageOutbox?.pending) throw new Error("Resolve the pending staging request before changing a match.");
     if (!outbox?.pending) throw new Error("No pending decision.");
     const receipt = await request("/api/catalog/decide", outbox.pending);
     outbox.accept(receipt);
     status("Match decision acknowledged and saved. This does not import, analyze or export the file.");
+    if (crate) await loadSongs();
+  }
+  async function sendStagePending() {
+    if (!stageOutbox?.pending) throw new Error("No pending staging request.");
+    const receipt = await request("/api/catalog/stage", stageOutbox.pending);
+    stageOutbox.accept(receipt);
+    status("Staging acknowledged. Inspect current staged status below; this receipt does not start analysis or undo later track removal.");
+    await reload();
     if (crate) await loadSongs();
   }
   $("#catalog-upload").onchange = () => action(async () => {
@@ -144,6 +185,24 @@
   $("#catalog-files-refresh").onclick = () => action(async () => { fileOffset = 0; await loadFiles(); });
   $("#catalog-files-more").onclick = () => action(async () => { fileOffset += 100; await loadFiles(); });
   $("#catalog-retry").onclick = () => action(sendPending);
+  $("#catalog-matches-refresh").onclick = () => action(async () => {
+    if (crate) await loadSongs();
+    else status("Choose a crate to refresh its match and cue status.");
+  });
+  $("#catalog-stage-retry").onclick = () => action(sendStagePending);
+  $("#catalog-stage-download").onclick = () => action(async () => {
+    if (!stageOutbox?.pending) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(stageOutbox.pending, null, 2)], {type:"application/json"}));
+    const link = document.createElement("a");
+    link.href = url; link.download = "autocue-pending-staging.json"; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  $("#catalog-stage-discard").onclick = () => action(async () => {
+    if (!confirm("Discard only this browser's staging retry request? This does not undo a committed copy. Download it first if needed.")) return;
+    stageOutbox.clear();
+    status("Pending staging request discarded. Refresh the crate to inspect committed state.");
+    if (crate) await loadSongs();
+  });
   $("#catalog-download").onclick = () => action(async () => {
     if (!outbox?.pending) return;
     const url = URL.createObjectURL(new Blob([JSON.stringify(outbox.pending, null, 2)], {type:"application/json"}));
@@ -160,6 +219,7 @@
   action(async () => {
     await api("/api/session");
     outbox = new MatchOutbox(localStorage, datasetId);
+    stageOutbox = new StageOutbox(localStorage, datasetId);
     await Promise.all([refreshSnapshots(), refreshRoots()]);
     pending();
   });

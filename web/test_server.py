@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -34,7 +35,7 @@ class WebServerTests(unittest.TestCase):
         with urllib.request.urlopen(base + "/api/catalog/" + endpoint + "?" + urllib.parse.urlencode(query)) as response:
             return json.load(response)
 
-    def catalog_fixture(self):
+    def catalog_fixture(self, audio=None):
         from web.test_catalog import snapshot
         document = snapshot()
         code, imported = self.catalog_post("import", document)
@@ -42,7 +43,7 @@ class WebServerTests(unittest.TestCase):
         folder = Path(self.temporary.name) / "indexed-music"
         folder.mkdir()
         source = folder / "Clean.wav"
-        source.write_bytes(fixtures.tagged_wav())
+        source.write_bytes(audio if audio is not None else fixtures.tagged_wav())
         code, scanned = self.catalog_post("scan", {"path": str(folder)})
         self.assertEqual(code, 200, scanned)
         file = self.catalog_get("files")["files"][0]
@@ -104,6 +105,261 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(len(scanned["errors"]), 1)
         self.assertEqual(self.catalog_get("files")["files"][0]["state"], "error")
+
+    def staging_fixture(self):
+        imported, source, decision = self.catalog_fixture()
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        body = {key: decision[key] for key in ("dataset_id", "snapshot_id", "song_id", "file_id", "content_hash")}
+        body.update(request_id="synthetic-stage", decision_revision=1)
+        return imported, source, body
+
+    def staged_song(self, imported):
+        return self.catalog_get("songs", snapshot_id=imported["snapshot_id"], crate_id="crate-1")["songs"][0]
+
+    def test_catalog_staging_retries_commit_one_copy_and_provenance_without_analysis_or_source_link(self):
+        imported, source, body = self.staging_fixture()
+        original, mtime = source.read_bytes(), source.stat().st_mtime_ns
+        with patch.object(server, "create_job", side_effect=AssertionError("analysis queued")), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            replies = list(pool.map(lambda _: self.catalog_post("stage", body), range(12)))
+        self.assertTrue(all(status == 200 and receipt == replies[0][1] for status, receipt in replies), replies)
+        receipt = replies[0][1]
+        self.assertEqual(receipt["track_hash"], body["content_hash"])
+        self.assertTrue(receipt["added"])
+        with server.connect() as db:
+            tracks = db.execute("SELECT * FROM tracks").fetchall()
+            self.assertEqual(len(tracks), 1)
+            self.assertEqual(tracks[0]["source_path"], "")
+            self.assertEqual(tracks[0]["source_size"], 0)
+            self.assertIsNone(tracks[0]["plan_json"])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM catalog_staging_receipts").fetchone()[0], 1)
+            provenance = json.loads(db.execute("SELECT provenance_json FROM catalog_staged_tracks").fetchone()[0])
+        self.assertEqual(provenance["source_path"], str(source.resolve()))
+        self.assertEqual(provenance["decision"]["note"], "Synthetic review")
+        self.assertEqual(provenance["track_hash"], body["content_hash"])
+        self.assertEqual(server.staged_audio_path(tracks[0]).read_bytes(), original)
+        self.assertEqual((source.read_bytes(), source.stat().st_mtime_ns), (original, mtime))
+        self.assertEqual(len(list(server.UPLOADS.iterdir())), 1)
+        self.assertEqual(self.staged_song(imported)["staged_track"]["state"], "available")
+        self.assertEqual(self.catalog_post("stage", {**body, "decision_revision": 2})[0], 409)
+        server.initialize()
+        self.assertEqual(self.catalog_post("stage", body), replies[0])
+
+    def test_catalog_staging_rejects_unreviewed_stale_missing_offline_and_wrong_dataset(self):
+        imported, source, decision = self.catalog_fixture()
+        body = {key: decision[key] for key in ("dataset_id", "snapshot_id", "song_id", "file_id", "content_hash")}
+        body.update(request_id="stage", decision_revision=1)
+        self.assertEqual(self.catalog_post("stage", body)[0], 409)
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        self.assertEqual(self.catalog_post("stage", {**body, "dataset_id": "different"})[0], 409)
+        self.assertEqual(self.catalog_post("stage", {**body, "decision_revision": True})[0], 400)
+        moved = source.parent.with_name("offline-music")
+        source.parent.rename(moved)
+        self.assertEqual(self.catalog_post("stage", body)[0], 409)
+        moved.rename(source.parent)
+        original = source.read_bytes()
+        source.write_bytes(original + b"changed")
+        self.assertEqual(self.catalog_post("stage", body)[0], 409)
+        self.assertEqual(list(server.UPLOADS.iterdir()), [])
+        self.assertIsNone(self.staged_song(imported)["staged_track"])
+
+    def test_catalog_staging_rechecks_copied_hash_and_match_revision_before_committing(self):
+        _, source, body = self.staging_fixture()
+        with patch.object(server.catalog, "file_status", return_value="available"):
+            source.write_bytes(b"changed but a stale status was returned")
+            status, error = self.catalog_post("stage", body)
+        self.assertEqual(status, 409)
+        self.assertIn("bytes", error["error"])
+        self.assertEqual(list(server.UPLOADS.iterdir()), [])
+
+    def test_catalog_match_changed_during_copy_does_not_stage_previous_decision(self):
+        _, _, body = self.staging_fixture()
+        original = server.prepared_import
+        @contextmanager
+        def copy_then_change(*args, **kwargs):
+            with original(*args, **kwargs) as copied:
+                with server.connect() as db:
+                    db.execute("UPDATE catalog_match_decisions SET revision=revision+1")
+                yield copied
+        with patch.object(server, "prepared_import", side_effect=copy_then_change):
+            self.assertEqual(self.catalog_post("stage", body)[0], 409)
+        self.assertEqual(list(server.UPLOADS.iterdir()), [])
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM catalog_staging_receipts").fetchone()[0], 0)
+
+    def test_catalog_source_mutated_during_copy_is_not_published(self):
+        _, source, body = self.staging_fixture()
+        original = server.prepared_import
+        @contextmanager
+        def copy_then_change(*args, **kwargs):
+            with original(*args, **kwargs) as copied:
+                source.write_bytes(source.read_bytes() + b"changed during copy")
+                yield copied
+        with patch.object(server, "prepared_import", side_effect=copy_then_change):
+            self.assertEqual(self.catalog_post("stage", body)[0], 409)
+        self.assertEqual(list(server.UPLOADS.iterdir()), [])
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 0)
+
+    def test_catalog_staging_retries_are_historical_even_after_new_match_or_source_disconnect(self):
+        imported, source, body = self.staging_fixture()
+        reply = self.catalog_post("stage", body)
+        self.assertEqual(reply[0], 200)
+        decision = {key: body[key] for key in ("dataset_id", "snapshot_id", "song_id")}
+        decision.update(request_id="clear-after-stage", base_revision=1, file_id=None, content_hash=None)
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        source.parent.rename(source.parent.with_name("disconnected"))
+        self.assertEqual(self.catalog_post("stage", body), reply)
+        self.assertIsNone(self.staged_song(imported)["staged_track"])
+        self.assertEqual(self.catalog_post("stage", {**body, "request_id": "new-attempt"})[0], 409)
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 1)
+
+    def test_catalog_retained_staged_copy_can_be_reviewed_while_original_is_offline(self):
+        imported, source, body = self.staging_fixture()
+        self.assertEqual(self.catalog_post("stage", body)[0], 200)
+        source.parent.rename(source.parent.with_name("disconnected"))
+        item = self.staged_song(imported)
+        self.assertEqual(item["state"], "stale")
+        self.assertEqual(item["selected_file"]["state"], "offline")
+        self.assertEqual(item["staged_track"]["state"], "available")
+        server._store_plan(body["content_hash"], {"cues": {}, "grid": {"t1": 0, "bar_s": 2}}, "Needs a look")
+        self.assertTrue(self.staged_song(imported)["staged_track"]["has_plan"])
+        self.assertEqual(self.catalog_post("stage", {**body, "request_id": "not-a-retry"})[0], 409)
+
+    def test_catalog_staging_requires_authentication_and_explicit_complete_request(self):
+        _, _, body = self.staging_fixture()
+        self.assertEqual(self.catalog_post("stage", body, authenticated=False)[0], 403)
+        for invalid in ({key: value for key, value in body.items() if key != "content_hash"},
+                        {**body, "extra": True}, {**body, "file_id": None}):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(self.catalog_post("stage", invalid)[0], 400)
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 0)
+
+    def test_catalog_staging_failure_rolls_back_track_provenance_and_receipt_and_retries(self):
+        _, source, body = self.staging_fixture()
+        with server.connect() as db:
+            db.execute("""CREATE TRIGGER reject_staging BEFORE INSERT ON catalog_staging_receipts
+                          BEGIN SELECT RAISE(ABORT,'synthetic staging failure'); END""")
+        status, error = self.catalog_post("stage", body)
+        self.assertEqual(status, 503)
+        self.assertIn("synthetic staging failure", error["error"])
+        with server.connect() as db:
+            for table in ("tracks", "catalog_staged_tracks", "catalog_staging_receipts"):
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], 0)
+            db.execute("DROP TRIGGER reject_staging")
+        # A promoted, verified content-addressed file may survive a DB rollback; retry adopts it.
+        self.assertEqual(len(list(server.UPLOADS.iterdir())), 1)
+        self.assertEqual(self.catalog_post("stage", body)[0], 200)
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), body["content_hash"])
+
+    def test_catalog_staging_preserves_existing_review_and_original_source_association(self):
+        _, source, body = self.staging_fixture()
+        other = Path(self.temporary.name) / "originally-linked.wav"
+        other.write_bytes(source.read_bytes())
+        file_hash, _ = server.copy_import(other, other.name, source_path=str(other))
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=?,reviewed=1,edited=1,error='keep' WHERE hash=?",
+                       (json.dumps({"cues": {"B": {"bar": 3}}, "answer_key": {"B": {"bar": 3}}}), file_hash))
+            before = dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone())
+        code, receipt = self.catalog_post("stage", body)
+        self.assertEqual(code, 200, receipt)
+        self.assertFalse(receipt["added"])
+        with server.connect() as db:
+            self.assertEqual(dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()), before)
+        self.assertEqual(other.read_bytes(), source.read_bytes())
+
+    def test_catalog_old_staging_retry_never_resurrects_removed_track_or_recreates_provenance(self):
+        imported, _, body = self.staging_fixture()
+        reply = self.catalog_post("stage", body)
+        self.assertEqual(reply[0], 200)
+        server.remove_tracks([body["content_hash"]])
+        self.assertEqual(self.catalog_post("stage", body), reply)
+        self.assertEqual(self.staged_song(imported)["staged_track"]["state"], "removed")
+        self.assertEqual(list(server.UPLOADS.iterdir()), [])
+        code, receipt = self.catalog_post("stage", {**body, "request_id": "restage-intentionally"})
+        self.assertEqual(code, 200, receipt)
+        self.assertEqual(self.staged_song(imported)["staged_track"]["state"], "available")
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM catalog_staged_tracks").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM catalog_staging_receipts").fetchone()[0], 2)
+
+    def test_catalog_staging_never_overwrites_corrupt_existing_copy_and_reports_copy_failure(self):
+        imported, _, body = self.staging_fixture()
+        self.assertEqual(self.catalog_post("stage", body)[0], 200)
+        destination = server.UPLOADS / (body["content_hash"] + ".wav")
+        destination.write_bytes(b"corrupted")
+        code, error = self.catalog_post("stage", {**body, "request_id": "verify-again"})
+        self.assertEqual(code, 400)
+        self.assertIn("hash verification", error["error"])
+        self.assertEqual(destination.read_bytes(), b"corrupted")
+        self.assertEqual(len(list(server.UPLOADS.glob("*.tmp"))), 0)
+        with patch.object(server.os, "replace", side_effect=OSError("synthetic disk full")):
+            destination.unlink()
+            code, error = self.catalog_post("stage", {**body, "request_id": "disk-full"})
+        self.assertEqual(code, 400)
+        self.assertIn("disk full", error["error"])
+        self.assertEqual(self.staged_song(imported)["staged_track"]["state"], "unavailable")
+
+    def test_catalog_staging_library_exposes_provenance_and_existing_review_saves_still_work(self):
+        imported, _, body = self.staging_fixture()
+        self.assertEqual(self.catalog_post("stage", body)[0], 200)
+        file_hash = body["content_hash"]
+        server._store_plan(file_hash, {"grid": {"t1": 0, "bar_s": 2},
+                                      "cues": {"B": {"name": "START", "bar": 1}}}, "Needs a look")
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        with urllib.request.urlopen(base + "/api/library") as response:
+            library = json.load(response)["tracks"]
+        self.assertEqual(library[0]["catalog_sources"][0]["song_id"], body["song_id"])
+        self.assertFalse(library[0]["source_available"])
+        request = self.review_request(base + "/api/tracks/" + file_hash,
+            data=b'{"cues":{"B":{"name":"START","bar":2}}}', method="PUT",
+            headers={"Content-Type": "application/json", "Origin": base, "X-AutoCue-Token": server.SESSION_TOKEN})
+        self.assertEqual(self.submit_review(request)[0], 200)
+        staged = self.staged_song(imported)["staged_track"]
+        self.assertTrue(staged["has_plan"])
+        self.assertTrue(staged["reviewed"])
+        self.assertEqual(len(self.corrections()), 1)
+
+    def test_catalog_match_to_real_prepared_worker_to_transactional_cue_review(self):
+        imported, source, decision = self.catalog_fixture(fixtures.tagged_wav(seconds=48, rate=44100))
+        original = source.read_bytes()
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        body = {key: decision[key] for key in ("dataset_id", "snapshot_id", "song_id", "file_id", "content_hash")}
+        body.update(request_id="prepared-stage", decision_revision=1)
+        self.assertEqual(self.catalog_post("stage", body)[0], 200)
+        beats = Path(self.temporary.name) / "prepared-beats.json"
+        beats.write_text(json.dumps({"beats": [i * .5 for i in range(96)],
+                                     "downbeats": [i * 2 for i in range(24)]}))
+        def prepared(row, settings, override, cancelled):
+            return server.autocue_worker.run({
+                "schema_version": 1, "job_id": "synthetic-bridge-integration",
+                "profile": "prepared", "source": str(server.staged_audio_path(row)),
+                "track_hash": row["hash"], "beats_path": str(beats),
+                "cache_dir": str(Path(self.temporary.name) / "cache"),
+                "genre": "pop", "experiments": ["baseline"],
+            }, cancelled=cancelled)["plan"]
+        with patch.dict(os.environ, {}, clear=False), patch.object(server, "process_builtin", side_effect=prepared):
+            os.environ.pop("AUTOCUE_PROCESSOR", None)
+            server.process_track(body["content_hash"])
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        request = self.review_request(base + "/api/tracks/" + body["content_hash"],
+            data=b'{"cues":{"B":{"name":"START","bar":1}}}', method="PUT",
+            headers={"Content-Type": "application/json", "Origin": base, "X-AutoCue-Token": server.SESSION_TOKEN})
+        self.assertEqual(self.submit_review(request)[0], 200)
+        self.assertTrue(self.staged_song(imported)["staged_track"]["reviewed"])
+        with server.connect() as db:
+            row = db.execute("SELECT * FROM tracks WHERE hash=?", (body["content_hash"],)).fetchone()
+            plan = json.loads(row["plan_json"])
+            self.assertEqual(plan["provenance"]["profile"], "prepared")
+            self.assertEqual(plan["cues"]["B"]["bar"], 1)
+            self.assertEqual(plan["answer_key"]["cues"]["B"]["bar"], 1)
+            self.assertEqual(row["source_path"], "")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(len(self.corrections()), 1)
 
     def review_request(self, url, data, **kwargs):
         body = json.loads(data)

@@ -14,6 +14,8 @@ Implemented plan:
    exact-file SHA-256, incremental metadata parsing and offline-root handling.
 3. Conservative version candidates and acknowledged, retryable human decisions.
 4. An integrated catalog browser, synthetic regression fixtures and CI.
+5. Explicit verified staging of reviewed files into the existing analysis/cue
+   editor, retaining match provenance and idempotent staging receipts.
 
 The actual saved CSV/catalog exports were not supplied at a known path for this
 milestone. Their headers, preambles and identity/link fields have **not** been
@@ -54,11 +56,15 @@ Open `http://127.0.0.1:8771`. Under **Find your exact versions**:
    an intentional override checkbox and note.
 5. Accept a reviewed file or mark missing. Reload and verify the same saved
    decision. Rescan to observe unchanged files being reused.
+6. For an accepted match, **Stage reviewed copy** makes a verified copy in the
+   app's disposable data folder. It does not start inference. See the staging
+   contract below before choosing **Analyze staged copy**.
 
 The generated WAVs are silence with invented tags, not a listening/accuracy
 test. No catalog match action copies audio into the analysis library, invokes
-models, uploads audio, or writes tags. Existing analysis/Serato controls remain
-separate; do not use them as part of this demo. Stop the server before deleting
+models, uploads audio, or writes tags. Staging is a separate explicit action.
+Do not run model analysis or Serato controls as part of this lightweight demo.
+Stop the server before deleting
 only the specific disposable directory created above.
 
 Before using a real app database, stop its server and back up the **whole data
@@ -130,6 +136,9 @@ there is no partial-success importer or silently skipped input row.
 - `catalog_match_decisions`, `catalog_match_receipts`: revisioned decisions and
   immutable retry receipts. Receipts retain the submitted note/override body;
   new decisions do not edit the imported source.
+- `catalog_staged_tracks`, `catalog_staging_receipts`: immutable decision-to-hash
+  provenance and acknowledged staging operations. Historical links deliberately
+  do not reference the mutable/deletable `tracks` row with a foreign key.
 
 These are not a recording-fingerprint graph. A catalog source song/version is
 not the staged `tracks.hash` entity. Renames currently appear as a missing old
@@ -222,6 +231,111 @@ Browser storage is not a backup; clearing it/changing origin removes access to
 that retry request. A prior receipt acknowledges a historical commit, not the
 current availability of its file.
 
+## Reviewed match to cue review
+
+This bridge completes an independent part of the catalog workflow while the
+actual CSV/export adapter still awaits representative input.
+
+Implementation plan:
+
+1. Revalidate the exact accepted match and streamed source hash before staging.
+2. Share existing copy/import helpers; commit the analysis track, immutable
+   provenance and staging receipt together, without altering a prior review.
+3. Keep staging retries in a separate dataset-scoped browser outbox.
+4. Expose explicit stage / analyze / review controls and test synthetic
+   transaction failures, source changes and the full offline review flow.
+
+**Stage reviewed copy** is available only for a current `exact` human selection.
+The server checks dataset, snapshot/song, accepted decision revision, file ID,
+root availability and indexed file state. It streams into an owned temporary
+file, computes SHA-256 during the copy, flushes/fsyncs, and rejects bytes that
+differ from the accepted hash. After copying it rechecks the match revision and
+source status under `BEGIN IMMEDIATE`, preventing a newer match or source
+mutation from being silently staged. Input paths are resolved from the index,
+not supplied by the staging caller.
+
+An existing app-local copy must pass hash verification; corruption is reported,
+not silently replaced. The content-addressed copy is promoted before the
+SQLite transaction inserts the track (if absent), provenance and receipt.
+A failed transaction rolls back **all database records**, but a promoted valid
+audio file may remain unreferenced. This is not a filesystem/SQLite distributed
+transaction: retries safely verify/adopt the orphan. Hard termination may leave
+owned `.tmp` files; no automatic deletion/scavenging was introduced.
+
+If the exact hash already exists in the analysis library, staging preserves
+the entire existing track row: cue plan, answer key, reviewed/edited flags,
+revision, errors, name and earlier source association. Multiple catalog songs
+may therefore share one analysis track and its cue corrections; those are not
+independent per-membership reviews.
+
+For a **new** track, `source_path` intentionally remains empty. Original path,
+file ID, decision note/revision, dataset, catalog snapshot/song and selected
+hash are retained separately in immutable provenance. This prevents staging
+from enabling the existing original-file Serato write path. A track previously
+imported/write-linked through another workflow keeps that existing association;
+staging neither enables nor disables earlier permissions.
+
+The cue editor displays this catalog origin; `GET /api/library` includes
+`catalog_sources`. Reanalysis preserves these independent source links and the
+existing reviewed answer-key behavior. Staging does not mark cues reviewed.
+
+`POST /api/catalog/stage` accepts exactly:
+
+```json
+{
+  "request_id": "new-client-generated-UUID",
+  "dataset_id": "dataset-UUID",
+  "snapshot_id": "snapshot-SHA256",
+  "song_id": "source-song-version-id",
+  "decision_revision": 1,
+  "file_id": "indexed-file-UUID",
+  "content_hash": "accepted-exact-file-SHA256"
+}
+```
+
+Success acknowledges every field, `ok: true`, `track_hash` equal to the accepted
+content hash, and boolean `added`. A repeated exact request replays that receipt
+without copying or changing anything, even if the original subsequently goes
+offline, the match changes or the staged track is removed. Reusing the request
+ID with other content or staging a stale match returns 409. Malformed input/
+copy failures return 400; database failures return 503 and roll back.
+
+The receipt proves a **historical commit**, not present availability.
+Catalog song responses expose `staged_track` only for the current decision
+revision, with available/unavailable/removed state, analysis status, errors and
+plan/review flags. Removing a staged track leaves provenance/receipts intact;
+an old retry never recreates it. A new explicit staging request may recreate a
+removed copy only after revalidating the current original and decision.
+The lightweight status view checks location/existence; the actual staging and
+built-in analysis paths verify the byte hash, rather than treating that status
+label as an integrity certificate.
+
+The browser stores staging requests before sending and validates every identity,
+decision revision and returned track hash before clearing the separate outbox.
+It never interprets an unacknowledged staging request as a match change.
+After a failure/reload, use **Retry staging request**. For a permanent conflict,
+download the pending request, discard only the browser retry state, refresh and
+reconcile. Discarding does not remove a copy committed on the server.
+Resolve pending staging before changing a match, and pending matches before
+staging. Cross-tab changes fail visibly rather than overwriting either outbox.
+
+**Analyze staged copy** is a separate confirmed action through the existing
+job API. It uses saved analysis settings, including the Gemini toggle and
+LRCLIB behavior; it may download weights or make permitted requests. No such
+model/AI request was made during implementation. Do not select it for the
+lightweight demo unless your environment is explicitly configured for offline
+prepared analysis. Staging retries do not enqueue analysis jobs.
+Job submission retains its previous protocol; this change does not add
+exactly-once receipts to analysis job creation or force already-reviewed tracks
+to rerun.
+
+Watch batch progress, then choose **Refresh match and cue status**.
+**Review cues** opens the current staged track in the existing editor after
+fetching the latest library. Review saves retain their transactional correction
+journal/receipts/durable drafts. A retained staged copy can still be analyzed or
+reviewed with its original offline; the catalog match then shows stale/offline
+independently. No new copy can be made from an offline original.
+
 ## API and verification
 
 All mutation routes use the existing loopback/origin/session-token checks.
@@ -229,6 +343,7 @@ All mutation routes use the existing loopback/origin/session-token checks.
 - `POST /api/catalog/import`: document above, max 64 MB.
 - `POST /api/catalog/scan`: `{"path": "/absolute/selected/folder"}`.
 - `POST /api/catalog/decide`: acknowledged match protocol above.
+- `POST /api/catalog/stage`: explicit acknowledged staging protocol above.
 - `GET /api/catalog/snapshots`, `/roots`.
 - `GET /api/catalog/crates?snapshot_id=...&q=...`: crate-title search.
 - `GET /api/catalog/songs?snapshot_id=...&crate_id=...`: ordered memberships,
@@ -259,10 +374,21 @@ unapproved conflict, deliberately dropped a post-commit acknowledgment, reloaded
 and retried without advancing the saved revision. No original library, music
 file, production database or Serato tag was modified.
 
-Local results: **345 engine, 78 web/catalog and 33 Node cases passed**. A clean
-Python 3.10 environment with only core dependencies passed the same Python
-suites (three optional model-compatibility checks skipped). Hosted CI has not
-run because this work has not been pushed.
+Current bridge results: **345 engine, 92 web/catalog and 36 Node cases passed**.
+A fresh Python 3.10 environment with only core dependencies also passed both
+Python suites (three optional model-compatibility checks skipped). Hosted CI
+has not run because this work has not been pushed.
+
+Bridge verification additionally covers concurrent staging retries, match/source
+changes during copy, wrong datasets, corrupt destinations, failed promotion,
+receipt rollback, orphan adoption, preservation of earlier reviews/source
+associations and retries after removal/match changes/offline originals.
+The integration test executes the real worker's prepared profile on a generated
+48-second WAV and saves a correction through HTTP. Browser validation uses that
+same **offline prepared adapter**, not the normal model pipeline: match, stage,
+drop acknowledgment after commit, reload/retry, explicitly analyze, open cue
+review, change B and save/reopen. The source hash stays unchanged, exactly one
+staging receipt remains, and original-file writes remain disabled.
 
 ## Next concrete work
 
@@ -271,6 +397,6 @@ run because this work has not been pushed.
    source IDs and unavailable entries) and reconcile the real 1,423/81,153 counts.
 2. Add durable cancellable scan jobs and explicit volume reassociation; benchmark
    on a disposable representative library before raising the initial bound.
-3. Bridge human-selected current hashes into staged cue review with revalidation
-   and preserved provenance. Then add ordered personal crates and verified
-   M3U8/CSV export manifests. No production tag-writing or AI expansion here.
+3. The reviewed-match/cue-review bridge is implemented. Next add ordered personal
+   crates and verified M3U8/CSV export manifests after the real adapter and scan
+   acceptance gates. No production tag-writing or AI expansion here.

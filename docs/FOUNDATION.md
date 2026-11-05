@@ -211,5 +211,8 @@ contracts and remaining stage-3 work. The actual vendor CSV adapter, real-export
 reconciliation, durable scan jobs and volume reassociation are not yet complete.
 Keep catalog song/version identities separate from exact-file hashes; never
 select a remix, clean/explicit version or intro edit from title similarity alone.
-Next inspect representative actual exports, then connect reviewed current hashes
-to cue review before personal crates, verified playlist export or AI chat.
+Reviewed current hashes now connect to cue review through explicit verified
+staging, with durable receipts and retained catalog provenance; see
+[the staging contract](CATALOG.md#reviewed-match-to-cue-review).
+Next inspect representative actual exports and complete scan-job/volume handling
+before personal crates, verified playlist export or AI chat.

@@ -18,6 +18,7 @@ import zipfile
 import base64
 import glob
 import math
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 if __package__:
@@ -1030,7 +1031,8 @@ def _restore_backup_entry(archive, entry):
         raise
 
 
-def copy_import(source, name, relative_path="", source_path=""):
+@contextmanager
+def prepared_import(source, name, *, expected_hash=None):
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED:
         raise ValueError("Unsupported audio file type: " + (suffix or "(no extension)"))
@@ -1045,38 +1047,127 @@ def copy_import(source, name, relative_path="", source_path=""):
                     break
                 digest.update(block)
                 staged.write(block)
+            staged.flush()
+            os.fsync(staged.fileno())
         file_hash = digest.hexdigest()
+        if expected_hash is not None and file_hash != expected_hash:
+            raise catalog.Conflict("Source bytes no longer match the reviewed file; rescan and review again.")
         destination = staged_audio_path(
             {"hash": file_hash, "audio_path": "audio/" + file_hash + suffix}, missing_ok=True)
-        if destination.exists():
-            temporary.unlink()
-        else:
-            os.replace(temporary, destination)
-    except Exception:
+        if expected_hash is not None and destination.exists() and _sha256(destination) != expected_hash:
+            raise RuntimeError("Existing staged audio failed hash verification; nothing was overwritten.")
+        yield file_hash, temporary, destination
+    finally:
         temporary.unlink(missing_ok=True)
-        raise
+
+
+def record_import(db, file_hash, destination, name, relative_path="", source_path="", *, preserve_existing=False):
+    existing = db.execute("SELECT hash FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+    if existing:
+        if source_path and not preserve_existing:
+            stat = Path(source_path).stat()
+            db.execute("UPDATE tracks SET source_path=?,source_size=?,source_mtime=? WHERE hash=?",
+                       (source_path, stat.st_size, stat.st_mtime, file_hash))
+        return False
+    stat = Path(source_path).stat() if source_path and Path(source_path).is_file() else None
+    db.execute(
+        "INSERT INTO tracks(hash,name,relative_path,audio_path,source_path,source_size,source_mtime,imported_at) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (file_hash, Path(name).name, relative_path, destination.relative_to(DATA.resolve()).as_posix(), source_path,
+         stat.st_size if stat else 0, stat.st_mtime if stat else 0, time.time()),
+    )
+    return True
+
+
+def copy_import(source, name, relative_path="", source_path=""):
+    with prepared_import(source, name) as (file_hash, temporary, destination):
+        if not destination.exists():
+            os.replace(temporary, destination)
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            added = record_import(db, file_hash, destination, name, relative_path, source_path)
+    return file_hash, added
+
+
+def stage_catalog_match(body):
+    if not isinstance(body, dict) or set(body) != {
+            "request_id", "dataset_id", "snapshot_id", "song_id", "decision_revision", "file_id", "content_hash"}:
+        raise ValueError("Staging requires request/dataset/snapshot/song IDs, decision_revision, file_id and content_hash.")
+    for key in ("request_id", "dataset_id", "snapshot_id", "song_id", "file_id", "content_hash"):
+        catalog.text(body[key], key, required=True)
+    if type(body["decision_revision"]) is not int or body["decision_revision"] < 1:
+        raise ValueError("decision_revision must be a positive integer.")
+    encoded = catalog.canonical(body)
+
+    def replay(db):
+        if body["dataset_id"] != review_store.dataset_id(db):
+            raise catalog.Conflict("Staging belongs to a different dataset; reload the app.")
+        prior = db.execute("SELECT * FROM catalog_staging_receipts WHERE request_id=?",
+                           (body["request_id"],)).fetchone()
+        if prior:
+            if prior["body_json"] != encoded:
+                raise catalog.Conflict("Staging request ID was already used with different content.")
+            return json.loads(prior["receipt_json"])
+        return None
+
     with connect() as db:
-        existing = db.execute("SELECT hash FROM tracks WHERE hash=?", (file_hash,)).fetchone()
-        if existing:
-            if source_path:
-                stat = Path(source_path).stat()
-                db.execute("UPDATE tracks SET source_path=?,source_size=?,source_mtime=? WHERE hash=?",
-                           (source_path, stat.st_size, stat.st_mtime, file_hash))
-            return file_hash, False
-        stat = Path(source_path).stat() if source_path and Path(source_path).is_file() else None
-        try:
-            db.execute(
-                "INSERT INTO tracks(hash,name,relative_path,audio_path,source_path,source_size,source_mtime,imported_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (file_hash, Path(name).name, relative_path, destination.relative_to(DATA.resolve()).as_posix(), source_path,
-                 stat.st_size if stat else 0, stat.st_mtime if stat else 0, time.time()),
-            )
-        except sqlite3.IntegrityError:
-            if source_path and stat:
-                db.execute("UPDATE tracks SET source_path=?,source_size=?,source_mtime=? WHERE hash=?",
-                           (source_path, stat.st_size, stat.st_mtime, file_hash))
-            return file_hash, False
-    return file_hash, True
+        receipt = replay(db)
+        if receipt:
+            return receipt
+        file, _ = catalog.reviewed_file(db, body)
+    source = Path(file["path"])
+    with prepared_import(source, source.name, expected_hash=body["content_hash"]) as (
+            file_hash, temporary, destination):
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            receipt = replay(db)
+            if receipt:
+                return receipt
+            current, decision = catalog.reviewed_file(db, body)
+            if current["path"] != file["path"]:
+                raise catalog.Conflict("Reviewed source location changed while staging.")
+            if destination.exists():
+                if _sha256(destination) != file_hash:
+                    raise RuntimeError("Existing staged audio failed hash verification; nothing was overwritten.")
+            else:
+                os.replace(temporary, destination)
+            added = record_import(db, file_hash, destination, source.name, file["relative_path"],
+                                  preserve_existing=True)
+            provenance = {"dataset_id": body["dataset_id"], "snapshot_id": body["snapshot_id"],
+                          "song_id": body["song_id"], "decision": decision,
+                          "file_id": file["id"], "source_path": file["path"], "track_hash": file_hash}
+            db.execute("""
+                INSERT INTO catalog_staged_tracks VALUES(?,?,?,?,?,?)
+                ON CONFLICT(snapshot_id,song_id,decision_revision) DO NOTHING
+            """, (body["snapshot_id"], body["song_id"], body["decision_revision"], file_hash,
+                  catalog.canonical(provenance), time.time()))
+            receipt = {"ok": True, **body, "track_hash": file_hash, "added": added}
+            db.execute("INSERT INTO catalog_staging_receipts VALUES(?,?,?)",
+                       (body["request_id"], encoded, catalog.canonical(receipt)))
+    return receipt
+
+
+def catalog_songs(db, snapshot_id, crate_id):
+    songs = catalog.songs(db, snapshot_id, crate_id)
+    for item in songs:
+        link = db.execute("""
+            SELECT s.track_hash,t.status,t.plan_json,t.reviewed,t.error FROM catalog_staged_tracks s
+            LEFT JOIN tracks t ON t.hash=s.track_hash
+            WHERE s.snapshot_id=? AND s.song_id=? AND s.decision_revision=?
+        """, (snapshot_id, item["song"]["id"], item["revision"])).fetchone()
+        item["staged_track"] = None
+        if link:
+            state = "removed" if link["status"] is None else "available"
+            if state == "available":
+                track = db.execute("SELECT hash,audio_path FROM tracks WHERE hash=?", (link["track_hash"],)).fetchone()
+                try:
+                    staged_audio_path(track)
+                except (OSError, ValueError):
+                    state = "unavailable"
+            item["staged_track"] = {"hash": link["track_hash"], "state": state,
+                                    "status": link["status"], "has_plan": bool(link["plan_json"]),
+                                    "reviewed": bool(link["reviewed"]), "error": link["error"]}
+    return songs
 
 
 def create_job(hashes, force=False):
@@ -1426,7 +1517,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/library":
             with connect() as db:
                 rows = db.execute("SELECT * FROM tracks ORDER BY imported_at DESC").fetchall()
-            return json_response(self, {"tracks": [track_record(row) for row in rows]})
+                sources = {}
+                for link in db.execute("SELECT track_hash,provenance_json FROM catalog_staged_tracks ORDER BY created_at"):
+                    sources.setdefault(link["track_hash"], []).append(json.loads(link["provenance_json"]))
+            return json_response(self, {"tracks": [
+                {**track_record(row), "catalog_sources": sources.get(row["hash"], [])} for row in rows]})
         if parsed.path == "/api/corrections":
             with connect() as db:
                 return json_response(self, review_store.export_events(db))
@@ -1564,8 +1659,8 @@ class Handler(BaseHTTPRequestHandler):
                         result = {"crates": catalog.crates(db, query.get("snapshot_id", [""])[0],
                                                          query.get("q", [""])[0])}
                     elif parsed.path == "/api/catalog/songs":
-                        result = {"songs": catalog.songs(db, query.get("snapshot_id", [""])[0],
-                                                       query.get("crate_id", [""])[0])}
+                        result = {"songs": catalog_songs(db, query.get("snapshot_id", [""])[0],
+                                                        query.get("crate_id", [""])[0])}
                     elif parsed.path == "/api/catalog/roots":
                         result = {"roots": catalog.roots(db)}
                     elif parsed.path == "/api/catalog/files":
@@ -1632,6 +1727,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path == "/api/catalog/stage":
+                return json_response(self, stage_catalog_match(self._body_json()))
             if parsed.path in ("/api/catalog/import", "/api/catalog/scan", "/api/catalog/decide"):
                 body = self._body_json(max_length=64 * 1024 * 1024 if parsed.path.endswith("/import") else 1024 * 1024)
                 if not isinstance(body, dict):

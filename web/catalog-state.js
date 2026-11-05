@@ -1,10 +1,10 @@
 (function(root) {
   class MatchOutbox {
-    constructor(storage, dataset, createId = () => crypto.randomUUID()) {
+    constructor(storage, dataset, createId = () => crypto.randomUUID(), namespace = "match") {
       this.storage = storage;
       this.dataset = dataset;
       this.createId = createId;
-      this.key = `autocue:catalog-match:v1:${dataset}`;
+      this.key = `autocue:catalog-${namespace}:v1:${dataset}`;
       this.saved = storage.getItem(this.key);
       this.pending = this.saved ? JSON.parse(this.saved) : null;
       if (this.pending && this.pending.dataset_id !== dataset) throw new Error("Pending match dataset is invalid.");
@@ -39,6 +39,21 @@
       this.pending = null;
     }
   }
-  if (typeof module !== "undefined" && module.exports) module.exports = {MatchOutbox};
-  else root.MatchOutbox = MatchOutbox;
+  class StageOutbox extends MatchOutbox {
+    constructor(storage, dataset, createId = () => crypto.randomUUID()) {
+      super(storage, dataset, createId, "stage");
+    }
+    accept(receipt) {
+      const request = this.pending;
+      if (!request || receipt?.ok !== true ||
+          ["request_id", "dataset_id", "snapshot_id", "song_id", "file_id", "content_hash",
+            "decision_revision"].some(key => receipt[key] !== request[key]) ||
+          receipt.track_hash !== request.content_hash || typeof receipt.added !== "boolean") {
+        throw new Error("Staging acknowledgment is invalid. The exact request remains available to retry.");
+      }
+      this.clear();
+    }
+  }
+  if (typeof module !== "undefined" && module.exports) module.exports = {MatchOutbox, StageOutbox};
+  else Object.assign(root, {MatchOutbox, StageOutbox});
 })(globalThis);

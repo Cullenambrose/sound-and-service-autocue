@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const {MatchOutbox} = require("./catalog-state.js");
+const {MatchOutbox, StageOutbox} = require("./catalog-state.js");
 function fixture() {
   const values = new Map(), storage = {
     getItem:key => values.get(key) ?? null,
@@ -59,4 +59,38 @@ test("dataset scoping and stale-tab protection prevent silent overwrites", () =>
   assert.throws(() => second.prepare(fields), /Another tab/);
   assert.throws(() => second.clear(), /Another tab/);
   assert.deepEqual(open().pending, pending);
+});
+const stageFields = {snapshot_id:"snapshot", song_id:"song", decision_revision:3,
+  file_id:"file", content_hash:"hash"};
+const stageReceipt = pending => ({...pending, ok:true, track_hash:pending.content_hash, added:true});
+test("staging retries survive reload in an outbox separate from match decisions", () => {
+  const {storage, open} = fixture(), match = open();
+  match.prepare(fields);
+  const stage = new StageOutbox(storage, "dataset", () => "stage-id");
+  const pending = stage.prepare(stageFields);
+  const restored = new StageOutbox(storage, "dataset");
+  assert.deepEqual(restored.pending, pending);
+  restored.accept(stageReceipt(pending));
+  assert.equal(new StageOutbox(storage, "dataset").pending, null);
+  assert.deepEqual(open().pending, match.pending);
+});
+test("staging acknowledgment must identify the copied bytes and reviewed decision", () => {
+  const {storage} = fixture(), stage = new StageOutbox(storage, "dataset", () => "stage-id");
+  const pending = stage.prepare(stageFields);
+  for (const invalid of [{ok:true}, {...stageReceipt(pending), track_hash:"wrong"},
+    {...stageReceipt(pending), decision_revision:4}, {...stageReceipt(pending), added:"true"},
+    {...stageReceipt(pending), file_id:"wrong"}, {...stageReceipt(pending), dataset_id:"wrong"}]) {
+    assert.throws(() => stage.accept(invalid), /Staging acknowledgment/);
+    assert.deepEqual(new StageOutbox(storage, "dataset").pending, pending);
+  }
+});
+test("staging storage errors and stale tabs never clear or replace a retry request", () => {
+  const {storage} = fixture(), first = new StageOutbox(storage, "dataset", () => "stage-id");
+  const stale = new StageOutbox(storage, "dataset", () => "other-id");
+  const pending = first.prepare(stageFields);
+  assert.throws(() => stale.prepare(stageFields), /Another tab/);
+  assert.throws(() => stale.clear(), /Another tab/);
+  storage.removeItem = () => { throw new Error("synthetic quota"); };
+  assert.throws(() => first.accept(stageReceipt(pending)), /quota/);
+  assert.deepEqual(new StageOutbox(storage, "dataset").pending, pending);
 });
