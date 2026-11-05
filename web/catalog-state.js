@@ -4,7 +4,8 @@
       this.storage = storage;
       this.dataset = dataset;
       this.createId = createId;
-      this.label = namespace === "stage" ? "staging request" : namespace === "scan" ? "scan request" : "match";
+      this.label = namespace === "stage" ? "staging request" : namespace === "scan" ? "scan request" :
+        namespace === "personal" ? "personal crate request" : "match";
       this.key = `autocue:catalog-${namespace}:v1:${dataset}`;
       this.saved = storage.getItem(this.key);
       this.pending = this.saved ? JSON.parse(this.saved) : null;
@@ -70,6 +71,23 @@
       this.clear();
     }
   }
-  if (typeof module !== "undefined" && module.exports) module.exports = {MatchOutbox, StageOutbox, ScanOutbox};
-  else Object.assign(root, {MatchOutbox, StageOutbox, ScanOutbox});
+  class PersonalOutbox extends MatchOutbox {
+    constructor(storage, dataset, createId = () => crypto.randomUUID()) {
+      super(storage, dataset, createId, "personal");
+    }
+    accept(receipt) {
+      const request = this.pending;
+      if (!request || receipt?.ok !== true ||
+          ["request_id", "dataset_id", "crate_id", "base_revision", "name"].some(key => receipt[key] !== request[key]) ||
+          receipt.revision !== request.base_revision + 1 ||
+          !Array.isArray(receipt.entries) || receipt.entries.length !== request.entries.length ||
+          receipt.entries.some((entry, index) => !entry ||
+            ["id", "snapshot_id", "song_id"].some(key => entry[key] !== request.entries[index][key]))) {
+        throw new Error("Personal crate acknowledgment is invalid. The exact request remains available to retry.");
+      }
+      this.clear();
+    }
+  }
+  if (typeof module !== "undefined" && module.exports) module.exports = {MatchOutbox, StageOutbox, ScanOutbox, PersonalOutbox};
+  else Object.assign(root, {MatchOutbox, StageOutbox, ScanOutbox, PersonalOutbox});
 })(globalThis);

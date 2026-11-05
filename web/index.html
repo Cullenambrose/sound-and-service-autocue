@@ -106,6 +106,23 @@
       <div id="catalog-songs"></div>
     </section>
 
+    <section id="personal-section" class="library-section">
+      <div class="library-head"><div><span class="eyebrow">PERSONAL CRATES · LOCAL ONLY</span><h2>Arrange your set</h2></div></div>
+      <p class="muted">Personal copies of catalog memberships, not edits to imported crates. Repeated songs are allowed. Each action saves an acknowledged revision; no music is copied, analyzed, exported or tagged.</p>
+      <div class="path-row"><input id="personal-new-name" aria-label="New personal crate name" placeholder="New personal crate name"><button id="personal-create" class="button secondary">Create personal crate</button></div>
+      <div class="path-row"><select id="personal-select" aria-label="Personal crate"><option value="">No personal crates</option></select><button id="personal-refresh" class="quiet">Refresh personal crates</button></div>
+      <div id="personal-status" class="notice" role="status" aria-live="polite"></div>
+      <div id="personal-pending" class="catalog-pending" hidden>
+        <strong>Unacknowledged personal crate change retained on this browser.</strong>
+        <button id="personal-retry" class="button secondary">Retry crate save</button>
+        <button id="personal-download" class="button secondary">Download pending crate change</button>
+        <button id="personal-discard" class="quiet">Discard crate retry request</button>
+      </div>
+      <h3 id="personal-title">Choose or create a personal crate</h3>
+      <div class="path-row"><input id="personal-name" aria-label="Rename personal crate" placeholder="Personal crate name"><button id="personal-rename" class="button secondary">Rename crate</button></div>
+      <div id="personal-entries"></div>
+    </section>
+
     <section class="library-section">
       <div class="library-head"><div><span class="eyebrow">03 · YOUR LIBRARY</span><h2>Tracks <span id="visible-count">0</span></h2></div>
         <div class="filters"><input id="search" type="search" placeholder="Search title or artist">
@@ -239,6 +256,7 @@
   <script src="/review-state.js"></script>
   <script src="/app.js"></script>
   <script src="/catalog-state.js"></script>
+  <script src="/personal.js"></script>
   <script src="/catalog.js"></script>
 </body>
 </html>

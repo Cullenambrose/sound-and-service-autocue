@@ -223,3 +223,14 @@ survive; historical provenance and original-file write links are not retargeted.
 Next inspect representative actual exports and benchmark disposable
 representative libraries before personal crates, verified playlist export or AI
 chat.
+
+**Personal-crate slice:** ordered, revisioned catalog memberships are now editable
+in **Arrange your set**, independently of immutable imported crates. Create,
+rename, add, move and remove actions commit with acknowledged retry receipts and
+a dataset-scoped browser outbox. Membership IDs distinguish repeated songs;
+current match status is resolved on refresh, not pinned as export verification.
+Next implement a verified playlist export preview/manifest, revalidating exact
+source hashes and match/crate revisions before producing M3U8/CSV. Real vendor
+CSV compatibility still requires representative exports. See
+[the personal-crate contract](CATALOG.md#ordered-personal-crates) before extending
+this slice; no Serato crate writes or AI changes were introduced.

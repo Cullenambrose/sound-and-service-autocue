@@ -20,6 +20,8 @@ Implemented plan:
    cooperative cancellation and explicit restart recovery.
 7. Deliberate offline-root reassociation with full file-byte proof, preserved
    identities and atomic history. This does not enable or retarget tag writes.
+8. Ordered personal crates referencing immutable catalog song/version identities,
+   with revision-checked saves and independent browser recovery.
 
 The actual saved CSV/catalog exports were not supplied at a known path for this
 milestone. Their headers, preambles and identity/link fields have **not** been
@@ -536,7 +538,7 @@ unapproved conflict, deliberately dropped a post-commit acknowledgment, reloaded
 and retried without advancing the saved revision. No original library, music
 file, production database or Serato tag was modified.
 
-Current reassociation results: **345 engine, 132 web/catalog/scan and 47 Node cases
+Current personal-crate results: **345 engine, 142 web/catalog/scan and 54 Node cases
 passed**.
 A fresh Python 3.10 environment with only core dependencies also passed both
 Python suites (three optional model-compatibility checks skipped). Hosted CI
@@ -597,6 +599,118 @@ This tests local disposable folders, not actual external-drive reconnection.
    implemented. Benchmark on a disposable representative library before raising
    the initial bound; broader volume identity/partial relocation remains future
    work.
-3. The reviewed-match/cue-review bridge is implemented. Next add ordered personal
-   crates and verified M3U8/CSV export manifests after the real adapter and scan
-   acceptance gates. No production tag-writing or AI expansion here.
+3. Ordered personal crates now work independently of the blocked real adapter.
+   Next add verified M3U8/CSV export previews/manifests, explicitly rechecking
+   source bytes and match/crate revisions. Do not equate this synthetic workflow
+   with actual vendor compatibility or production-scale acceptance.
+   No production tag-writing or AI expansion here.
+
+## Ordered personal crates
+
+This independent increment enables set preparation while actual export examples
+are still unavailable. Implementation plan: preserve source memberships, store
+ordered personal copies with revision/receipt transactions, connect deliberate
+catalog additions and editing controls, then verify concurrency and lost-response
+recovery on disposable data.
+
+Use **Arrange your set** to create a named crate, select it, then browse the
+imported catalog and choose **Add to selected personal crate** on a song. Return
+to the personal section to move entries up/down, remove one membership or rename
+the crate. Repeated songs are intentional: each addition has a separate entry ID.
+Names need not be unique; crate identity is its client-generated ID, not its name.
+This slice has no whole-crate deletion/archive, drag/drop, global song search,
+bulk source-crate copying, notes or export controls. Empty crates are supported.
+
+Each action commits immediately only after acknowledgment; changes to name
+textboxes are not saved until **Create**/**Rename** is clicked and are not draft
+backups. Refresh/reload or selecting another crate can replace unsubmitted name
+text. Submitted changes are persisted in the separate browser outbox before
+sending. New changes cannot replace an unresolved request. A stale tab cannot
+overwrite/delete another tab's retry state.
+
+`GET /api/catalog/personal` lists IDs, names, current revisions, entry counts and
+timestamps. `GET /api/catalog/personal/detail?crate_id=...` returns a consistent
+SQLite read snapshot of the crate and its ordered entries, immutable source-song
+metadata and live selected-file status. Memberships store `(snapshot_id,song_id)`
+and a stable entry `id`; they do not copy source metadata or freeze a file match.
+The detail view uses `unreviewed` when no human decision exists (it does not run
+candidate ranking), `missing` for an explicitly cleared match, and the same
+shared `exact`/`stale` reviewed-state rules as catalog browsing. These labels
+are human-attested/stat-checked availability, **not export-time byte proof**.
+Choose **Refresh personal crates** after changing matches or source availability;
+the personal view is not continuously polled.
+
+`POST /api/catalog/personal/save` requires exactly:
+
+```json
+{
+  "request_id": "new-client-generated-UUID",
+  "dataset_id": "current-dataset-UUID",
+  "crate_id": "stable-client-generated-crate-ID",
+  "base_revision": 0,
+  "name": "Warmup",
+  "entries": [
+    {
+      "id": "unique-membership-ID-within-this-crate",
+      "snapshot_id": "immutable-snapshot-SHA256",
+      "song_id": "source-song-version-ID"
+    }
+  ]
+}
+```
+
+`base_revision: 0` creates a crate. Subsequent saves submit the full replacement
+name/ordered entry list against its current revision. At most **1,000 entries**
+per personal crate are supported; exactly 1,000 is tested. Duplicate entry IDs,
+unknown song/snapshot references, blank names, boolean/noninteger revisions,
+unknown fields and oversized lists reject the entire save. An existing retained
+membership ID cannot be retargeted to another song; use a new membership ID.
+Repeated song references with distinct entry IDs are allowed. Removing an entry
+does not delete the underlying catalog song, match, staged track or cue review.
+
+Crate metadata, order/membership replacement, next revision and immutable retry
+receipt commit in one `BEGIN IMMEDIATE` transaction. A receipt-insertion failure
+rolls all changes back. Concurrent edits against the same revision allow one
+commit and reject the others with `409`; there is no silent merge.
+`200` success echoes the complete submitted body plus `ok: true` and exactly the
+next `revision`. Wrong datasets or reused request IDs with different bodies also
+return `409`; malformed references/input return `400`; storage failures are logged
+and return `503`. All mutations use the existing origin/session checks.
+
+Retrying an identical request returns its **historical** receipt even after later
+edits; it never restores an old name/order or recreates removed entries. The
+browser validates the crate/dataset/request/base revision, name and every ordered
+membership before clearing the pending request, then fetches current state rather
+than rendering an old receipt as the latest crate.
+After a lost response/reload, use **Retry crate save**. For a permanent revision
+conflict, download the pending full change, discard only browser retry state,
+refresh and reconcile manually. Discarding does not undo a committed server save.
+Browser storage is not a backup; clearing it/changing browser origin loses local
+recovery. Selecting another crate does not discard the outbox. Reload selects the
+first crate; retry selects the request's target before fetching current state.
+
+Tables: `personal_crates`, `personal_crate_entries` and
+`personal_crate_receipts`. There is no automatic history pruning or whole-crate
+deletion in this milestone. Original catalog snapshots, source memberships,
+reviewed match decisions, staging provenance and cue corrections are unchanged.
+No audio copy/decode, library scan, tag write, external request or model job is
+triggered by personal-crate edits. Export verification and actual vendor CSV
+compatibility remain separate acceptance gates.
+
+Verification: the existing CI module selectors pick up the HTTP regressions and
+the Node wildcard picks up `test_personal.cjs`. Tests cover concurrent exact
+retries, competing revisions, consistent read snapshots during concurrent saves,
+rename/reorder/remove/clear, duplicate songs with distinct membership IDs,
+source-snapshot preservation, source offline/cleared match states, invalid
+references, exact 1,000/1,001-entry boundary, receipt rollback and historical
+retry after newer edits. Controller/outbox tests cover reload recovery,
+storage/stale-tab failures, failed-detail refresh, deliberate conflict recovery,
+ordered receipt validation and catalog filtering alongside personal cards.
+
+Browser verification used an invented imported snapshot and disposable database,
+without music files or a library index: create, add with a deliberately lost
+post-commit acknowledgment, reload/exact retry, add the same song again, reorder,
+rename, remove one membership and reload. The final crate had revision 6 and
+six receipts, with its original first membership retained in the expected
+position. All three source memberships remained unchanged; there were no scan,
+audio-track or model jobs. This is not a real-library export/accuracy test.

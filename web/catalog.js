@@ -140,6 +140,7 @@
         <p class="muted">Source ID ${escapeHtml(song.id)} · ${escapeHtml(item.state)}${item.decision ? ` · reviewed revision ${item.revision} · ${escapeHtml(item.decision.note)}` : " · no reviewed file selection"} · BPM ${escapeHtml(song.bpm ?? "unknown")} · Key ${escapeHtml(song.key ?? "unknown")}</p>
         ${item.selected_file ? `<p class="muted">Reviewed file: ${escapeHtml(item.selected_file.path)} · ${escapeHtml(item.selected_file.state)} · SHA-256 ${escapeHtml(item.decision.content_hash)}</p>` : ""}
         <div class="path-row">
+          <button class="button secondary" data-catalog-personal="${index}">Add to selected personal crate</button>
           <button class="button secondary" data-catalog-stage="${index}" ${item.state === "exact" ? "" : "disabled"}>Stage reviewed copy</button>
           ${item.staged_track?.state === "available" ? `
             <button class="button secondary" data-catalog-process="${index}">Analyze staged copy</button>
@@ -173,6 +174,10 @@
       });
     }
     $$("[data-catalog-accept]").forEach(button => button.onclick = () => choose(Number(button.dataset.catalogAccept), false));
+    $$("[data-catalog-personal]").forEach(button => button.onclick = () => action(async () => {
+      await PersonalCrates.add(selectedSnapshot, data.songs[Number(button.dataset.catalogPersonal)].song.id);
+      status("Personal crate addition acknowledged. See Arrange your set for the latest saved order.");
+    }));
     $$("[data-catalog-missing]").forEach(button => button.onclick = () => choose(Number(button.dataset.catalogMissing), true));
     $$("[data-catalog-stage]").forEach(button => button.onclick = () => action(async () => {
       if (outbox?.pending) throw new Error("Resolve the pending match decision before staging.");
@@ -201,7 +206,7 @@
   }
   function filterSongs() {
     const query = $("#catalog-song-search").value.toLowerCase();
-    $$(".catalog-song").forEach(song => { song.hidden = !song.dataset.catalogSearch.includes(query); });
+    $$("#catalog-songs .catalog-song").forEach(song => { song.hidden = !song.dataset.catalogSearch.includes(query); });
   }
   async function sendPending() {
     if (stageOutbox?.pending) throw new Error("Resolve the pending staging request before changing a match.");

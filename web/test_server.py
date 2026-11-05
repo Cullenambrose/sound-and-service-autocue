@@ -23,6 +23,174 @@ from web import fixtures, server
 
 
 class WebServerTests(unittest.TestCase):
+    def personal_fixture(self):
+        from web.test_catalog import snapshot
+        code, imported = self.catalog_post("import", snapshot())
+        self.assertEqual(code, 200)
+        with server.connect() as db:
+            dataset = server.review_store.dataset_id(db)
+        body = {"dataset_id": dataset, "request_id": "personal-create", "crate_id": "personal-1",
+                "base_revision": 0, "name": "Synthetic warmup",
+                "entries": [{"id": "entry-1", "snapshot_id": imported["snapshot_id"], "song_id": "song-1"}]}
+        return imported, body
+
+    def test_personal_crates_concurrent_retries_preserve_catalog_and_ordered_duplicates(self):
+        imported, body = self.personal_fixture()
+        body["entries"].append({**body["entries"][0], "id": "entry-2"})
+        with server.connect() as db:
+            before = [tuple(row) for row in db.execute("SELECT * FROM catalog_memberships")]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            replies = list(pool.map(lambda _: self.catalog_post("personal/save", body), range(12)))
+        self.assertTrue(all(reply == replies[0] for reply in replies))
+        self.assertEqual(replies[0][0], 200, replies)
+        self.assertEqual(replies[0][1]["revision"], 1)
+        crate = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual([entry["id"] for entry in crate["entries"]], ["entry-1", "entry-2"])
+        self.assertEqual([entry["match_state"] for entry in crate["entries"]], ["unreviewed"] * 2)
+        self.assertEqual(self.catalog_get("personal")["crates"][0]["entries"], 2)
+        with server.connect() as db:
+            self.assertEqual([tuple(row) for row in db.execute("SELECT * FROM catalog_memberships")], before)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM personal_crate_receipts").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+        server.initialize()
+        self.assertEqual(self.catalog_post("personal/save", body), replies[0])
+
+    def test_personal_reorder_rename_remove_and_old_retry_never_restore_previous_state(self):
+        _, body = self.personal_fixture()
+        body["entries"].append({**body["entries"][0], "id": "entry-2"})
+        first = self.catalog_post("personal/save", body)
+        changed = {**body, "request_id": "reorder", "base_revision": 1,
+                   "name": "Renamed", "entries": list(reversed(body["entries"]))}
+        self.assertEqual(self.catalog_post("personal/save", changed)[0], 200)
+        crate = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual(crate["name"], "Renamed")
+        self.assertEqual([entry["id"] for entry in crate["entries"]], ["entry-2", "entry-1"])
+        cleared = {**changed, "request_id": "clear-entries", "base_revision": 2, "entries": []}
+        self.assertEqual(self.catalog_post("personal/save", cleared)[1]["revision"], 3)
+        self.assertEqual(self.catalog_post("personal/save", body), first)
+        current = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual((current["revision"], current["entries"]), (3, []))
+
+    def test_personal_crate_conflicts_and_wrong_dataset_cannot_overwrite(self):
+        _, body = self.personal_fixture()
+        self.assertEqual(self.catalog_post("personal/save", body, authenticated=False)[0], 403)
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        for edit in ({"request_id": "stale", "name": "Stale edit"},
+                     {"name": "Reused request"}, {"dataset_id": "other"}):
+            self.assertEqual(self.catalog_post("personal/save", {**body, **edit})[0], 409)
+        self.assertEqual(self.catalog_get("personal/detail", crate_id=body["crate_id"])["name"], body["name"])
+
+    def test_personal_concurrent_different_edits_commit_only_one_revision(self):
+        _, body = self.personal_fixture()
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        requests = [{**body, "request_id": f"tab-{index}", "base_revision": 1, "name": f"Edit {index}"}
+                    for index in range(8)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            replies = list(pool.map(lambda request: self.catalog_post("personal/save", request), requests))
+        self.assertEqual(sorted(code for code, _ in replies), [200] + [409] * 7)
+        current = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual(current["revision"], 2)
+        self.assertEqual(current["name"], next(reply["name"] for code, reply in replies if code == 200))
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM personal_crate_receipts").fetchone()[0], 2)
+
+    def test_personal_detail_uses_one_read_snapshot_when_membership_changes_during_resolution(self):
+        imported, source, decision = self.catalog_fixture()
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        body = {"dataset_id": decision["dataset_id"], "request_id": "create-crate",
+                "crate_id": "personal-1", "base_revision": 0, "name": "Snapshot",
+                "entries": [{"id": f"entry-{index}", "snapshot_id": imported["snapshot_id"], "song_id": "song-1"}
+                            for index in range(2)]}
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        original = server.catalog.file_record
+        written = False
+        def concurrent_save(row, root):
+            nonlocal written
+            if not written:
+                written = True
+                with server.connect() as db:
+                    server.personal_crates.save(db, {**body, "request_id": "clear-concurrently",
+                                                "base_revision": 1, "entries": []}, body["dataset_id"])
+            return original(row, root)
+        with patch.object(server.catalog, "file_record", side_effect=concurrent_save):
+            crate = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual(crate["revision"], 1)
+        self.assertEqual(len(crate["entries"]), 2)
+        latest = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual((latest["revision"], latest["entries"]), (2, []))
+
+    def test_personal_malformed_and_unknown_memberships_reject_entire_save(self):
+        _, body = self.personal_fixture()
+        for changes in ({"base_revision": True}, {"name": " "}, {"entries": None},
+                        {"entries": [body["entries"][0]] * 2},
+                        {"entries": [{**body["entries"][0], "song_id": "unknown"}]},
+                        {"entries": [{**body["entries"][0], "extra": "invalid"}]},
+                        {"entries": [{**body["entries"][0], "id": None}]}):
+            self.assertEqual(self.catalog_post("personal/save", {**body, **changes})[0], 400)
+        with patch.object(server.personal_crates, "MAX_ENTRIES", 0):
+            self.assertEqual(self.catalog_post("personal/save", body)[0], 400)
+        self.assertEqual(self.catalog_get("personal")["crates"], [])
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+
+    def test_personal_receipt_failure_rolls_back_existing_crate_order_and_revision(self):
+        _, body = self.personal_fixture()
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        before = self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        with server.connect() as db:
+            db.execute("""CREATE TRIGGER reject_personal_receipt BEFORE INSERT ON personal_crate_receipts
+                          BEGIN SELECT RAISE(ABORT,'synthetic personal receipt failure'); END""")
+        change = {**body, "request_id": "remove", "base_revision": 1, "entries": []}
+        code, error = self.catalog_post("personal/save", change)
+        self.assertEqual(code, 503)
+        self.assertIn("synthetic personal receipt failure", error["error"])
+        self.assertEqual(self.catalog_get("personal/detail", crate_id=body["crate_id"]), before)
+        with server.connect() as db:
+            db.execute("DROP TRIGGER reject_personal_receipt")
+        self.assertEqual(self.catalog_post("personal/save", change)[1]["revision"], 2)
+
+    def test_personal_declared_thousand_entry_limit_accepts_boundary_rejects_overflow(self):
+        _, body = self.personal_fixture()
+        body["entries"] = [{**body["entries"][0], "id": f"entry-{index}"} for index in range(1000)]
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        change = {**body, "request_id": "over-limit", "base_revision": 1,
+                  "entries": [*body["entries"], {**body["entries"][0], "id": "entry-1000"}]}
+        self.assertEqual(self.catalog_post("personal/save", change)[0], 400)
+        self.assertEqual(self.catalog_get("personal")["crates"][0]["entries"], 1000)
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT revision FROM personal_crates").fetchone()[0], 1)
+
+    def test_personal_membership_identity_cannot_retarget_and_snapshot_provenance_is_retained(self):
+        imported, body = self.personal_fixture()
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        from web.test_catalog import snapshot
+        document = snapshot()
+        document["source"] = "Second immutable source"
+        other = self.catalog_post("import", document)[1]["snapshot_id"]
+        retargeted = {**body, "request_id": "retarget", "base_revision": 1,
+                      "entries": [{**body["entries"][0], "snapshot_id": other}]}
+        self.assertEqual(self.catalog_post("personal/save", retargeted)[0], 409)
+        retargeted["entries"][0]["id"] = "new-membership"
+        self.assertEqual(self.catalog_post("personal/save", retargeted)[0], 200)
+        self.assertEqual(self.catalog_get("personal/detail", crate_id=body["crate_id"])["entries"][0]["snapshot_id"], other)
+
+    def test_personal_live_matches_show_offline_and_cleared_without_changing_crate_revision(self):
+        imported, source, decision = self.catalog_fixture()
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        body = {"dataset_id": decision["dataset_id"], "request_id": "personal-create",
+                "crate_id": "personal-1", "base_revision": 0, "name": "Readiness",
+                "entries": [{"id": "entry-1", "snapshot_id": imported["snapshot_id"], "song_id": "song-1"}]}
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        get = lambda: self.catalog_get("personal/detail", crate_id=body["crate_id"])
+        self.assertEqual(get()["entries"][0]["match_state"], "exact")
+        source.parent.rename(source.parent.with_name("disconnected"))
+        offline = get()
+        self.assertEqual(offline["entries"][0]["match_state"], "stale")
+        self.assertEqual(offline["revision"], 1)
+        self.assertEqual(self.catalog_post("decide", {**decision, "request_id": "clear", "base_revision": 1,
+                                                    "file_id": None, "content_hash": None})[0], 200)
+        self.assertEqual(get()["entries"][0]["match_state"], "missing")
+
     def catalog_post(self, endpoint, body, *, authenticated=True):
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
         request = urllib.request.Request(base + "/api/catalog/" + endpoint,

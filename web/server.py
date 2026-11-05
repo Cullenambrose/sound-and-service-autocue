@@ -22,10 +22,11 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 if __package__:
-    from . import catalog, scan_jobs
+    from . import catalog, scan_jobs, personal_crates
 else:
     import catalog
     import scan_jobs
+    import personal_crates
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "engine") not in sys.path:
@@ -204,6 +205,7 @@ def initialize():
         review_store.initialize(db, DATA / "corrections.json")
         catalog.initialize(db)
         scan_jobs.initialize(db)
+        personal_crates.initialize(db)
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
         for row in db.execute("SELECT hash,audio_path,error FROM tracks").fetchall():
             previous = "\n".join(line for line in (row["error"] or "").splitlines()
@@ -1651,6 +1653,8 @@ class Handler(BaseHTTPRequestHandler):
             except ImportError:
                 found = None
             return json_response(self, found or {"peaks": [], "duration": 0})
+        if parsed.path == "/personal.js":
+            return self._static(WEB / "personal.js", "text/javascript; charset=utf-8")
         if parsed.path.startswith("/api/catalog/"):
             try:
                 query = urllib.parse.parse_qs(parsed.query)
@@ -1667,6 +1671,10 @@ class Handler(BaseHTTPRequestHandler):
                         result = {"roots": catalog.roots(db)}
                     elif parsed.path == "/api/catalog/scans":
                         result = {"jobs": scan_jobs.jobs(db)}
+                    elif parsed.path == "/api/catalog/personal":
+                        result = {"crates": personal_crates.listing(db)}
+                    elif parsed.path == "/api/catalog/personal/detail":
+                        result = personal_crates.detail(db, query.get("crate_id", [""])[0])
                     elif parsed.path == "/api/catalog/files":
                         files = catalog.file_records(db)
                         search = query.get("q", [""])[0].casefold()
@@ -1731,6 +1739,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path == "/api/catalog/personal/save":
+                body = self._body_json()
+                with connect() as db:
+                    result = personal_crates.save(db, body, review_store.dataset_id(db))
+                return json_response(self, result)
             if parsed.path == "/api/catalog/stage":
                 return json_response(self, stage_catalog_match(self._body_json()))
             if parsed.path in ("/api/catalog/scan", "/api/catalog/scans/cancel"):

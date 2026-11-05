@@ -37,6 +37,9 @@ index and require an explicit new scan; queued scans resume when the server star
 Offline indexed folders can now be explicitly reassociated to a moved/remounted
 location after full relative-path/hash verification, preserving file IDs and
 reviewed matches without moving original-file Serato write links.
+The **Arrange your set** section now supports ordered personal crates: create,
+rename, add catalog songs, reorder and remove individual memberships. Changes
+have revision checks and durable retry recovery; playlist export is not yet wired.
 
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)

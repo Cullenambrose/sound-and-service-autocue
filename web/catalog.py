@@ -476,6 +476,13 @@ def candidates(song, files):
     return sorted(found, key=lambda row: (not row["metadata_equal"], row["path"]))
 
 
+def reviewed_match_state(decision, chosen):
+    if decision["file_id"] is None:
+        return "missing"
+    return ("exact" if chosen and chosen["state"] == "available" and
+            chosen["content_hash"] == decision["content_hash"] else "stale")
+
+
 def songs(db, snapshot_id, crate_id):
     rows = db.execute("""
         SELECT s.*,m.position FROM catalog_memberships m JOIN catalog_songs s
@@ -493,12 +500,9 @@ def songs(db, snapshot_id, crate_id):
         chosen = None
         state = "ambiguous" if len(choices) > 1 else "unreviewed" if choices else "missing"
         if decision:
-            if decision["file_id"] is None:
-                state = "missing"
-            else:
+            if decision["file_id"] is not None:
                 chosen = next((f for f in files if f["id"] == decision["file_id"]), None)
-                state = ("exact" if chosen and chosen["state"] == "available"
-                         and chosen["content_hash"] == decision["content_hash"] else "stale")
+            state = reviewed_match_state(decision, chosen)
         result.append({"song": song, "position": row["position"], "state": state,
                        "candidates": choices, "decision": decision,
                        "selected_file": chosen,
