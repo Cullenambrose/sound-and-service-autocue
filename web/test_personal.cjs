@@ -39,12 +39,18 @@ test("personal outbox storage failures, dataset isolation and stale tabs retain 
 
 function fixture() {
   const store = storage(), crates = new Map(), receipts = new Map();
-  let loseAck = false, conflict = false, failDetail = false, failExport = false, counter = 0;
+  let loseAck = false, loseExportAck = false, conflict = false, failDetail = false, failExport = false, failHistory = false, counter = 0;
+  const history = [];
   const downloads = [];
   const source = fs.readFileSync(path.join(__dirname, "personal.js"), "utf8");
   const enrich = value => ({...value, entries:value.entries.map(entry => ({...entry,
     song:{artist:"Invented", title:entry.song_id, version:"Clean"}, match_state:"unreviewed", decision_revision:0}))});
   async function api(url, options) {
+    if (url.startsWith("/api/catalog/personal/exports?")) {
+      if (failHistory) throw new Error("Synthetic history unavailable");
+      const offset = Number(new URLSearchParams(url.split("?")[1]).get("offset"));
+      return {exports:history.slice(offset, offset + 20), offset, total:history.length};
+    }
     if (url === "/api/catalog/personal/export/preview") {
       if (failExport) throw new Error("Synthetic export unavailable");
       const request = JSON.parse(options.body), crate = crates.get(request.crate_id);
@@ -55,6 +61,9 @@ function fixture() {
     }
     if (url === "/api/catalog/personal/export/download") {
       if (failExport) throw new Error("Synthetic export stale");
+      if (!history.length) history.push({state:"historical", filename:"proof.zip", export_id:"proof",
+        crate:{name:"Saved synthetic", revision:1}, entries:1, saved_at:100, size_bytes:200});
+      if (loseExportAck) {loseExportAck = false; throw new Error("Synthetic lost export acknowledgment after publication");}
       return {preview_id:"proof", manifest:{ready:true}, filename:"proof.zip", bundle_base64:"emlw"};
     }
     if (url === "/api/session") return {};
@@ -96,14 +105,16 @@ function fixture() {
     const context = vm.createContext({$, $$, api, PersonalOutbox, datasetId:"dataset", localStorage:store,
       crypto:{randomUUID:() => `generated-${++counter}`}, escapeHtml:value => String(value),
       confirm:() => true, atob:value => Buffer.from(value, "base64").toString("binary"),
-      Uint8Array, Blob, URL:{createObjectURL:() => "blob:synthetic", revokeObjectURL(){}},
+      Uint8Array, Blob, URLSearchParams, URL:{createObjectURL:() => "blob:synthetic", revokeObjectURL(){}},
       document:{createElement:() => {const link = {click:() => downloads.push(link.download)}; return link;}},
       setTimeout:run => run()});
     vm.runInContext(source, context);
     await new Promise(resolve => setImmediate(resolve));
     return {$, context, buttons};
   }
-  return {open, store, crates, receipts, downloads, set failExport(value) {failExport = value;},
+  return {open, store, crates, receipts, downloads, history, set failHistory(value) {failHistory = value;},
+    set failExport(value) {failExport = value;},
+    set loseExportAck(value) {loseExportAck = value;},
     set loseAck(value) {loseAck = value;},
     set failDetail(value) {failDetail = value;}, set conflict(value) {conflict = value;}};
 }
@@ -204,4 +215,56 @@ test("export controller requires inspected preview and clears it after edits or 
   await ui.$("#personal-export-preview").onclick();
   assert.equal(ui.$("#personal-export-download").disabled, true);
   assert.match(ui.$("#personal-export-status").textContent, /Verification failed/);
+});
+test("saved export controller pages historical recovery links without needing a selected crate", async () => {
+  const app = fixture();
+  for (let index = 0; index < 21; index++)
+    app.history.push({state:"historical", filename:`proof-${index}.zip`, export_id:`proof-${index}`,
+      crate:{name:`Historical ${index}`, revision:1}, entries:2, saved_at:100, size_bytes:200});
+  const ui = await app.open();
+  assert.match(ui.$("#personal-exports").innerHTML, /Historical 0/);
+  assert.doesNotMatch(ui.$("#personal-exports").innerHTML, /Historical 20/);
+  assert.match(ui.$("#personal-exports").innerHTML, /dataset_id=dataset/);
+  assert.match(ui.$("#personal-exports").innerHTML, /Download historical ZIP/);
+  assert.match(ui.$("#personal-exports").innerHTML, /NOT been verified/);
+  assert.equal(ui.$("#personal-exports-previous").disabled, true);
+  assert.equal(ui.$("#personal-exports-next").disabled, false);
+  await ui.$("#personal-exports-next").onclick();
+  assert.match(ui.$("#personal-exports").innerHTML, /Historical 20/);
+  assert.equal(ui.$("#personal-exports-next").disabled, true);
+  await ui.$("#personal-exports-previous").onclick();
+  assert.match(ui.$("#personal-exports").innerHTML, /Historical 0/);
+  app.history[0] = {state:"unavailable", filename:"bad.zip", error:"Synthetic corrupt ZIP"};
+  await ui.$("#personal-exports-refresh").onclick();
+  assert.match(ui.$("#personal-exports").innerHTML, /Synthetic corrupt ZIP/);
+  assert.doesNotMatch(ui.$("#personal-exports").innerHTML, /download="bad.zip"/);
+  app.failHistory = true;
+  await ui.$("#personal-exports-refresh").onclick();
+  assert.equal(ui.$("#personal-exports").innerHTML, "");
+  assert.equal(ui.$("#personal-exports-next").disabled, true);
+  assert.match(ui.$("#personal-exports-status").textContent, /history unavailable/);
+});
+test("history loading failure does not disable independent personal crate operations", async () => {
+  const app = fixture();
+  app.failHistory = true;
+  const ui = await app.open();
+  ui.$("#personal-new-name").value = "Still usable";
+  await ui.$("#personal-create").onclick();
+  await ui.context.PersonalCrates.add("snapshot", "song");
+  assert.equal([...app.crates.values()][0].entries.length, 1);
+});
+test("lost publication acknowledgment is recoverable from saved history after reload", async () => {
+  const app = fixture(), ui = await app.open();
+  ui.$("#personal-new-name").value = "Recovery";
+  await ui.$("#personal-create").onclick();
+  await ui.context.PersonalCrates.add("snapshot", "song");
+  await ui.$("#personal-export-preview").onclick();
+  app.loseExportAck = true;
+  await ui.$("#personal-export-download").onclick();
+  assert.match(ui.$("#personal-status").textContent, /lost export acknowledgment/);
+  assert.equal(app.downloads.length, 0);
+  const restored = await app.open();
+  assert.match(restored.$("#personal-exports").innerHTML, /Saved synthetic/);
+  assert.match(restored.$("#personal-exports").innerHTML, /Download historical ZIP/);
+  assert.equal(app.history.length, 1);
 });

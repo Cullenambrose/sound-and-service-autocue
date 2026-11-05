@@ -1479,6 +1479,40 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local_request():
             return self.send_error(403)
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/api/catalog/personal/exports", "/api/catalog/personal/exports/download"):
+            if not self._valid_origin() or self.headers.get("Sec-Fetch-Site") == "cross-site":
+                return json_response(self, {"error": "Request rejected: local origin required."}, 403)
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                with connect() as db:
+                    dataset = review_store.dataset_id(db)
+                if parsed.path.endswith("/download"):
+                    if query.get("dataset_id") != [dataset]:
+                        raise catalog.Conflict("Export belongs to another dataset; reload the app.")
+                    data, _, _ = playlist_export.saved_bundle(
+                        DATA / "exports", query.get("export_id", [""])[0], dataset)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Disposition", f'attachment; filename="{query["export_id"][0]}.zip"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                result = playlist_export.saved_exports(DATA / "exports", dataset,
+                                                       int(query.get("offset", ["0"])[0]))
+                return json_response(self, result)
+            except catalog.Conflict as error:
+                return json_response(self, {"error": str(error)}, 409)
+            except FileNotFoundError as error:
+                return json_response(self, {"error": "Saved export not found; refresh history. " + str(error)}, 404)
+            except ValueError as error:
+                return json_response(self, {"error": str(error)}, 400)
+            except (OSError, sqlite3.Error) as error:
+                self.log_error("Saved export read failed: %s", error)
+                return json_response(self, {"error": "Saved export could not be read: " + str(error)}, 503)
         if parsed.path == "/api/session":
             if not self._valid_origin():
                 return json_response(self, {"error": "Request rejected: local origin required."}, 403)

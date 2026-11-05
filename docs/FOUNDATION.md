@@ -246,3 +246,17 @@ Next validate extracted playlists in the actual target DJ software using only a
 disposable representative library, then add a representative vendor CSV adapter
 when the user supplies source examples. Browser download completion and actual DJ
 software import remain acceptance gates; do not claim production compatibility.
+
+**Export-recovery slice:** **Saved exports · historical copies** now lists
+persisted ZIPs in pages of 20 and exposes ordinary attachment download links.
+Both listing and download validate the saved manifest ID, dataset, supported
+structure and reconstructed bundle bytes without touching source audio or
+resolving current matches. Corrupt artifacts stay visible with explicit errors,
+never download links. A lost publication acknowledgment can be recovered after
+reload without another analysis/hash pass. Missing/offline sources do not prevent
+historical recovery; this must not be presented as current export verification.
+New and recovered bundles have a 64 MiB limit. Existing schema-1 bundles need no
+database migration. See [saved export recovery](CATALOG.md#saved-export-recovery).
+The native HTTP attachment and delivered bytes were verified on disposable data;
+the shared browser still provides no download-completion event. Actual browser
+filesystem delivery and DJ-software acceptance remain unverified.

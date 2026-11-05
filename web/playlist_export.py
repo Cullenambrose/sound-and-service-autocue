@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 import zipfile
@@ -15,6 +16,93 @@ if __package__:
 else:
     import catalog
     import personal_crates
+
+MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+HISTORY_PAGE_SIZE = 20
+
+
+class InvalidBundle(ValueError):
+    pass
+
+
+def export_directory(directory):
+    if directory.is_symlink():
+        raise OSError("App export directory must not be a symlink.")
+    return directory
+
+
+def saved_bundle(directory, export_id, dataset):
+    if not isinstance(export_id, str) or not re.fullmatch(r"[0-9a-f]{64}", export_id):
+        raise ValueError("export_id must be a lowercase SHA-256 manifest ID.")
+    directory = export_directory(directory)
+    path = directory / (export_id + ".zip")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise InvalidBundle("Saved export is not a regular file.")
+        if info.st_size > MAX_BUNDLE_BYTES:
+            raise InvalidBundle("Saved export exceeds the 64 MiB bundle limit.")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            data = stream.read(MAX_BUNDLE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > MAX_BUNDLE_BYTES:
+        raise InvalidBundle("Saved export exceeds the 64 MiB bundle limit.")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            members = archive.infolist()
+            if sorted(member.filename for member in members) != ["manifest.json", "playlist.csv", "playlist.m3u8"]:
+                raise InvalidBundle("Saved export must contain exactly the three supported files.")
+            if any(member.compress_type != zipfile.ZIP_STORED or member.flag_bits & 1 for member in members):
+                raise InvalidBundle("Saved export uses unsupported compression or encryption.")
+            if sum(member.file_size for member in members) > MAX_BUNDLE_BYTES:
+                raise InvalidBundle("Saved export expanded contents exceed the 64 MiB limit.")
+            document = json.loads(archive.read("manifest.json"))
+        if catalog.digest(document) != export_id:
+            raise InvalidBundle("Saved manifest does not match the export ID.")
+        if document["dataset_id"] != dataset:
+            raise InvalidBundle("Saved export belongs to a different dataset.")
+        crate = document["crate"]
+        if (not isinstance(crate, dict) or type(crate["revision"]) is not int or crate["revision"] < 1
+                or not isinstance(crate["id"], str) or not crate["id"].strip()
+                or not isinstance(crate["name"], str) or not crate["name"].strip()):
+            raise InvalidBundle("Saved manifest has invalid crate metadata.")
+        entries = document["entries"]
+        if (type(document["schema_version"]) is not int or document["schema_version"] != 1
+                or document["ready"] is not True or not isinstance(entries, list) or not entries
+                or not len(entries) <= personal_crates.MAX_ENTRIES
+                or any(type(document[key]) is not int or document[key] != len(entries)
+                       for key in ("requested", "eligible", "included"))
+                or type(document["blocked"]) is not int or document["blocked"] != 0 or document["blockers"] != []
+                or any(not isinstance(entry, dict) or not isinstance(entry.get("song"), dict)
+                       or entry["eligible"] is not True or entry["reason"] for entry in entries)):
+            raise InvalidBundle("Saved manifest is not a complete supported export.")
+        if bundle(document) != data:
+            raise InvalidBundle("Saved playlist/CSV/ZIP bytes do not match the manifest.")
+    except (KeyError, TypeError, UnicodeError, zipfile.BadZipFile, ValueError, csv.Error) as error:
+        raise InvalidBundle("Saved export failed integrity validation: " + str(error)) from error
+    return data, document, info
+
+
+def saved_exports(directory, dataset, offset=0):
+    if type(offset) is not int or offset < 0:
+        raise ValueError("Export history offset must be a nonnegative integer.")
+    directory = export_directory(directory)
+    if not directory.exists():
+        return {"exports": [], "offset": offset, "total": 0}
+    files = sorted(directory.glob("*.zip"), key=lambda path: (-path.lstat().st_mtime_ns, path.name))
+    result = []
+    for path in files[offset:offset + HISTORY_PAGE_SIZE]:
+        item = {"export_id": path.stem, "filename": path.name}
+        try:
+            data, document, info = saved_bundle(directory, path.stem, dataset)
+            item.update(state="historical", crate=document["crate"], entries=document["included"],
+                        size_bytes=len(data), saved_at=info.st_mtime)
+        except (OSError, ValueError) as error:
+            item.update(state="unavailable", error=str(error) or type(error).__name__)
+        result.append(item)
+    return {"exports": result, "offset": offset, "total": len(files)}
 
 
 def snapshot(db, body):
@@ -131,9 +219,10 @@ def bundle(document):
 
 
 def publish(directory, token, data):
+    if len(data) > MAX_BUNDLE_BYTES:
+        raise ValueError("Export exceeds the 64 MiB bundle limit; use a smaller personal crate.")
+    export_directory(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    if directory.is_symlink():
-        raise OSError("App export directory must not be a symlink.")
     destination = directory / (token + ".zip")
     temporary = None
     try:

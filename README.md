@@ -43,6 +43,9 @@ have revision checks and durable retry recovery. Explicit export previews verify
 reviewed source bytes; download rechecks revisions and hashes before atomically
 saving an app-local ZIP containing ordered UTF-8 M3U8, CSV and a manifest.
 Missing or unreviewed entries block the entire export; no original tags change.
+Saved-export history now offers integrity-checked historical ZIP downloads after
+reload or a lost response, even if source audio is offline. Recovery does not
+reverify current files; use a new preview when preparing a current set.
 
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)

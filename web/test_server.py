@@ -26,6 +26,196 @@ from web import fixtures, server
 
 
 class WebServerTests(unittest.TestCase):
+    def saved_export_fixture(self):
+        source, decision, body, request = self.export_fixture(duplicates=True)
+        _, download = self.export_preview(request)
+        code, result = self.catalog_post("personal/export/download", download)
+        self.assertEqual(code, 200, result)
+        return source, decision, body, request, result
+
+    def saved_export_get(self, result, dataset, **headers):
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        query = urllib.parse.urlencode({"export_id": result["preview_id"], "dataset_id": dataset})
+        request = urllib.request.Request(base + "/api/catalog/personal/exports/download?" + query, headers=headers)
+        try:
+            response = urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers), json.load(error)
+        with response:
+            return response.status, dict(response.headers), response.read()
+
+    def test_saved_exports_recover_after_source_removal_and_newer_crate_revision_without_audio_reads(self):
+        source, _, body, request, result = self.saved_export_fixture()
+        source.unlink()
+        self.assertEqual(self.catalog_post("personal/save", {**body, "request_id": "newer",
+            "base_revision": 1, "name": "New revision", "entries": []})[0], 200)
+        server.initialize()
+        with patch.object(server.catalog, "file_hash", side_effect=AssertionError("Must not rehash audio")), \
+                patch.object(server.catalog, "file_record", side_effect=AssertionError("Must not stat audio")):
+            history = self.catalog_get("personal/exports")
+            code, headers, data = self.saved_export_get(result, request["dataset_id"])
+        self.assertEqual(history["total"], 1)
+        item = history["exports"][0]
+        self.assertEqual((item["state"], item["crate"]["revision"], item["entries"]), ("historical", 1, 2))
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Content-Type"], "application/zip")
+        self.assertIn(result["filename"], headers["Content-Disposition"])
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(int(headers["Content-Length"]), len(data))
+        self.assertEqual(data, base64.b64decode(result["bundle_base64"]))
+
+    def test_saved_exports_detect_corruption_missing_members_and_forged_playlist(self):
+        _, _, _, request, result = self.saved_export_fixture()
+        path = server.DATA / "exports" / result["filename"]
+        original = path.read_bytes()
+        for mutation in ("truncated", "missing", "extra", "forged"):
+            if mutation == "truncated":
+                path.write_bytes(original[:20])
+            else:
+                output = io.BytesIO()
+                with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(output, "w") as archive:
+                    for name in source.namelist():
+                        if mutation == "missing" and name == "playlist.csv":
+                            continue
+                        archive.writestr(name, b"#EXTM3U\n/forged.wav\n" if
+                                         mutation == "forged" and name == "playlist.m3u8" else source.read(name))
+                    if mutation == "extra":
+                        archive.writestr("../unexpected", b"never extracted")
+                path.write_bytes(output.getvalue())
+            item = self.catalog_get("personal/exports")["exports"][0]
+            self.assertEqual(item["state"], "unavailable", mutation)
+            self.assertIn("integrity", item["error"], mutation)
+            self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 400, mutation)
+        path.write_bytes(original)
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 200)
+
+    def test_saved_exports_validate_manifest_id_and_dataset_without_exposing_foreign_metadata(self):
+        _, _, _, request, result = self.saved_export_fixture()
+        path = server.DATA / "exports" / result["filename"]
+        document = result["manifest"]
+        document = {**document, "dataset_id": "foreign-dataset"}
+        path.write_bytes(server.playlist_export.bundle(document))
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 400)
+        foreign_id = server.catalog.digest(document)
+        path.rename(path.parent / (foreign_id + ".zip"))
+        item = self.catalog_get("personal/exports")["exports"][0]
+        self.assertEqual(item["state"], "unavailable")
+        self.assertIn("different dataset", item["error"])
+        self.assertNotIn("crate", item)
+        self.assertEqual(self.saved_export_get({**result, "preview_id": foreign_id}, request["dataset_id"])[0], 400)
+        self.assertEqual(self.saved_export_get(result, "wrong-dataset")[0], 409)
+
+    def test_saved_exports_reject_unsafe_paths_symlinks_nonregular_and_oversized_bundles(self):
+        source, _, _, request, result = self.saved_export_fixture()
+        for unsafe in ("../library.sqlite3", "A" * 64, "", "a" * 65, "a/b"):
+            self.assertEqual(self.saved_export_get({**result, "preview_id": unsafe}, request["dataset_id"])[0], 400)
+        path = server.DATA / "exports" / result["filename"]
+        original = path.read_bytes()
+        path.unlink()
+        path.symlink_to(source)
+        self.assertEqual(self.catalog_get("personal/exports")["exports"][0]["state"], "unavailable")
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 503)
+        path.unlink()
+        path.mkdir()
+        self.assertEqual(self.catalog_get("personal/exports")["exports"][0]["state"], "unavailable")
+        self.assertIn(self.saved_export_get(result, request["dataset_id"])[0], (400, 503))
+        path.rmdir()
+        path.write_bytes(original)
+        with patch.object(server.playlist_export, "MAX_BUNDLE_BYTES", 10):
+            self.assertEqual(self.catalog_get("personal/exports")["exports"][0]["state"], "unavailable")
+            self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 400)
+        exports = server.DATA / "exports"
+        moved = server.DATA / "moved-exports"
+        exports.rename(moved)
+        exports.symlink_to(moved, target_is_directory=True)
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 503)
+
+    def test_saved_exports_paging_empty_history_and_disappearing_artifacts(self):
+        empty = self.catalog_get("personal/exports")
+        self.assertEqual(empty, {"exports": [], "offset": 0, "total": 0})
+        _, _, _, request, result = self.saved_export_fixture()
+        directory = server.DATA / "exports"
+        path = directory / result["filename"]
+        for index in range(21):
+            (directory / (f"{index:064x}" + ".zip")).write_bytes(b"bad")
+        first = self.catalog_get("personal/exports")
+        second = self.catalog_get("personal/exports", offset=20)
+        self.assertEqual((first["total"], len(first["exports"]), len(second["exports"])), (22, 20, 2))
+        self.assertFalse({item["export_id"] for item in first["exports"]} &
+                         {item["export_id"] for item in second["exports"]})
+        self.assertEqual(self.catalog_get("personal/exports", offset=40)["exports"], [])
+        path.unlink()
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 404)
+        with self.assertRaises(urllib.error.HTTPError) as failure:
+            self.catalog_get("personal/exports", offset=-1)
+        self.assertEqual(failure.exception.code, 400)
+
+    def test_saved_exports_reject_cross_site_downloads_and_preserve_existing_bundle_on_publication_failure(self):
+        _, _, _, request, result = self.saved_export_fixture()
+        for headers in ({"Origin": "https://example.invalid"}, {"Sec-Fetch-Site": "cross-site"}):
+            self.assertEqual(self.saved_export_get(result, request["dataset_id"], **headers)[0], 403)
+        path = server.DATA / "exports" / result["filename"]
+        original = path.read_bytes()
+        with patch.object(server.playlist_export.os, "replace", side_effect=OSError("Synthetic disk failure")):
+            self.assertEqual(self.catalog_post("personal/export/download",
+                {**request, "preview_id": result["preview_id"]})[0], 503)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(list(path.parent.glob("*.tmp")), [])
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[2], original)
+
+    def test_saved_exports_invalid_manifest_and_compressed_archives_remain_visible_errors(self):
+        _, _, _, request, result = self.saved_export_fixture()
+        directory = server.DATA / "exports"
+        original = (directory / result["filename"]).read_bytes()
+        with zipfile.ZipFile(io.BytesIO(original)) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        invalid = [{**result["manifest"], "crate": None},
+                   {**result["manifest"], "schema_version": True},
+                   {**result["manifest"], "included": True},
+                   {**result["manifest"], "entries": [{**entry, "song": []}
+                                                     for entry in result["manifest"]["entries"]]},
+                   {**result["manifest"], "entries": []}]
+        for document in invalid:
+            token = server.catalog.digest(document)
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                for name, data in files.items():
+                    archive.writestr(name, json.dumps(document).encode() if name == "manifest.json" else data)
+            (directory / (token + ".zip")).write_bytes(output.getvalue())
+            self.assertEqual(self.saved_export_get({**result, "preview_id": token}, request["dataset_id"])[0], 400)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        (directory / result["filename"]).write_bytes(output.getvalue())
+        self.assertEqual(self.saved_export_get(result, request["dataset_id"])[0], 400)
+        items = self.catalog_get("personal/exports")["exports"]
+        self.assertTrue(all(item["state"] == "unavailable" and item["error"] for item in items))
+        with patch.object(server.playlist_export, "MAX_BUNDLE_BYTES", 10):
+            with self.assertRaisesRegex(ValueError, "64 MiB"):
+                server.playlist_export.publish(directory, result["preview_id"], original)
+        self.assertEqual(list(directory.glob("*.tmp")), [])
+
+    def test_saved_export_bundle_limit_accepts_exact_64_mib_and_rejects_one_more_byte(self):
+        directory = Path(self.temporary.name) / "size-boundary"
+        token = "a" * 64
+        limit = 64 * 1024 * 1024
+        self.assertEqual(server.playlist_export.MAX_BUNDLE_BYTES, limit)
+        exact = b"x" * limit
+        filename = server.playlist_export.publish(directory, token, exact)
+        self.assertEqual((directory / filename).stat().st_size, limit)
+        with self.assertRaisesRegex(ValueError, "64 MiB"):
+            server.playlist_export.publish(directory, token, exact + b"x")
+        self.assertEqual((directory / filename).stat().st_size, limit)
+        with self.assertRaisesRegex(server.playlist_export.InvalidBundle, "integrity"):
+            server.playlist_export.saved_bundle(directory, token, "synthetic")
+        with (directory / filename).open("ab") as stream:
+            stream.write(b"x")
+        with self.assertRaisesRegex(server.playlist_export.InvalidBundle, "64 MiB"):
+            server.playlist_export.saved_bundle(directory, token, "synthetic")
+        self.assertEqual(list(directory.glob("*.tmp")), [])
+
     def export_fixture(self, *, duplicates=False):
         imported, source, decision = self.catalog_fixture()
         self.assertEqual(self.catalog_post("decide", decision)[0], 200)

@@ -1,5 +1,31 @@
 (() => {
-  let outbox, selected = "", current = null, busy = false, exportPreview = null;
+  let outbox, selected = "", current = null, busy = false, exportPreview = null, exportsOffset = 0;
+  async function refreshExports(offset = 0) {
+    $("#personal-exports").innerHTML = "";
+    $("#personal-exports-previous").disabled = true;
+    $("#personal-exports-next").disabled = true;
+    $("#personal-exports-status").textContent = "Checking saved bundle integrity; source audio is not read.";
+    try {
+      const result = await api("/api/catalog/personal/exports?offset=" + offset);
+      exportsOffset = result.offset;
+      $("#personal-exports").innerHTML = result.exports.map(item => {
+        if (item.state !== "historical")
+          return `<p class="catalog-error">${escapeHtml(item.filename)}: ${escapeHtml(item.error)}</p>`;
+        const href = "/api/catalog/personal/exports/download?" + new URLSearchParams({
+          dataset_id:datasetId, export_id:item.export_id});
+        return `<article class="catalog-song"><h4>${escapeHtml(item.crate.name)} · saved revision ${item.crate.revision}</h4>
+          <p class="muted">${item.entries} entries · ${escapeHtml(new Date(item.saved_at * 1000).toLocaleString())} · ${item.size_bytes} bytes · ${escapeHtml(item.export_id)}</p>
+          <a class="button secondary" href="${escapeHtml(href)}" download="${escapeHtml(item.filename)}">Download historical ZIP</a>
+          <p class="muted">Saved bundle integrity checked. Current source availability has NOT been verified.</p></article>`;
+      }).join("") || '<p class="muted">No saved exports on this page.</p>';
+      $("#personal-exports-status").textContent = `${result.total} saved bundles · showing ${result.exports.length} from offset ${result.offset}. Unavailable bundles cannot be downloaded.`;
+      $("#personal-exports-previous").disabled = result.offset === 0;
+      $("#personal-exports-next").disabled = result.offset + result.exports.length >= result.total;
+    } catch (error) {
+      $("#personal-exports-status").textContent = "Saved exports could not be loaded: " + error.message;
+      throw error;
+    }
+  }
   function clearExport() {
     exportPreview = null;
     $("#personal-export-download").disabled = true;
@@ -141,7 +167,11 @@
       $("#personal-export-status").textContent = "Export failed; preview again. No unverified download was requested.";
       throw error;
     }
+    await refreshExports();
   });
+  bind("#personal-exports-refresh", () => refreshExports());
+  bind("#personal-exports-previous", () => refreshExports(Math.max(0, exportsOffset - 20)));
+  bind("#personal-exports-next", () => refreshExports(exportsOffset + 20));
   $("#personal-select").onchange = () => action(async () => {
     selected = $("#personal-select").value;
     await refresh();
@@ -164,5 +194,6 @@
     await api("/api/session");
     outbox = new PersonalOutbox(localStorage, datasetId);
     await refresh();
+    await refreshExports();
   }).catch(reportError);
 })();

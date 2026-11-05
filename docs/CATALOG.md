@@ -786,12 +786,13 @@ preview state and blocked downloads. A source-read error during preview appears
 as an entry blocker; database/publication failures are explicitly reported
 (`503` for storage errors, with server logging). A failed atomic replace removes
 its temporary file and preserves any previous complete artifact. There is no
-automatic export retention/pruning or saved-artifact browser in this slice.
+automatic export retention/pruning. The saved-artifact browser is described below.
 
 Extract the ZIP before opening `playlist.m3u8`. The browser reports **download
 requested**, not that the browser saved it successfully. If the browser blocks a
-download, allow downloads and explicitly preview/download again; the server's
-complete bundle remains in its app-local exports directory. Moving the playlist
+download, allow downloads and use the explicit historical recovery link below,
+or preview/download again for a current verification; the server's complete
+bundle remains in its app-local exports directory. Moving the playlist
 does not relocate audio. Absolute paths remain tied to this machine/mount.
 
 ### Verification and limits
@@ -825,3 +826,86 @@ up to the publication gate, but cannot prevent a concurrent external edit or
 disconnect afterward. Export only stable folders; regenerate after changes.
 Production-size performance, external-drive behavior and target-software
 compatibility require disposable representative acceptance before production use.
+
+## Saved export recovery
+
+Implementation plan: use the existing content-addressed artifacts as the history,
+validate their structure and deterministic bytes, add paged summaries and a native
+attachment route, then exercise lost-response/reload/corruption recovery without
+source audio. No new database table or schema migration is required.
+
+**Saved exports · historical copies** is independent of the selected personal
+crate and its pending save. It shows the saved name/revision, entry count, local
+save timestamp, size and manifest ID. Click **Download historical ZIP** to recover
+the exact saved bytes, then extract the ZIP. A newer crate name/order or missing
+source files does not rewrite or invalidate this historical artifact.
+The history warning is deliberate: bundle integrity is **not current source
+availability**, cue approval, recording identity or DJ-software compatibility.
+Choose a new verified preview for a current set.
+
+History loads on startup and after acknowledged publication, with a manual
+**Refresh saved exports** control for lost responses or external changes.
+Previous/Next use 20-item offset pages, newest filesystem modification time first
+(manifest ID breaks ties). External changes/publications can shift pages; refresh
+starts from the first page. A timestamp is the artifact's filesystem modification
+time, not an immutable export audit timestamp. Listing failures clear old links
+and show an explicit error without preventing independent personal-crate edits.
+Unavailable/corrupt ZIPs show errors instead of links; `.tmp` files are ignored.
+
+- `GET /api/catalog/personal/exports?offset=0` returns `exports`, `offset`, `total`.
+  Only the requested page is opened/validated. Each item has `export_id`,
+  `filename`, and either `state: "historical"` plus crate/count/size/time, or
+  `state: "unavailable"` plus an error. Foreign-dataset artifacts expose no crate
+  metadata. Negative/noninteger offsets return `400`; a missing exports directory
+  is an empty history.
+- `GET /api/catalog/personal/exports/download?dataset_id=...&export_id=...`
+  validates the current dataset query and a lowercase 64-hex manifest ID, rereads
+  and validates the whole artifact, then returns `application/zip` with an
+  attachment filename, exact content length, `no-store` and `nosniff`. It never
+  rehashes/stats audio or reads current crate/match state. This is a read route:
+  no session secret is placed in the URL. Existing localhost Host/origin rules
+  apply, and cross-site Fetch Metadata requests are rejected. No cross-origin
+  access is enabled. The native link avoids the automatic Blob download path.
+
+Validation rejects symlinked export directories/files, nonregular artifacts,
+unsupported compression/encryption, extra/missing members, malformed/incomplete
+schema-1 manifests, a manifest hash inconsistent with the filename, foreign
+datasets, CRC/content corruption and ZIP/playlist/CSV bytes inconsistent with
+deterministic reconstruction. No archive member is extracted on the server.
+The bytes checked in memory are the exact bytes delivered, even if the disk copy
+changes afterward. This is integrity checking, not authenticity against a local
+actor who can rewrite artifacts and their content-derived names.
+
+Both new publication and recovery enforce a **64 MiB ZIP limit**; expanded
+member sizes are also bounded. Exactly 64 MiB and one byte over are tested.
+Oversized older artifacts are listed with an error; they are neither changed nor
+deleted. Use a smaller personal crate if metadata makes a new export too large.
+There is no automatic pruning/deletion, live status validation or cache of
+integrity results. Listing enumerates filenames and sorts timestamps, then reads
+up to 20 full bundles; large histories may be slow. History is local filesystem
+work, not a durable/cancellable job.
+
+Historical download errors return `400` for invalid IDs/integrity failures,
+`409` for the wrong dataset query, `404` for a removed artifact and logged `503`
+for filesystem/storage errors. A stale link never returns unchecked ZIP bytes.
+An earlier complete artifact survives failed replacement publication. There is
+no acknowledgment that a native browser download reached the user's disk.
+
+Regression coverage now includes source removal/newer crate revisions/restart
+without audio reads, attachment headers and exact response bytes, pagination,
+missing/corrupt/forged archives, foreign datasets, bad manifests, compression,
+symlinks/nonregular files, exact size boundaries, origin rejection and rollback
+preserving an earlier complete ZIP. Controller tests execute lost publication
+acknowledgment/reload recovery, empty-crate history access, paging, corrupt-link
+suppression and history-failure isolation.
+Current results: **345 engine, 162 web/catalog/scan and 58 Node tests passed**.
+
+Browser acceptance used generated tagged WAV data only: after publication the
+source was removed and the current crate advanced to an empty revision 2.
+The UI still offered the original two-entry revision-1 artifact. Its native
+endpoint returned a ZIP attachment; an independent HTTP download was written to
+a disposable file and reopened byte-for-byte, retaining duplicate order despite
+missing audio. Corrupting the saved fixture then removed the link and showed the
+integrity error through refresh/reload. The browser automation again produced no
+download-completion event; browser filesystem delivery is still unverified.
+No production audio, tags or library data were touched.
