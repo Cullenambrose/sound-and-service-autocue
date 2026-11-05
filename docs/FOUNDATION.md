@@ -208,7 +208,7 @@ The first slice is now implemented: immutable schema-v1 snapshots, selected-fold
 read-only indexing, offline/error states and a version-candidate review surface
 with durable decision receipts. See [CATALOG.md](CATALOG.md) for a disposable demo,
 contracts and remaining stage-3 work. The actual vendor CSV adapter, real-export
-reconciliation and explicit volume reassociation are not yet complete.
+reconciliation are not yet complete.
 Keep catalog song/version identities separate from exact-file hashes; never
 select a remix, clean/explicit version or intro edit from title similarity alone.
 Reviewed current hashes now connect to cue review through explicit verified
@@ -216,6 +216,10 @@ staging, with durable receipts and retained catalog provenance; see
 [the staging contract](CATALOG.md#reviewed-match-to-cue-review).
 Durable background scan jobs now provide acknowledged submission, progress,
 cooperative cancellation and restart recovery without publishing a partial index.
-Next inspect representative actual exports, implement explicit volume
-reassociation and benchmark disposable representative libraries before personal
-crates, verified playlist export or AI chat.
+Explicit offline-root reassociation now verifies every previously available
+indexed file's exact bytes at the same relative path before atomically updating
+root identity, index and history. File IDs, reviewed matches and cue corrections
+survive; historical provenance and original-file write links are not retargeted.
+Next inspect representative actual exports and benchmark disposable
+representative libraries before personal crates, verified playlist export or AI
+chat.

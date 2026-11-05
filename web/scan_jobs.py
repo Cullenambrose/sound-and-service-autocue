@@ -36,8 +36,14 @@ def initialize(db):
 
 
 def submit(db, body, dataset):
-    if not isinstance(body, dict) or set(body) != {"request_id", "dataset_id", "path"}:
-        raise ValueError("Scan submission requires request_id, dataset_id and an absolute path.")
+    ordinary = {"request_id", "dataset_id", "path"}
+    if not isinstance(body, dict) or set(body) not in (ordinary, ordinary | {"root_id", "base_revision"}):
+        raise ValueError("Scan requires request_id, dataset_id and path; reassociation also requires root_id and base_revision.")
+    reassociation = "root_id" in body
+    if reassociation:
+        catalog.text(body["root_id"], "root_id", required=True)
+        if type(body["base_revision"]) is not int or body["base_revision"] < 0:
+            raise ValueError("base_revision must be a nonnegative integer.")
     for key in ("request_id", "dataset_id", "path"):
         catalog.text(body[key], key, required=True)
     if body["dataset_id"] != dataset:
@@ -62,20 +68,34 @@ def submit(db, body, dataset):
     stat = path.stat()
     if not path.is_dir():
         raise ValueError("Library index requires a folder, not a file.")
+    if reassociation:
+        original = db.execute("SELECT * FROM library_roots WHERE id=?", (body["root_id"],)).fetchone()
+        if not original or original["scan_revision"] != body["base_revision"]:
+            raise catalog.Conflict("Indexed folder revision changed; refresh before reassociating.")
+        if catalog.root_status(original)[0] != "offline":
+            raise catalog.Conflict("Reassociation is only for offline indexed folders.")
     db.execute("BEGIN IMMEDIATE")
     prior = replay()
     if prior:
         return prior
     for root in db.execute("SELECT * FROM library_roots"):
+        if reassociation and root["id"] == body["root_id"]:
+            if root["scan_revision"] != body["base_revision"]:
+                raise catalog.Conflict("Indexed folder revision changed during admission.")
+            continue
         existing = Path(root["path"])
         if path == existing:
+            if reassociation:
+                raise catalog.Conflict("Replacement folder is already assigned to another indexed root.")
             if (stat.st_dev, stat.st_ino) != (root["device"], root["inode"]):
                 raise catalog.Conflict("Folder identity changed; select the original folder/volume.")
         elif path.is_relative_to(existing) or existing.is_relative_to(path):
             raise catalog.Conflict("Selected folder overlaps an indexed root.")
-    for job in db.execute("SELECT path FROM catalog_scan_jobs WHERE status IN ('queued','running','cancelling')"):
+    for job in db.execute("SELECT path,body_json FROM catalog_scan_jobs WHERE status IN ('queued','running','cancelling')"):
         existing = Path(job["path"])
-        if path.is_relative_to(existing) or existing.is_relative_to(path):
+        prior_body = json.loads(job["body_json"])
+        if path.is_relative_to(existing) or existing.is_relative_to(path) or (
+                reassociation and prior_body.get("root_id") == body["root_id"]):
             raise catalog.Conflict("An overlapping folder scan is already pending; inspect its progress.")
     job_id = uuid.uuid4().hex
     receipt = {"ok": True, **body, "job_id": job_id}
@@ -91,10 +111,13 @@ def submit(db, body, dataset):
 
 
 def record(row):
+    body = json.loads(row["body_json"])
     return {"id": row["id"], "path": row["path"], "status": row["status"],
             "progress": json.loads(row["progress_json"]), "error": row["error"],
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
-            "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+            **({"root_id": body["root_id"], "base_revision": body["base_revision"],
+                "operation": "reassociate"} if "root_id" in body else {"operation": "scan"})}
 
 
 def jobs(db):
@@ -166,8 +189,11 @@ def run_next(connect, stopping=lambda: False):
 
     try:
         with connect() as db:
+            body = json.loads(job["body_json"])
+            reassociation = ({"root_id": body["root_id"], "base_revision": body["base_revision"],
+                              "job_id": job["id"]} if "root_id" in body else None)
             result = catalog.scan_folder(db, job["path"], checkpoint=checkpoint, progress=progress,
-                                         expected_identity=(job["device"], job["inode"]))
+                                         expected_identity=(job["device"], job["inode"]), reassociation=reassociation)
             if result["state"] != "online":
                 raise OSError(result["error"])
             # scan_folder holds BEGIN IMMEDIATE here: cancellation cannot interleave

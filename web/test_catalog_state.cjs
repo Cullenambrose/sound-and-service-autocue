@@ -131,3 +131,15 @@ test("scan storage failures and stale tabs cannot lose or replace admitted reque
   assert.throws(() => scan.accept(scanReceipt(pending)), /denied/);
   assert.deepEqual(new ScanOutbox(storage, "dataset").pending, pending);
 });
+test("reassociation retry acknowledgment must preserve root identity and baseline revision", () => {
+  const {storage} = fixture(), scan = new ScanOutbox(storage, "dataset", () => "reassociate-id");
+  const pending = scan.prepare({path:"/replacement", root_id:"offline-root", base_revision:7});
+  for (const invalid of [{...scanReceipt(pending), root_id:"other"},
+    {...scanReceipt(pending), base_revision:8}, {...scanReceipt(pending), base_revision:undefined}]) {
+    assert.throws(() => scan.accept(invalid), /Scan acknowledgment/);
+    assert.deepEqual(new ScanOutbox(storage, "dataset").pending, pending);
+  }
+  const restored = new ScanOutbox(storage, "dataset");
+  restored.accept(scanReceipt(pending));
+  assert.equal(new ScanOutbox(storage, "dataset").pending, null);
+});

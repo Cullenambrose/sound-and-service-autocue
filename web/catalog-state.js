@@ -63,6 +63,7 @@
       const request = this.pending;
       if (!request || receipt?.ok !== true ||
           ["request_id", "dataset_id", "path"].some(key => receipt[key] !== request[key]) ||
+          (receipt.root_id !== request.root_id || receipt.base_revision !== request.base_revision) ||
           typeof receipt.job_id !== "string" || !/^[a-f0-9]{32}$/.test(receipt.job_id)) {
         throw new Error("Scan acknowledgment is invalid. The exact request remains available to retry.");
       }

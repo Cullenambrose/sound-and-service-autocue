@@ -89,6 +89,11 @@ def initialize(db):
         CREATE TABLE IF NOT EXISTS catalog_staging_receipts (
             request_id TEXT PRIMARY KEY, body_json TEXT NOT NULL, receipt_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS catalog_root_reassociations (
+            job_id TEXT PRIMARY KEY, root_id TEXT NOT NULL REFERENCES library_roots(id),
+            before_json TEXT NOT NULL, after_json TEXT NOT NULL,
+            verified_files INTEGER NOT NULL, committed_at REAL NOT NULL
+        );
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(library_roots)")}
     if "scan_revision" not in columns:
@@ -239,7 +244,8 @@ def roots(db):
     return result
 
 
-def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progress=None, expected_identity=None):
+def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progress=None, expected_identity=None,
+                reassociation=None):
     metadata_reader = metadata_reader or read_metadata
     text(path_text, "folder path", required=True)
     requested = Path(path_text).expanduser()
@@ -250,7 +256,20 @@ def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progres
         stat = path.stat()
         if (stat.st_dev, stat.st_ino) != expected_identity:
             raise Conflict("Selected folder identity changed since this scan was queued.")
-    root = db.execute("SELECT * FROM library_roots WHERE path=?", (str(path),)).fetchone()
+    original_root = None
+    if reassociation:
+        original_root = db.execute("SELECT * FROM library_roots WHERE id=?",
+                                   (reassociation["root_id"],)).fetchone()
+        if not original_root or original_root["scan_revision"] != reassociation["base_revision"]:
+            raise Conflict("Indexed folder revision changed; refresh before reassociating.")
+        if root_status(original_root)[0] != "offline":
+            raise Conflict("Original indexed folder is online; reassociation is only for offline roots.")
+        stat = path.stat()
+        if expected_identity is not None and (stat.st_dev, stat.st_ino) != expected_identity:
+            raise Conflict("Replacement folder identity changed before verification.")
+        root = {**dict(original_root), "path": str(path), "device": stat.st_dev, "inode": stat.st_ino}
+    else:
+        root = db.execute("SELECT * FROM library_roots WHERE path=?", (str(path),)).fetchone()
     existing_root = root is not None
     if root:
         state, error = root_status(root)
@@ -272,6 +291,9 @@ def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progres
                 "scanned_at": None, "scan_revision": 0}
     previous = {row["relative_path"]: row for row in db.execute(
         "SELECT * FROM library_files WHERE root_id=?", (root["id"],))}
+    required = {relative: old for relative, old in previous.items() if old["available"]}
+    if reassociation and (not required or any(not old["content_hash"] or old["error"] for old in required.values())):
+        raise Conflict("Reassociation requires a nonempty, successfully hashed previous index; errored files cannot prove identity.")
     seen, errors, skipped, reused, updates = set(), [], [], 0, []
 
     def report(phase, current_path=""):
@@ -310,7 +332,7 @@ def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progres
             if not entry.is_file():
                 raise ValueError("Audio path is not a regular file: " + relative)
             old = previous.get(relative)
-            if old and signature(before) == (old["size"], old["mtime_ns"], old["ctime_ns"]) and not old["error"]:
+            if not reassociation and old and signature(before) == (old["size"], old["mtime_ns"], old["ctime_ns"]) and not old["error"]:
                 reused += 1
                 continue
             identity = old["id"] if old else str(uuid.uuid4())
@@ -323,7 +345,21 @@ def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progres
             except (OSError, ValueError, MutagenError) as failure:
                 error = str(failure) or type(failure).__name__
                 errors.append({"path": relative, "error": error})
+            if reassociation and old and (error or not old["content_hash"] or content_hash != old["content_hash"]):
+                raise Conflict("Replacement file does not prove the indexed bytes: " + relative)
             updates.append((identity, root["id"], relative, content_hash, *signature(before), canonical(metadata), error))
+    if reassociation:
+        missing = required.keys() - seen
+        if missing:
+            raise Conflict("Replacement folder is missing indexed files: " + ", ".join(sorted(missing)[:10]))
+        # Every proof file must remain stable until the publication gate, not just
+        # during its own hash read. The filesystem is not transactionally locked.
+        for update in updates:
+            if checkpoint:
+                checkpoint()
+            entry = path / update[2]
+            if entry.is_symlink() or not entry.resolve().is_relative_to(path) or signature(entry.stat()) != update[4:7]:
+                raise Conflict("Replacement file changed before publication: " + update[2])
     report("publishing")
     if root_status(root)[0] != "online":
         raise OSError("Folder disconnected during scan; previous index was preserved.")
@@ -331,10 +367,26 @@ def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progres
     db.execute("BEGIN IMMEDIATE")
     if checkpoint:
         checkpoint()
-    current = db.execute("SELECT * FROM library_roots WHERE path=?", (str(path),)).fetchone()
+    current = (db.execute("SELECT * FROM library_roots WHERE id=?", (root["id"],)).fetchone() if reassociation
+               else db.execute("SELECT * FROM library_roots WHERE path=?", (str(path),)).fetchone())
     if (existing_root and (not current or current["scan_revision"] != root["scan_revision"])) \
             or (not existing_root and current):
         raise Conflict("Another scan finished for this folder; retry against the latest index.")
+    if reassociation:
+        if root_status(root)[0] != "online":
+            raise Conflict("Replacement folder disconnected before publication.")
+        if root_status(current)[0] != "offline":
+            raise Conflict("Original folder returned online; reassociation was not applied.")
+        for other in db.execute("SELECT id,path FROM library_roots WHERE id!=?", (root["id"],)):
+            existing = Path(other["path"])
+            if path.is_relative_to(existing) or existing.is_relative_to(path):
+                raise Conflict("Replacement folder overlaps another indexed root.")
+        db.execute("UPDATE library_roots SET path=?,device=?,inode=? WHERE id=?",
+                   (str(path), root["device"], root["inode"], root["id"]))
+        db.execute("INSERT INTO catalog_root_reassociations VALUES(?,?,?,?,?,?)",
+                   (reassociation["job_id"], root["id"], canonical(dict(current)),
+                    canonical({"path": str(path), "device": root["device"], "inode": root["inode"],
+                               "scan_revision": root["scan_revision"] + 1}), len(required), time.time()))
     if not existing_root:
         for other in db.execute("SELECT path FROM library_roots"):
             existing = Path(other["path"])
@@ -355,7 +407,8 @@ def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progres
     db.execute("UPDATE library_roots SET scanned_at=?,error='',scan_revision=scan_revision+1 WHERE id=?",
                (time.time(), root["id"]))
     return {"root_id": root["id"], "state": "online", "scanned": len(seen),
-            "reused": reused, "errors": errors, "skipped_symlinks": skipped}
+            "reused": reused, "errors": errors, "skipped_symlinks": skipped,
+            **({"reassociated": True, "verified_files": len(required)} if reassociation else {})}
 
 
 def file_status(row, root):

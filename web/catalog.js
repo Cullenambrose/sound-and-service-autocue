@@ -53,9 +53,19 @@
   async function refreshRoots() {
     const data = await api("/api/catalog/roots");
     $("#catalog-roots").innerHTML = data.roots.map(root =>
-      `<div class="crate-item"><div><strong>${escapeHtml(root.path)}</strong><span class="crate-meta">${escapeHtml(root.state)}${root.availability_error || root.error ? " · " + escapeHtml(root.availability_error || root.error) : ""}</span></div><button class="quiet" data-catalog-rescan="${escapeHtml(root.path)}">Rescan</button></div>`
+      `<div class="crate-item"><div><strong>${escapeHtml(root.path)}</strong><span class="crate-meta">${escapeHtml(root.state)}${root.availability_error || root.error ? " · " + escapeHtml(root.availability_error || root.error) : ""}</span>
+      ${root.state === "offline" ? `<label>Replacement folder<input data-catalog-replacement="${root.id}" placeholder="/absolute/path/to/replacement/music"></label><button class="quiet" data-catalog-reassociate="${root.id}">Verify and reassociate</button>` : ""}</div><button class="quiet" data-catalog-rescan="${escapeHtml(root.path)}">Rescan</button></div>`
     ).join("") || '<p class="muted">No folders indexed.</p>';
     $$("[data-catalog-rescan]").forEach(button => button.onclick = () => action(() => scan(button.dataset.catalogRescan)));
+    $$("[data-catalog-reassociate]").forEach(button => button.onclick = () => action(async () => {
+      const root = data.roots.find(item => item.id === button.dataset.catalogReassociate);
+      const path = $(`[data-catalog-replacement="${root.id}"]`).value;
+      if (!path.trim()) throw new Error("Enter the replacement folder's absolute path.");
+      if (!confirm(`Verify and reassociate offline folder ${root.path} to ${path}? Every previously available indexed file must exist at the same relative path with identical bytes. All files will be rehashed; missing, changed or previously errored files block reassociation. Matches keep their IDs; original-file Serato write links are NOT moved. No files or tags are written.`)) return;
+      scanOutbox.prepare({path, root_id:root.id, base_revision:root.scan_revision});
+      pending();
+      await sendScanPending();
+    }));
   }
   async function loadFiles() {
     const data = await api("/api/catalog/files?offset=" + fileOffset);
@@ -84,7 +94,7 @@
         const progress = job.progress, result = job.result;
         const detail = result ? `${result.scanned} audio paths · ${result.reused} unchanged · ${result.errors.length} metadata/read errors · ${result.skipped_symlinks.length} symlinks skipped` :
           `${progress.phase} · ${progress.scanned} audio paths encountered · ${progress.reused} unchanged · ${progress.errors} errors${progress.current_path ? " · " + progress.current_path : ""}`;
-        return `<div class="crate-item"><div><strong>${escapeHtml(job.path)}</strong><span class="crate-meta">${escapeHtml(job.status)} · ${escapeHtml(detail)}</span>${job.error ? `<span class="catalog-error">${escapeHtml(job.error)}</span>` : ""}
+        return `<div class="crate-item"><div><strong>${escapeHtml(job.path)}</strong><span class="crate-meta">${job.operation === "reassociate" ? "Reassociation · " : ""}${escapeHtml(job.status)} · ${escapeHtml(detail)}${result?.reassociated ? ` · ${result.verified_files} indexed files verified; folder reassociated` : ""}</span>${job.error ? `<span class="catalog-error">${escapeHtml(job.error)}</span>` : ""}
           ${result?.errors.length ? `<details><summary>First ${Math.min(10, result.errors.length)} errors (all retained in indexed files)</summary>${result.errors.slice(0, 10).map(error => `<p>${escapeHtml(error.path)}: ${escapeHtml(error.error)}</p>`).join("")}</details>` : ""}</div>
           ${activeScans.has(job.status) ? `<button class="quiet" data-catalog-scan-cancel="${job.id}" ${job.status === "cancelling" ? "disabled" : ""}>Cancel scan</button>` : ""}</div>`;
       }).join("") || '<p class="muted">No scan jobs yet.</p>';

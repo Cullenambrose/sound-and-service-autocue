@@ -14,7 +14,8 @@ function fixture() {
     setItem:(key, value) => values.set(key, value),
     removeItem:key => values.delete(key),
   };
-  let jobs = [], loseAck = false, failPoll = false, nextId = 0;
+  let jobs = [], roots = [], loseAck = false, failPoll = false, nextId = 0;
+  const confirmations = [];
   const job = (status = "running") => ({id:"a".repeat(32), path:"/synthetic/music", status,
     progress:{phase:"indexing", scanned:1, reused:0, errors:0, skipped:0, current_path:"Clean.wav"},
     error:"", result:status === "completed" ? {scanned:1, reused:0, errors:[], skipped_symlinks:[]} : null});
@@ -23,7 +24,7 @@ function fixture() {
     if (url === "/api/session") return {};
     if (url === "/api/catalog/snapshots") return {snapshots:[]};
     if (url.startsWith("/api/catalog/crates?")) return {crates:[]};
-    if (url === "/api/catalog/roots") return {roots:[]};
+    if (url === "/api/catalog/roots") return {roots};
     if (url.startsWith("/api/catalog/files?")) return {files:[], total:0};
     if (url === "/api/catalog/scans") {
       if (failPoll) throw new Error("synthetic disconnected status");
@@ -52,18 +53,24 @@ function fixture() {
       return elements.get(selector);
     }
     const cancelButton = {dataset:{catalogScanCancel:"a".repeat(32)}};
+    const reassociateButton = {dataset:{catalogReassociate:"offline-root"}};
     const context = vm.createContext({
-      $, $$:selector => selector === "[data-catalog-scan-cancel]" && /data-catalog-scan-cancel/.test($("#catalog-scans").innerHTML) ? [cancelButton] : [],
+      $, $$:selector => {
+        if (selector === "[data-catalog-scan-cancel]" && /data-catalog-scan-cancel/.test($("#catalog-scans").innerHTML)) return [cancelButton];
+        if (selector === "[data-catalog-reassociate]" && /data-catalog-reassociate/.test($("#catalog-roots").innerHTML)) return [reassociateButton];
+        return [];
+      },
       api, datasetId:"dataset", localStorage:storage, MatchOutbox, StageOutbox, ScanOutbox,
-      crypto:{randomUUID:() => `request-${++nextId}`}, confirm:() => true,
+      crypto:{randomUUID:() => `request-${++nextId}`}, confirm:message => {confirmations.push(message); return true;},
       escapeHtml:value => String(value).replaceAll("<", "&lt;"),
       setTimeout:fn => {timers.push(fn); return timers.length;},
     });
     vm.runInContext(source, context);
     await settle();
-    return {$, timers, cancelButton};
+    return {$, timers, cancelButton, reassociateButton};
   }
-  return {open, requests, receipts, storage, job,
+  return {open, requests, receipts, storage, job, confirmations,
+    set roots(value) {roots = value;},
     set jobs(value) {jobs = value;}, get jobs() {return jobs;},
     set loseAck(value) {loseAck = value;}, set failPoll(value) {failPoll = value;}};
 }
@@ -131,4 +138,29 @@ test("discarding pending scan admission does not cancel the admitted server job"
   assert.equal(ui.$("#catalog-scan-pending").hidden, true);
   assert.equal(app.jobs[0].status, "queued");
   assert.ok(!app.requests.includes("/api/catalog/scans/cancel"));
+});
+test("offline root reassociation requires deliberate confirmation and persists root revision on retry", async () => {
+  const app = fixture();
+  app.roots = [{id:"offline-root", path:"/old/music", state:"offline", scan_revision:3}];
+  const ui = await app.open();
+  assert.match(ui.$("#catalog-roots").innerHTML, /Verify and reassociate/);
+  ui.$('[data-catalog-replacement="offline-root"]').value = "/new/music";
+  app.loseAck = true;
+  await ui.reassociateButton.onclick();
+  assert.match(app.confirmations[0], /Every previously available.*identical bytes/);
+  assert.match(app.confirmations[0], /write links are NOT moved/);
+  const pending = new ScanOutbox(app.storage, "dataset").pending;
+  assert.equal(pending.root_id, "offline-root");
+  assert.equal(pending.base_revision, 3);
+  assert.equal(pending.path, "/new/music");
+  const restored = await app.open();
+  await restored.$("#catalog-scan-retry").onclick();
+  assert.equal(app.receipts.size, 1);
+  assert.equal(new ScanOutbox(app.storage, "dataset").pending, null);
+});
+test("online roots never offer reassociation controls", async () => {
+  const app = fixture();
+  app.roots = [{id:"online-root", path:"/music", state:"online", scan_revision:3}];
+  const ui = await app.open();
+  assert.doesNotMatch(ui.$("#catalog-roots").innerHTML, /data-catalog-reassociate/);
 });

@@ -1,6 +1,8 @@
 import concurrent.futures
 import hashlib
+import json
 from pathlib import Path
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -342,6 +344,242 @@ class ScanJobTests(unittest.TestCase):
         stop.set()
         thread.join(timeout=3)
         self.assertFalse(thread.is_alive())
+
+    def moved_fixture(self):
+        self.submit()
+        self.run_scan()
+        before = self.index()
+        moved = self.root / "moved-music"
+        self.music.rename(moved)
+        body = {"request_id": "reassociate-1", "path": str(moved),
+                "root_id": before[0][0]["id"], "base_revision": before[0][0]["scan_revision"]}
+        return before, moved, body
+
+    def history(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM catalog_root_reassociations")]
+
+    def test_reassociation_preserves_ids_forces_hashes_and_records_atomic_history(self):
+        before, moved, body = self.moved_fixture()
+        original = (moved / self.source.name).read_bytes()
+        receipt = self.submit(**body)
+        with patch.object(catalog, "file_hash", wraps=catalog.file_hash) as hashing:
+            job = self.run_scan()
+        self.assertEqual(job["status"], "completed", job)
+        self.assertEqual(hashing.call_count, 1)
+        self.assertTrue(job["result"]["reassociated"])
+        self.assertEqual(job["result"]["verified_files"], 1)
+        after = self.index()
+        self.assertEqual(after[0][0]["id"], before[0][0]["id"])
+        self.assertEqual(after[0][0]["path"], str(moved.resolve()))
+        self.assertEqual(after[0][0]["scan_revision"], before[0][0]["scan_revision"] + 1)
+        self.assertEqual(after[1][0]["id"], before[1][0]["id"])
+        self.assertEqual(after[1][0]["content_hash"], before[1][0]["content_hash"])
+        with self.connect() as db:
+            self.assertEqual(catalog.file_records(db)[0]["state"], "available")
+        history = self.history()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["job_id"], receipt["job_id"])
+        self.assertEqual(json.loads(history[0]["before_json"])["path"], before[0][0]["path"])
+        self.assertEqual((moved / self.source.name).read_bytes(), original)
+        self.assertEqual(self.submit(**body), receipt)
+        self.assertEqual(self.history(), history)
+
+    def test_reassociation_admission_rejects_online_unknown_stale_or_invalid_revision(self):
+        self.submit()
+        self.run_scan()
+        root = self.index()[0][0]
+        for changes in ({"root_id": root["id"], "base_revision": root["scan_revision"]},
+                        {"root_id": "unknown", "base_revision": 1},
+                        {"root_id": root["id"], "base_revision": 0},
+                        {"root_id": root["id"], "base_revision": True},
+                        {"root_id": root["id"]}):
+            with self.assertRaises(ValueError):
+                self.submit(request_id="bad", **changes)
+        self.assertEqual(self.history(), [])
+
+    def test_changed_missing_errored_or_symlink_proof_rolls_back_reassociation(self):
+        before, moved, body = self.moved_fixture()
+        proof = moved / self.source.name
+        original = proof.read_bytes()
+        for mode in ("changed", "missing", "symlink", "errored"):
+            proof.unlink(missing_ok=True)
+            proof.write_bytes(original)
+            if mode == "changed":
+                proof.write_bytes(original + b"changed")
+            elif mode == "missing":
+                proof.unlink()
+            elif mode == "symlink":
+                target = self.root / "outside.wav"
+                target.write_bytes(original)
+                proof.unlink()
+                proof.symlink_to(target)
+            elif mode == "errored":
+                with self.connect() as db:
+                    db.execute("UPDATE library_files SET error='synthetic parse error'")
+            prior = self.index()
+            self.submit(**{**body, "request_id": mode})
+            with self.assertLogs(scan_jobs.LOG, level="ERROR"):
+                self.assertEqual(self.run_scan()["status"], "failed")
+            self.assertEqual(self.index(), prior)
+            self.assertEqual(self.history(), [])
+        self.assertEqual(self.index()[0], before[0])
+
+    def test_empty_index_cannot_prove_reassociation(self):
+        self.source.unlink()
+        before, _, body = self.moved_fixture()
+        self.submit(**body)
+        with self.assertLogs(scan_jobs.LOG, level="ERROR"):
+            self.assertEqual(self.run_scan()["status"], "failed")
+        self.assertEqual(self.index(), before)
+        self.assertEqual(self.history(), [])
+
+    def test_reassociation_allows_additional_files_without_stealing_existing_ids(self):
+        before, moved, body = self.moved_fixture()
+        (moved / "new.wav").write_bytes(fixtures.tagged_wav("Explicit"))
+        self.submit(**body)
+        self.assertEqual(self.run_scan()["status"], "completed")
+        after = self.index()
+        self.assertEqual(len(after[1]), 2)
+        self.assertIn(before[1][0]["id"], [row["id"] for row in after[1]])
+        self.assertEqual(len(self.history()), 1)
+
+    def test_reassociation_to_same_path_replacement_requires_full_bytes_not_stat_reuse(self):
+        before, moved, body = self.moved_fixture()
+        shutil.copytree(moved, self.music)
+        self.submit(**{**body, "path": str(self.music)})
+        with patch.object(catalog, "file_hash", wraps=catalog.file_hash) as hashing:
+            self.assertEqual(self.run_scan()["status"], "completed")
+        self.assertEqual(hashing.call_count, 1)
+        self.assertEqual(self.index()[0][0]["id"], before[0][0]["id"])
+        self.assertNotEqual(self.index()[0][0]["inode"], before[0][0]["inode"])
+
+    def test_reassociation_cancellation_preserves_entire_root_index_and_history(self):
+        before, _, body = self.moved_fixture()
+        job_id = self.submit(**body)["job_id"]
+        reader = catalog.read_metadata
+        def cancel_read(path):
+            self.cancel(job_id)
+            return reader(path)
+        with patch.object(catalog, "read_metadata", side_effect=cancel_read):
+            self.assertEqual(self.run_scan()["status"], "cancelled")
+        self.assertEqual(self.index(), before)
+        self.assertEqual(self.history(), [])
+
+    def test_reassociation_cannot_publish_after_original_returns_or_revision_changes(self):
+        before, moved, body = self.moved_fixture()
+        for mode in ("online", "revision"):
+            self.submit(**{**body, "request_id": mode})
+            reader = catalog.read_metadata
+            def change_during_read(path):
+                value = reader(path)
+                if mode == "online":
+                    self.music.symlink_to(moved, target_is_directory=True)
+                else:
+                    with self.connect() as db:
+                        db.execute("UPDATE library_roots SET scan_revision=scan_revision+1")
+                return value
+            with patch.object(catalog, "read_metadata", side_effect=change_during_read), \
+                    self.assertLogs(scan_jobs.LOG, level="ERROR"):
+                self.assertEqual(self.run_scan()["status"], "failed")
+            if self.music.is_symlink():
+                self.music.unlink()
+            self.assertEqual(self.index()[0][0]["path"], before[0][0]["path"])
+            self.assertEqual(self.history(), [])
+
+    def test_reassociation_terminal_write_failure_rolls_back_root_and_audit(self):
+        before, _, body = self.moved_fixture()
+        self.submit(**body)
+        with self.connect() as db:
+            db.execute("""CREATE TRIGGER reject_reassociate BEFORE UPDATE ON catalog_scan_jobs
+                          WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'synthetic completion failure'); END""")
+        with self.assertLogs(scan_jobs.LOG, level="ERROR"):
+            self.assertEqual(self.run_scan()["status"], "failed")
+        self.assertEqual(self.index(), before)
+        self.assertEqual(self.history(), [])
+
+    def test_reassociation_rejects_replacement_changed_between_execution_identity_checks(self):
+        before, moved, body = self.moved_fixture()
+        self.submit(**body)
+        original = catalog.root_status
+        replaced = False
+        def replace_before_proof(root):
+            nonlocal replaced
+            if root["path"] == before[0][0]["path"] and not replaced:
+                replaced = True
+                saved = self.root / "replacement-before-proof"
+                moved.rename(saved)
+                shutil.copytree(saved, moved)
+            return original(root)
+        with patch.object(catalog, "root_status", side_effect=replace_before_proof), \
+                self.assertLogs(scan_jobs.LOG, level="ERROR"):
+            self.assertEqual(self.run_scan()["status"], "failed")
+        self.assertIn("identity changed", self.jobs()[0]["error"])
+        self.assertEqual(self.index(), before)
+        self.assertEqual(self.history(), [])
+
+    def test_reassociation_blocks_pending_same_root_and_overlapping_index(self):
+        _, moved, body = self.moved_fixture()
+        self.submit(**body)
+        copy = self.root / "copy"
+        shutil.copytree(moved, copy)
+        with self.assertRaises(catalog.Conflict):
+            self.submit(**{**body, "request_id": "other", "path": str(copy)})
+        with self.assertRaises(catalog.Conflict):
+            self.submit(request_id="ordinary", path=str(moved))
+        with self.connect() as db:
+            db.execute("UPDATE catalog_scan_jobs SET status='cancelled' WHERE status='queued'")
+        with self.connect() as db:
+            catalog.scan_folder(db, str(copy))
+        with self.assertRaises(catalog.Conflict):
+            self.submit(**{**body, "request_id": "steal", "path": str(copy)})
+
+    def test_reassociation_detects_early_proof_file_changed_while_later_file_is_read(self):
+        (self.music / "z-last.wav").write_bytes(fixtures.tagged_wav("Last"))
+        before, moved, body = self.moved_fixture()
+        self.submit(**body)
+        reader = catalog.read_metadata
+        def mutate_earlier(path):
+            value = reader(path)
+            if path.name == "z-last.wav":
+                (moved / self.source.name).write_bytes(b"synthetic mutation after proof")
+            return value
+        with patch.object(catalog, "read_metadata", side_effect=mutate_earlier), \
+                self.assertLogs(scan_jobs.LOG, level="ERROR"):
+            self.assertEqual(self.run_scan()["status"], "failed")
+        self.assertEqual(self.index(), before)
+        self.assertEqual(self.history(), [])
+
+    def test_reassociation_keeps_missing_rows_missing_and_rejects_changed_returned_bytes(self):
+        old_missing = self.music / "Missing.wav"
+        old_missing.write_bytes(fixtures.tagged_wav("Missing"))
+        self.submit()
+        self.run_scan()
+        missing_bytes = old_missing.read_bytes()
+        old_missing.unlink()
+        self.submit(request_id="missing-scan")
+        self.run_scan()
+        before = self.index()
+        moved = self.root / "moved-music"
+        self.music.rename(moved)
+        root = before[0][0]
+        body = {"request_id": "reassociate-missing", "path": str(moved),
+                "root_id": root["id"], "base_revision": root["scan_revision"]}
+        self.submit(**body)
+        self.assertEqual(self.run_scan()["status"], "completed")
+        self.assertEqual(next(row for row in self.index()[1] if row["relative_path"] == "Missing.wav")["available"], 0)
+        # A returning historical file is only allowed to retain its old identity
+        # if its bytes still agree, not simply because the relative name agrees.
+        moved.rename(self.root / "second-move")
+        replacement = self.root / "second-move"
+        (replacement / "Missing.wav").write_bytes(missing_bytes + b"changed")
+        root = self.index()[0][0]
+        self.submit(request_id="changed-return", path=str(replacement), root_id=root["id"],
+                    base_revision=root["scan_revision"])
+        prior = self.index()
+        with self.assertLogs(scan_jobs.LOG, level="ERROR"):
+            self.assertEqual(self.run_scan()["status"], "failed")
+        self.assertEqual(self.index(), prior)
 
 
 if __name__ == "__main__":

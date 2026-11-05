@@ -34,6 +34,9 @@ receipts, preserves catalog provenance and does not enable original-file writes.
 Folder indexing now runs as durable background jobs with progress, cooperative
 cancellation and reload/restart recovery. Interrupted scans preserve the previous
 index and require an explicit new scan; queued scans resume when the server starts.
+Offline indexed folders can now be explicitly reassociated to a moved/remounted
+location after full relative-path/hash verification, preserving file IDs and
+reviewed matches without moving original-file Serato write links.
 
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)

@@ -18,6 +18,8 @@ Implemented plan:
    editor, retaining match provenance and idempotent staging receipts.
 6. Durable background index jobs with retry receipts, persisted progress,
    cooperative cancellation and explicit restart recovery.
+7. Deliberate offline-root reassociation with full file-byte proof, preserved
+   identities and atomic history. This does not enable or retarget tag writes.
 
 The actual saved CSV/catalog exports were not supplied at a known path for this
 milestone. Their headers, preambles and identity/link fields have **not** been
@@ -145,6 +147,8 @@ there is no partial-success importer or silently skipped input row.
 - `catalog_scan_jobs`: original submission/receipt, captured folder identity,
   lifecycle/progress, terminal result and errors. Admission receipts remain
   replayable after the job finishes; they never start another scan.
+- `catalog_root_reassociations`: immutable job/root linkage, previous root
+  record, replacement identity/revision, proof-file count and commit time.
 
 These are not a recording-fingerprint graph. A catalog source song/version is
 not the staged `tracks.hash` entity. Renames currently appear as a missing old
@@ -173,9 +177,9 @@ File status also checks current paths/stat values when viewed.
 
 Root identity currently uses resolved path + device/inode, **not a stable volume
 UUID**. This deliberately fails closed on a replacement folder/drive. Drive
-reattachment that changes device identity may need future explicit reassociation;
-root relocation/removal/reassociation UI is not implemented. Do not edit SQLite
-to bypass an offline identity check.
+reattachment that changes device identity requires explicit reassociation as
+described below. Root removal and automatic relocation are not implemented.
+Do not edit SQLite to bypass an offline identity check.
 
 Hashing and tag parsing happen outside the SQLite write lock needed by review
 saves. A short final transaction publishes the scan and detects another scan
@@ -273,6 +277,73 @@ server work. Status polling failures remain visible and retry automatically;
 they never imply completion. Browser polling is every 1.5 seconds and refreshes
 the root/file/match views after a terminal transition, including completion
 while the page was closed. It does not alter pending match or staging outboxes.
+
+### Explicit offline-folder reassociation
+
+Plan for this increment: reuse durable scan admission/recovery, prove the
+replacement bytes outside the review write lock, publish the root/index/audit
+atomically, then exercise the existing match/staging/cue-review surfaces with
+synthetic moves. No music files are moved by the app.
+
+Reload to refresh offline folder status. Under that root, enter its new absolute
+folder path and select **Verify and reassociate**, then confirm the explicit
+warning. This is intentionally only for an **offline** old root, not merging two
+online copies or moving a working library automatically.
+
+The existing `POST /api/catalog/scan` contract optionally accepts **both**
+`root_id` and `base_revision` (the root API's `scan_revision`) in addition
+to request/dataset/path. No other fields are accepted. Admission rejects an
+unknown/stale/online root, a replacement already belonging to another indexed
+root, overlapping indexed/pending paths, or another pending reassociation for
+the same root. It captures the replacement device/inode and returns the same
+durable `202` receipt including root/revision. The scan outbox validates both
+extra identities before clearing. The normal scan contract is unchanged.
+
+The worker requires a nonempty previously available index whose files all have
+successful known hashes. An empty index or previously errored/unhashed available
+file cannot prove identity and fails visibly. A complete walk rehashes **every**
+encountered audio file; it never reuses a size/timestamp match for reassociation.
+Every previously available indexed file must appear at the same relative path
+and produce the same SHA-256 with successful metadata parsing. Missing files,
+symlinks in place of proof files, changed bytes (including tag edits), metadata
+errors or renamed files fail the whole job. This is deliberately stricter than
+an ordinary incremental scan; there is no skip/force override.
+
+Additional audio files can be indexed with new file IDs, using the existing
+normal metadata-error reporting. Previously missing locations may remain
+missing. If such a location reappears, its previously known bytes must match
+before its old file ID is restored; unknown or changed returned bytes fail.
+Symlinks not replacing required proof files remain skipped/reported as usual.
+This proves only the indexed subset, not the identity/completeness of every
+non-audio or formerly missing file on an entire physical volume.
+
+Before publication, the worker rechecks file signatures/containment, replacement
+root identity, original-root offline status and the captured root scan revision.
+If the old folder returns online, a proof file changes/disappears, or another
+scan wins, the reassociation is not applied. The final transaction changes the
+root path/device/inode, refreshes the index and increments its revision, adds
+the immutable reassociation history, and completes the durable job together.
+Cancellation/failure/interruption leaves all those records unchanged.
+An exact admission retry remains historical and never reassociates again.
+After a failure, reconcile first and submit a new explicit request ID.
+
+Root IDs, file IDs, content hashes and accepted match revisions survive a valid
+move; catalog selected-file paths now resolve through the new root. Existing cue
+plans, corrections and track records remain untouched. App-local staged copies
+can already work offline and are not recopied or analyzed. Their historical
+catalog/source provenance remains the path originally observed; neither
+`tracks.source_path` nor existing Serato write/backup associations is changed.
+Use the existing separate import/write workflow to deliberately establish any
+new original-file association; reassociation itself never grants that.
+
+The job list labels reassociation separately and shows its verified-file count.
+The history table retains the previous/new root identity and linked job even
+after it ages out of the recent list. This is not a stable volume UUID or an
+atomic filesystem snapshot: concurrent source mutations after the final check
+remain possible. Current availability checks and later acceptance/staging/
+analysis byte verification still apply. Keep the source stable during proof.
+The same 10,000-file bound, cooperative I/O cancellation limits, single-server
+requirement and unbenchmarked production/removable-drive limits still apply.
 
 ## Matching and decision acknowledgment
 
@@ -465,7 +536,7 @@ unapproved conflict, deliberately dropped a post-commit acknowledgment, reloaded
 and retried without advancing the saved revision. No original library, music
 file, production database or Serato tag was modified.
 
-Current durable-scan results: **345 engine, 118 web/catalog/scan and 44 Node cases
+Current reassociation results: **345 engine, 132 web/catalog/scan and 47 Node cases
 passed**.
 A fresh Python 3.10 environment with only core dependencies also passed both
 Python suites (three optional model-compatibility checks skipped). Hosted CI
@@ -500,14 +571,32 @@ reload. Final state was one cancelled job, one completed job, 60 exact unchanged
 source files, no staged copies and no analysis jobs. Production databases,
 real tracks, external volumes and paid/network AI were not exercised.
 
+Reassociation regressions cover moved folders and a same-path replacement with
+new inode, forced rehashing, original/target identity changes, stale revisions,
+duplicate/overlapping requests, missing/changed/symlink/errored proof files,
+early-file mutation during a later hash, additional and formerly missing
+entries, cancellation and terminal-write rollback of the root/index/audit.
+HTTP integration saves a cue correction before relocation and verifies that the
+accepted match, cue track, correction journal and historical staging provenance
+are unchanged afterward; a new staging request resolves through the new root.
+Node tests validate explicit confirmation and root/revision acknowledgment.
+
+Browser verification used 12 generated tagged WAVs with delayed reads. After
+the fixture folder was moved, the offline-root control admitted reassociation;
+a deliberately lost response survived reload and exact retry. Exactly one
+completed job and audit row retained the original root identity, all 12 indexed
+files were hash-verified/unchanged, and no staged tracks or model jobs existed.
+This tests local disposable folders, not actual external-drive reconnection.
+
 ## Next concrete work
 
 1. Inspect a representative **actual** CSV plus catalog index/export manifest at
    a user-supplied path. Build a deterministic adapter (including preambles,
    source IDs and unavailable entries) and reconcile the real 1,423/81,153 counts.
-2. Durable cancellable scan jobs are implemented. Add explicit volume
-   reassociation and benchmark on a disposable representative library before
-   raising the initial bound.
+2. Durable cancellable scans and strict offline-folder reassociation are
+   implemented. Benchmark on a disposable representative library before raising
+   the initial bound; broader volume identity/partial relocation remains future
+   work.
 3. The reviewed-match/cue-review bridge is implemented. Next add ordered personal
    crates and verified M3U8/CSV export manifests after the real adapter and scan
    acceptance gates. No production tag-writing or AI expansion here.

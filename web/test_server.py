@@ -116,6 +116,51 @@ class WebServerTests(unittest.TestCase):
         shutil.rmtree(folder)
         self.assertEqual(self.catalog_post("scan", body), replies[0])
 
+    def test_verified_reassociation_retains_matches_cue_reviews_and_historical_staging_provenance(self):
+        imported, source, body = self.staging_fixture()
+        self.assertEqual(self.catalog_post("stage", body)[0], 200)
+        file_hash = body["content_hash"]
+        server._store_plan(file_hash, {"grid": {"t1": 0, "bar_s": 2},
+                                      "cues": {"B": {"name": "START", "bar": 1}}}, "Needs a look")
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        review = self.review_request(base + "/api/tracks/" + file_hash,
+            data=b'{"cues":{"B":{"name":"START","bar":2}}}', method="PUT",
+            headers={"Content-Type": "application/json", "Origin": base, "X-AutoCue-Token": server.SESSION_TOKEN})
+        self.assertEqual(self.submit_review(review)[0], 200)
+        with server.connect() as db:
+            track_before = dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone())
+            provenance_before = dict(db.execute("SELECT * FROM catalog_staged_tracks").fetchone())
+            decision_before = dict(db.execute("SELECT * FROM catalog_match_decisions").fetchone())
+        root = self.catalog_get("roots")["roots"][0]
+        moved = source.parent.with_name("relocated-library")
+        source.parent.rename(moved)
+        request = {"request_id": "http-reassociate", "dataset_id": body["dataset_id"], "path": str(moved),
+                   "root_id": root["id"], "base_revision": root["scan_revision"]}
+        self.assertEqual(self.catalog_post("scan", request, authenticated=False)[0], 403)
+        self.assertEqual(self.catalog_post("scan", {**request, "dataset_id": "other"})[0], 409)
+        reply = self.catalog_post("scan", request)
+        self.assertEqual(reply[0], 202, reply)
+        self.assertTrue(server.scan_jobs.run_next(server.connect))
+        job = self.catalog_get("scans")["jobs"][0]
+        self.assertEqual(job["status"], "completed", job)
+        self.assertTrue(job["result"]["reassociated"])
+        song = self.staged_song(imported)
+        self.assertEqual(song["state"], "exact")
+        self.assertEqual(song["selected_file"]["id"], body["file_id"])
+        self.assertEqual(song["selected_file"]["path"], str((moved / source.name).resolve()))
+        self.assertTrue(song["staged_track"]["reviewed"])
+        with server.connect() as db:
+            self.assertEqual(dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()), track_before)
+            self.assertEqual(dict(db.execute("SELECT * FROM catalog_staged_tracks").fetchone()), provenance_before)
+            self.assertEqual(dict(db.execute("SELECT * FROM catalog_match_decisions").fetchone()), decision_before)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM catalog_root_reassociations").fetchone()[0], 1)
+        self.assertEqual(len(self.corrections()), 1)
+        self.assertEqual(self.catalog_post("scan", request), reply)
+        # A new explicit staging action uses the new indexed location, not the
+        # original provenance path; the existing reviewed track stays untouched.
+        self.assertEqual(self.catalog_post("stage", {**body, "request_id": "restage-after-move"})[0], 200)
+        self.assertEqual((moved / source.name).read_bytes(), server.staged_audio_path(track_before).read_bytes())
+
     def test_scan_http_progress_and_review_save_remain_responsive_during_hashing(self):
         file_hash, review = self.seeded_review()
         folder = Path(self.temporary.name) / "scan-source"
