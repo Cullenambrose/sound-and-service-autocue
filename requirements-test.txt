@@ -1,0 +1,4 @@
+# Lightweight synthetic tests only; no model downloads or AI requests.
+numpy>=1.24,<3
+scipy>=1.10,<2
+mutagen>=1.47,<2

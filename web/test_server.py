@@ -1,4 +1,5 @@
 import base64
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import uuid
 from unittest.mock import patch
 import urllib.error
 import urllib.request
@@ -18,6 +20,132 @@ from web import fixtures, server
 
 
 class WebServerTests(unittest.TestCase):
+    def review_request(self, url, data, **kwargs):
+        body = json.loads(data)
+        with server.connect() as db:
+            revision = db.execute("SELECT review_revision FROM tracks WHERE hash=?",
+                                  (url.rsplit("/", 1)[-1],)).fetchone()[0]
+            body.update(request_id=str(uuid.uuid4()), dataset_id=server.review_store.dataset_id(db),
+                        base_revision=revision)
+        return urllib.request.Request(url, data=json.dumps(body).encode(), **kwargs)
+
+    def corrections(self):
+        with server.connect() as db:
+            return server.review_store.export_events(db)
+
+    def seeded_review(self, name="song.mp3"):
+        source = Path(self.temporary.name) / name
+        source.write_bytes(name.encode())
+        file_hash, _ = server.copy_import(source, source.name)
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps({
+                "grid": {"t1": 0.125, "bar_s": 2}, "cues": {"A": {"bar": 2, "name": "INTRO"}}
+            }), file_hash))
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        return file_hash, self.review_request(base + f"/api/tracks/{file_hash}",
+            data=b'{"cues":{"A":{"name":"INTRO","bar":3}}}', method="PUT",
+            headers={"Content-Type": "application/json", "Origin": base,
+                     "X-AutoCue-Token": server.SESSION_TOKEN})
+
+    def submit_review(self, request):
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            return error.code, json.load(error)
+
+    def test_concurrent_retries_return_one_committed_receipt_and_event(self):
+        file_hash, request = self.seeded_review()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            responses = list(pool.map(self.submit_review, [request] * 16))
+        self.assertTrue(all(status == 200 for status, _ in responses))
+        self.assertTrue(all(receipt == responses[0][1] for _, receipt in responses))
+        receipt = responses[0][1]
+        self.assertEqual(receipt["track_hash"], file_hash)
+        self.assertEqual(receipt["revision"], 2)
+        self.assertEqual(receipt["sequence"], 1)
+        self.assertEqual(len(self.corrections()), 1)
+        server.initialize()
+        self.assertEqual(self.submit_review(request), responses[0])
+
+    def test_concurrent_tracks_keep_every_event_and_receipt(self):
+        requests = [self.seeded_review(f"synthetic-{i}.mp3")[1] for i in range(12)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            responses = list(pool.map(self.submit_review, requests))
+        self.assertEqual([status for status, _ in responses], [200] * 12)
+        events = self.corrections()
+        self.assertEqual([event["sequence"] for event in events], list(range(1, 13)))
+        self.assertEqual(len({event["track_hash"] for event in events}), 12)
+        self.assertEqual(len({event["event_id"] for event in events}), 12)
+
+    def test_stale_review_and_reused_id_cannot_overwrite_corrections(self):
+        file_hash, request = self.seeded_review()
+        body = json.loads(request.data)
+        self.assertEqual(self.submit_review(request)[0], 200)
+        for edit in (
+            {"request_id": str(uuid.uuid4()), "cues": {"A": {"bar": 4}}},
+            {"cues": {"A": {"bar": 4}}},
+            {"dataset_id": "different-library", "request_id": str(uuid.uuid4())},
+        ):
+            request.data = json.dumps({**body, **edit}).encode()
+            status, error = self.submit_review(request)
+            self.assertEqual(status, 409, error)
+        with server.connect() as db:
+            plan = json.loads(db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()[0])
+        self.assertEqual(plan["cues"]["A"]["bar"], 3)
+        self.assertEqual(len(self.corrections()), 1)
+
+    def test_two_tabs_at_same_revision_do_not_silently_overwrite(self):
+        _, request = self.seeded_review()
+        other = urllib.request.Request(request.full_url,
+            data=json.dumps({**json.loads(request.data), "request_id": str(uuid.uuid4()),
+                             "cues": {"A": {"bar": 4}}}).encode(),
+            method="PUT", headers=dict(request.header_items()))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(self.submit_review, [request, other]))
+        self.assertEqual(sorted(status for status, _ in responses), [200, 409])
+        self.assertEqual(len(self.corrections()), 1)
+
+    def test_receipt_failure_rolls_back_events_revision_and_plan_then_retries(self):
+        file_hash, request = self.seeded_review()
+        with server.connect() as db:
+            before = dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone())
+            db.execute("""CREATE TRIGGER reject_receipt BEFORE INSERT ON review_receipts
+                          BEGIN SELECT RAISE(ABORT, 'fixture commit failure'); END""")
+        status, error = self.submit_review(request)
+        self.assertEqual(status, 503)
+        self.assertIn("fixture commit failure", error["error"])
+        self.assertEqual(self.corrections(), [])
+        with server.connect() as db:
+            self.assertEqual(dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()), before)
+            db.execute("DROP TRIGGER reject_receipt")
+        self.assertEqual(self.submit_review(request)[0], 200)
+        self.assertEqual(len(self.corrections()), 1)
+
+    def test_reanalysis_invalidates_old_revision_and_protocol_is_required(self):
+        file_hash, request = self.seeded_review()
+        server._store_plan(file_hash, {"grid": {"t1": 0, "bar_s": 2}, "cues": {}}, "Needs a look")
+        self.assertEqual(self.submit_review(request)[0], 409)
+        body = json.loads(request.data)
+        del body["request_id"]
+        request.data = json.dumps(body).encode()
+        self.assertEqual(self.submit_review(request)[0], 400)
+        self.assertEqual(self.corrections(), [])
+
+    def test_old_receipt_retry_does_not_restore_an_earlier_plan(self):
+        file_hash, first = self.seeded_review()
+        original = self.submit_review(first)
+        next_request = self.review_request(first.full_url,
+            data=b'{"cues":{"A":{"name":"INTRO","bar":4}}}', method="PUT",
+            headers=dict(first.header_items()))
+        self.assertEqual(self.submit_review(next_request)[0], 200)
+        self.assertEqual(self.submit_review(first), original)
+        with server.connect() as db:
+            row = db.execute("SELECT review_revision,plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+        self.assertEqual(row["review_revision"], 3)
+        self.assertEqual(json.loads(row["plan_json"])["cues"]["A"]["bar"], 4)
+        self.assertEqual(len(self.corrections()), 2)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -469,7 +597,7 @@ class WebServerTests(unittest.TestCase):
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
 
         def review(cues):
-            request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+            request = self.review_request(base + f"/api/tracks/{file_hash}",
                 data=json.dumps({"cues": cues}).encode(), method="PUT",
                 headers={"Content-Type": "application/json", "Origin": base,
                          "X-AutoCue-Token": server.SESSION_TOKEN})
@@ -514,7 +642,7 @@ class WebServerTests(unittest.TestCase):
                     "gemini": {"used": True, "baseline": rules, "new_cost_usd": 0.01, "cached": False}}
         server._store_plan(file_hash, assisted, "Cues ready")
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+        request = self.review_request(base + f"/api/tracks/{file_hash}",
             data=json.dumps({"cues": {"D": {"bar": 25, "name": "FIRST DROP"}}}).encode(), method="PUT",
             headers={"Content-Type": "application/json", "Origin": base,
                      "X-AutoCue-Token": server.SESSION_TOKEN})
@@ -539,7 +667,7 @@ class WebServerTests(unittest.TestCase):
         with server.connect() as db:
             db.execute("UPDATE tracks SET plan_json=?,reviewed=1 WHERE hash=?", (json.dumps(plan), file_hash))
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+        request = self.review_request(base + f"/api/tracks/{file_hash}",
             data=json.dumps({"cues": {"B": {"bar": 10, "name": "START"}}}).encode(), method="PUT",
             headers={"Content-Type": "application/json", "Origin": base,
                      "X-AutoCue-Token": server.SESSION_TOKEN})
@@ -593,7 +721,7 @@ class WebServerTests(unittest.TestCase):
         cues = [payload for name, payload in server._marker2_entries(written) if name == "CUE"]
         self.assertTrue(cues[0][12:].startswith(b"LAST CHORUS"))
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+        request = self.review_request(base + f"/api/tracks/{file_hash}",
             data=b'{"cues":{"D":{"name":"LAST CHORUS","bar":"9"}}}', method="PUT",
             headers={"Content-Type": "application/json", "Origin": base,
                      "X-AutoCue-Token": server.SESSION_TOKEN})
@@ -614,7 +742,7 @@ class WebServerTests(unittest.TestCase):
             ))
         url = f"http://127.0.0.1:{self.http.server_address[1]}/api/tracks/{file_hash}"
         payload = json.dumps({"cues": {"A": {"name": "INTRO", "bar": "3.25"}}}).encode()
-        request = urllib.request.Request(url, data=payload, method="PUT", headers={
+        request = self.review_request(url, data=payload, method="PUT", headers={
             "Content-Type": "application/json",
             "Origin": f"http://127.0.0.1:{self.http.server_address[1]}",
             "X-AutoCue-Token": server.SESSION_TOKEN,
@@ -626,7 +754,7 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(row["status"], "Edited by you")
         self.assertEqual(row["reviewed"], 1)
         self.assertEqual(json.loads(row["plan_json"])["cues"]["A"]["bar"], 3.25)
-        events = json.loads((server.DATA / "corrections.json").read_text())
+        events = self.corrections()
         self.assertEqual(events[0]["cue"], "A")
         self.assertEqual(events[0]["action"], "set_here")
         self.assertEqual(events[0]["to_beat"], 13)
@@ -646,7 +774,7 @@ class WebServerTests(unittest.TestCase):
         with server.connect() as db:
             db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}", data=json.dumps({
+        request = self.review_request(base + f"/api/tracks/{file_hash}", data=json.dumps({
             "cues": {"B": {"bar": 8, "name": "START"}, "F": {"bar": 36, "name": "EXIT 1st Chorus"}}
         }).encode(), method="PUT", headers={"Content-Type": "application/json", "Origin": base,
                                            "X-AutoCue-Token": server.SESSION_TOKEN})
@@ -659,7 +787,7 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(saved["answer_key"]["cues"]["B"]["time_s"], 15.094)
         self.assertNotIn("mix_window_evidence", saved)
         self.assertEqual(saved["cues"]["A"]["mix_window_evidence"]["status"], "unverified")
-        events = json.loads((server.DATA / "corrections.json").read_text())
+        events = self.corrections()
         self.assertEqual(events[0]["from_time"], 15.094)
         self.assertEqual(events[0]["to_time"], 15.094)
         server._cue_pads(saved["cues"], saved)
@@ -790,7 +918,7 @@ class WebServerTests(unittest.TestCase):
                                  "H": {"bar": 49.175, "name": "EXIT-END"}}}
                 with server.connect() as db:
                     db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
-                request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+                request = self.review_request(base + f"/api/tracks/{file_hash}",
                     data=json.dumps({"cues": {"A": {"name": "INTRO", "bar": "3.25"},
                                               "H": {"name": "EXIT-END", "bar": "49.175"}}}).encode(),
                     method="PUT", headers={"Content-Type": "application/json", "Origin": base,
@@ -803,7 +931,7 @@ class WebServerTests(unittest.TestCase):
                 expected = 2.1 + 3.25 * 2 - offset / 1000
                 self.assertEqual(server.track_record(row)["offset_ms"], offset)
                 self.assertAlmostEqual(stored["cues"]["A"]["time_s"], expected)
-                events = json.loads((server.DATA / "corrections.json").read_text())[-2:]
+                events = self.corrections()[-2:]
                 self.assertAlmostEqual(events[0]["from_time"], 6.1 - offset / 1000)
                 self.assertAlmostEqual(events[0]["to_time"], expected)
                 self.assertEqual(events[0]["offset_ms"], offset)
@@ -824,7 +952,7 @@ class WebServerTests(unittest.TestCase):
         with server.connect() as db:
             db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+        request = self.review_request(base + f"/api/tracks/{file_hash}",
             data=b'{"cues":{"A":{"name":"INTRO","bar":"3"}}}', method="PUT",
             headers={"Content-Type": "application/json", "Origin": base,
                      "X-AutoCue-Token": server.SESSION_TOKEN})
@@ -866,19 +994,24 @@ class WebServerTests(unittest.TestCase):
         with server.connect() as db:
             db.execute("UPDATE tracks SET plan_json=? WHERE hash=?", (json.dumps(plan), file_hash))
         base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}",
+        request = self.review_request(base + f"/api/tracks/{file_hash}",
             data=b'{"cues":{"A":{"name":"INTRO","bar":"3"}}}', method="PUT",
             headers={"Content-Type": "application/json", "Origin": base,
                      "X-AutoCue-Token": server.SESSION_TOKEN})
-        with patch.object(Path, "write_text", side_effect=OSError("Disk full")):
-            with self.assertRaises(urllib.error.HTTPError) as raised:
-                urllib.request.urlopen(request)
-        self.assertEqual(raised.exception.code, 400)
+        with server.connect() as db:
+            db.execute("""CREATE TRIGGER reject_review BEFORE INSERT ON cue_review_events
+                          BEGIN SELECT RAISE(ABORT, 'Disk full'); END""")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(raised.exception.code, 503)
         self.assertIn("Disk full", json.loads(raised.exception.read())["error"])
         with server.connect() as db:
             row = db.execute("SELECT plan_json,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         self.assertEqual(json.loads(row["plan_json"]), plan)
         self.assertFalse(row["reviewed"])
+        self.assertEqual(self.corrections(), [])
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM review_receipts").fetchone()[0], 0)
         self.assertFalse((server.DATA / "corrections.json").exists())
 
     def test_state_changing_request_requires_local_session_token(self):
@@ -1018,7 +1151,7 @@ class WebServerTests(unittest.TestCase):
         self.assertTrue(public["cues"]["B"]["unsnapped"])
         edits = {slot: {"name": cue["name"], "bar": cue["bar"]} for slot, cue in public["cues"].items()}
         edits["F"]["bar"] = 36
-        request = urllib.request.Request(base + f"/api/tracks/{file_hash}", data=json.dumps({"cues": edits}).encode(),
+        request = self.review_request(base + f"/api/tracks/{file_hash}", data=json.dumps({"cues": edits}).encode(),
                                         method="PUT", headers={"Content-Type": "application/json", "Origin": base,
                                                               "X-AutoCue-Token": server.SESSION_TOKEN})
         with urllib.request.urlopen(request) as response:
@@ -1032,7 +1165,7 @@ class WebServerTests(unittest.TestCase):
             saved = json.loads(db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()[0])
         self.assertEqual(saved["answer_key"]["cues"]["B"]["time_s"], 15.094)
         self.assertEqual(saved["variants"]["baseline"], baseline)
-        corrections = json.loads((server.DATA / "corrections.json").read_text())
+        corrections = self.corrections()
         self.assertEqual(next(event["to_time"] for event in corrections if event["cue"] == "B"), 15.094)
         before_audio = serato_writer.mp3_audio_sha256(song)
         with patch.object(server.Path, "home", return_value=home), \

@@ -131,7 +131,7 @@
       </div>
     </section>
     <div class="cue-edit-list" id="cue-edit-list"></div>
-    <div class="review-actions"><span id="review-state" class="muted" role="status">Edits stay local until you save.</span><button id="prev-track" class="button secondary" title="Previous track">‹ Prev</button><button id="next-track" class="button secondary" title="Next track (checks for unsaved edits)">Next ›</button><button id="save-next" class="button secondary" title="Save this review, then open the next track">Save &amp; next</button><button id="save-cues" class="button primary">Save review</button></div>
+    <div class="review-actions"><span id="review-state" class="muted" role="status" aria-live="polite">Edits stay local until you save.</span><button id="download-review-draft" class="button secondary">Download draft</button><button id="prev-track" class="button secondary" title="Previous track">‹ Prev</button><button id="next-track" class="button secondary" title="Next track (checks for unsaved edits)">Next ›</button><button id="save-next" class="button secondary" title="Save this review, then open the next track">Save &amp; next</button><button id="save-cues" class="button primary">Save review</button></div>
   </dialog>
   <dialog id="unsaved-review-dialog" class="settings-dialog" aria-labelledby="unsaved-review-title">
     <div class="dialog-head"><h2 id="unsaved-review-title">Unsaved cue edits</h2></div>
@@ -188,6 +188,7 @@
     <div class="dialog-foot"><span>Missing files are disabled and will be skipped.</span><button id="process-crate" class="button primary">Process selected songs</button></div>
   </dialog>
   <script src="/timing.js"></script>
+  <script src="/review-state.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

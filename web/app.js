@@ -6,6 +6,7 @@ let tracks = [], selected = new Set(), activeTrack = null, activeJob = null, sou
 let eventSource;
 let lastCompletedJob = "";
 let sessionToken;
+let datasetId, reviewDraft = null, reviewSaveError = "";
 let cueMapSettings = null, cueMapCatalog = null, activeCueMap = "VOCAL";
 let reviewSaved = "", reviewSaving = false, reviewLeaveResolve = null;
 let eventReviewSaving = false;
@@ -16,6 +17,7 @@ async function api(url, options = {}) {
     const session = await sessionResponse.json();
     if (!sessionResponse.ok) throw new Error(session.error || "Could not establish local session.");
     sessionToken = session.token;
+    datasetId = session.dataset_id;
   }
   options.headers = {...options.headers, "X-AutoCue-Token":sessionToken};
   const response = await fetch(url, options);
@@ -277,6 +279,21 @@ async function openReview(hash) {
   }
   if (!$("#review-dialog").open) $("#review-dialog").showModal();
   reviewSaved = JSON.stringify(reviewSnapshot());
+  reviewSaveError = "";
+  reviewDraft = null;
+  try {
+    reviewDraft = new AutoCueReview.ReviewDraft(localStorage, datasetId, hash,
+      track.review_revision, () => crypto.randomUUID());
+    if (reviewDraft.record.cues) {
+      for (const [slot, cue] of Object.entries(reviewDraft.record.cues)) {
+        const name = $(`.cue-name[data-slot="${slot}"]`), bar = $(`.cue-bar[data-slot="${slot}"]`);
+        if (name && bar) { name.value = cue.name; bar.value = cue.bar ?? ""; }
+      }
+      toast("Recovered local review draft. Save to retry, or compare with the saved review before discarding.");
+    }
+  } catch (error) {
+    reviewSaveError = `Draft recovery unavailable: ${error.message}. Keep this window open or download the draft.`;
+  }
   updateReviewState();
   updateNavButtons();
   renderVariantPanel(activeTrack);
@@ -913,11 +930,16 @@ function reviewSnapshot() {
   return cues;
 }
 function reviewHasChanges() {
-  return $("#review-dialog").open && JSON.stringify(reviewSnapshot()) !== reviewSaved;
+  return $("#review-dialog").open &&
+    (Boolean(reviewDraft?.record.pending) || JSON.stringify(reviewSnapshot()) !== reviewSaved);
 }
 function updateReviewState() {
+  if (reviewHasChanges() && reviewDraft && !reviewSaving) {
+    try { reviewDraft.save(reviewSnapshot()); }
+    catch (error) { reviewSaveError = `Browser draft backup failed: ${error.message}. Keep this window open or download the draft.`; }
+  }
   $("#review-state").textContent = reviewSaving ? "Saving review..." :
-    reviewHasChanges() ? "Unsaved changes" : "Edits stay local until you save.";
+    reviewSaveError || (reviewHasChanges() ? "Unsaved changes · draft kept in this browser" : "Edits stay local until you save.");
 }
 function setReviewBusy(busy) {
   reviewSaving = busy;
@@ -940,6 +962,10 @@ async function confirmReviewLeave() {
     $("#unsaved-review-dialog").showModal();
   });
   if (choice === "save") return persistReview();
+  if (choice === "discard") {
+    try { reviewDraft?.clear(); }
+    catch (error) { reviewSaveError = `Could not discard draft: ${error.message}`; updateReviewState(); return false; }
+  }
   return choice === "discard";
 }
 async function closeReview() {
@@ -950,13 +976,31 @@ async function persistReview() {
   const track = activeTrack, cues = reviewSnapshot();
   setReviewBusy(true);
   try {
-    await api(`/api/tracks/${track.hash}`, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({cues,map_type:track.map_type})});
+    if (!reviewDraft) throw new Error("Browser draft storage is unavailable. Download your draft before leaving.");
+    // Resolve an ambiguous earlier save using exactly its original request first.
+    let sent;
+    do {
+      sent = reviewDraft.prepare(cues, track.map_type);
+      const receipt = await api(`/api/tracks/${track.hash}`, {
+        method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(sent),
+      });
+      if (Number.isInteger(receipt.revision) && receipt.revision < track.review_revision) {
+        throw new Error("That request committed earlier, but a newer review is saved. Download this draft and compare before discarding it.");
+      }
+      reviewDraft.accept(receipt, cues);
+      track.review_revision = receipt.revision;
+    } while (JSON.stringify(sent.cues) !== JSON.stringify(cues));
+    reviewDraft.clear();
+    reviewSaveError = "";
     reviewSaved = JSON.stringify(cues);
     for (const [slot, cue] of Object.entries(cues)) track.cues[slot] = {...track.cues[slot], ...cue};
     track.edited = true; track.reviewed = true;
     selected.add(track.hash); toast("Review saved. Cue edits are local."); await reload();
     return true;
-  } catch (error) { toast(error.message); return false; }
+  } catch (error) {
+    reviewSaveError = `Not saved: ${error.message} Your draft is retained. Save again to retry; download it before discarding a conflict.`;
+    toast(reviewSaveError); return false;
+  }
   finally { setReviewBusy(false); }
 }
 async function saveReview(advance = false) {
@@ -964,6 +1008,15 @@ async function saveReview(advance = false) {
   if (reviewLeaveResolve || !(await persistReview())) return;
   if (next) await openReview(next.hash);
   else $("#review-dialog").close();
+}
+function downloadReviewDraft() {
+  const blob = new Blob([JSON.stringify({
+    dataset_id: datasetId, track_hash: activeTrack.hash,
+    draft: reviewDraft?.record, cues: reviewSnapshot(),
+  }, null, 2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob), link = document.createElement("a");
+  link.href = url; link.download = `review-draft-${activeTrack.hash}.json`; link.click();
+  URL.revokeObjectURL(url);
 }
 async function openSettings() {
   const data=await api("/api/settings");$("#gemini-toggle").checked=data.gemini==="true";$("#strictness").value=data.strictness||"standard";
@@ -1154,6 +1207,7 @@ $("#cue-map-copy").onclick=()=>{
   toast(`Copied ${activeCueMap==="VOCAL"?"vocal":"electronic"} cue settings to the ${other==="VOCAL"?"vocal":"electronic"} map.`);
 };
 $("#save-cues").onclick=()=>saveReview();$("#save-next").onclick=()=>saveReview(true);$("#next-track").onclick=()=>{const t=neighborTrack(1);if(t)openReview(t.hash)};$("#prev-track").onclick=()=>{const t=neighborTrack(-1);if(t)openReview(t.hash)};$("#write-reviewed").onclick=writeReviewed;
+$("#download-review-draft").onclick=downloadReviewDraft;
 $("#add-event-label").onclick=()=>addEventLabel();$("#save-event-review").onclick=()=>saveEventReviewState();
 $("#sound-toggle").onclick=()=>{soundOn=!soundOn;$("#sound-toggle").textContent=`Sound: ${soundOn?"On":"Off"}`};
 $("#finder-button").onclick=async()=>{try{await api(`/api/finder/${activeTrack.hash}`,{method:"POST"});toast("Showing original file in Finder.")}catch(error){toast(error.message)}};

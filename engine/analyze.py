@@ -22,6 +22,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
+from project_config import project_path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -52,10 +53,8 @@ class AnalyzerMissing(RuntimeError):
 
 
 def cache_root():
-    override = os.environ.get("AUTOCUE_CACHE_DIR")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / "AutoCue" / "cache"
+    return project_path("cache_dir", "AUTOCUE_CACHE_DIR",
+                        Path.home() / "Library" / "Application Support" / "AutoCue" / "cache")
 
 
 def file_hash(path):

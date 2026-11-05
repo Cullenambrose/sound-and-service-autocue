@@ -1,5 +1,9 @@
 # AutoCue status (as of 2026-10-15 ~9:45 PM PT)
 
+> Historical research status below. For the November 4, 2026 personal DJ app
+> foundation, supported implementation, verification and next steps, read
+> [FOUNDATION.md](FOUNDATION.md) and the current [README](../README.md).
+
 ## What this is
 
 Proof-stage library-prep engine for Sound & Service. Lives in this private repo. Not yet a Mac app; not yet writing cues into Serato production files.

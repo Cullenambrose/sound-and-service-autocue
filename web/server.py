@@ -31,9 +31,11 @@ from serato_tags import (
 )
 import serato_tags
 import serato_writer
+import review_store
+from project_config import project_path
 
 WEB = Path(__file__).resolve().parent
-DATA = Path(os.environ.get("AUTOCUE_WEB_DATA", ROOT / "web-data")).expanduser().resolve()
+DATA = project_path("data_dir", "AUTOCUE_WEB_DATA", ROOT / "web-data")
 UPLOADS = DATA / "audio"
 DB_PATH = DATA / "library.sqlite3"
 ALLOWED = {".wav", ".mp3", ".m4a", ".flac", ".aiff", ".aif", ".ogg", ".opus"}
@@ -186,6 +188,8 @@ def initialize():
         ):
             if name not in columns:
                 db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {declaration}")
+        db.commit()
+        review_store.initialize(db, DATA / "corrections.json")
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
         for row in db.execute("SELECT hash,audio_path,error FROM tracks").fetchall():
             previous = "\n".join(line for line in (row["error"] or "").splitlines()
@@ -214,6 +218,7 @@ def track_record(row):
     names = _slot_names(plan.get("map_type", "VOCAL"))
     return {
         "hash": row["hash"],
+        "review_revision": row["review_revision"],
         "name": row["name"],
         "relative_path": row["relative_path"],
         "source_available": bool(row["source_path"] and Path(row["source_path"]).is_file()),
@@ -1171,7 +1176,9 @@ def _store_plan(file_hash, plan, status):
     """Save a new plan. A reviewed song keeps its reviewed cues as the answer key for scoring."""
     experiments = _experiments_module()
     plan["variants"] = experiments.scoring_variants(plan)
+    plan["analysis_id"] = review_store.analysis_id(file_hash, plan)
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         old = db.execute("SELECT plan_json,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         if old and old["plan_json"]:
             previous = json.loads(old["plan_json"])
@@ -1351,7 +1358,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/session":
             if not self._valid_origin():
                 return json_response(self, {"error": "Request rejected: local origin required."}, 403)
-            return json_response(self, {"token": SESSION_TOKEN})
+            with connect() as db:
+                identity = review_store.dataset_id(db)
+            return json_response(self, {"token": SESSION_TOKEN, "dataset_id": identity})
         if parsed.path == "/api/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1383,12 +1392,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(WEB / "app.js", "text/javascript; charset=utf-8")
         if parsed.path == "/timing.js":
             return self._static(WEB / "timing.js", "text/javascript; charset=utf-8")
+        if parsed.path == "/review-state.js":
+            return self._static(WEB / "review-state.js", "text/javascript; charset=utf-8")
         if parsed.path == "/style.css":
             return self._static(WEB / "style.css", "text/css; charset=utf-8")
         if parsed.path == "/api/library":
             with connect() as db:
                 rows = db.execute("SELECT * FROM tracks ORDER BY imported_at DESC").fetchall()
             return json_response(self, {"tracks": [track_record(row) for row in rows]})
+        if parsed.path == "/api/corrections":
+            with connect() as db:
+                return json_response(self, review_store.export_events(db))
         if parsed.path.startswith("/api/tracks/") and parsed.path.endswith("/event-review"):
             file_hash = parsed.path.split("/")[-2]
             if not _valid_track_hash(file_hash):
@@ -1777,6 +1791,7 @@ class Handler(BaseHTTPRequestHandler):
                 if choice not in ("AUTO", "DROP", "VOCAL"):
                     raise ValueError("Map must be Auto, Drop, or Vocal.")
                 with connect() as db:
+                    db.execute("BEGIN IMMEDIATE")
                     row = db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()
                     if not row:
                         raise ValueError("Track not found.")
@@ -1851,13 +1866,31 @@ class Handler(BaseHTTPRequestHandler):
         file_hash = parsed.path.rsplit("/", 1)[-1]
         try:
             body = self._body_json()
+            if not isinstance(body, dict) or not isinstance(body.get("cues"), dict) or not body["cues"]:
+                raise ValueError("Review must contain a nonempty cues object.")
+            request_id = body.get("request_id")
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+                raise ValueError("Invalid review request ID.")
+            request = {"track_hash": file_hash, "body": body}
             with connect() as db:
-                row = db.execute("SELECT plan_json,audio_path,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                db.execute("BEGIN IMMEDIATE")
+                if body.get("dataset_id") != review_store.dataset_id(db):
+                    raise review_store.ReviewConflict("Dataset changed. Your draft has not been applied.")
+                if type(body.get("base_revision")) is not int or body["base_revision"] < 0:
+                    raise ValueError("A nonnegative integer base_revision is required.")
+                receipt = review_store.replay(db, request_id, request)
+                if receipt:
+                    return json_response(self, receipt)
+                row = db.execute("SELECT plan_json,audio_path,reviewed,review_revision FROM tracks WHERE hash=?", (file_hash,)).fetchone()
                 if not row:
                     return json_response(self, {"error": "Track not found"}, 404)
+                if body["base_revision"] != row["review_revision"]:
+                    raise review_store.ReviewConflict(
+                        "Review changed on the server. Keep this draft and reopen the track to compare before saving.")
                 plan = json.loads(row["plan_json"]) if row["plan_json"] else {
                     "map_type": body.get("map_type", "VOCAL"), "cues": {},
                 }
+                plan.setdefault("analysis_id", review_store.analysis_id(file_hash, plan))
                 fallback_names = _slot_names(plan.get("map_type", "VOCAL"))
                 grid = plan.get("grid", {})
                 if grid.get("t1") is None or not grid.get("bar_s"):
@@ -1873,13 +1906,15 @@ class Handler(BaseHTTPRequestHandler):
                 events = []
                 t1, bar_s = grid.get("t1"), grid.get("bar_s")
                 for slot, edit in body.get("cues", {}).items():
-                    if slot not in "ABCDEFGH":
+                    if slot not in set("ABCDEFGH") or not isinstance(edit, dict):
                         raise ValueError("Unknown cue slot: " + slot)
                     cue = plan.setdefault("cues", {}).setdefault(slot, {})
                     old_name, old_bar = cue.get("name"), cue.get("bar")
                     old_time = None if old_bar is None else serato_writer.cue_time_s(cue, grid)
                     new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names,
                                          preserve_custom=bool(plan.get("cue_map")))[:80]
+                    if isinstance(edit.get("bar"), bool):
+                        raise ValueError("Cue bar must be a number, not a boolean.")
                     new_bar = float(edit["bar"]) if edit.get("bar") not in (None, "") else None
                     earliest = min(0, math.ceil(time_to_bar(0, grid) - 1e-6))
                     if new_bar is not None and (not math.isfinite(new_bar) or new_bar < earliest):
@@ -1900,6 +1935,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
                     events.append({
                         "track": file_hash, "track_hash": file_hash,
+                        "analysis_id": plan["analysis_id"],
                         "file": Path(row["audio_path"]).name, "cue": slot,
                         "name": new_name,
                         "action": "clear" if new_bar is None else
@@ -1923,16 +1959,13 @@ class Handler(BaseHTTPRequestHandler):
                 status = "Edited by you" if changed else "Cues ready"
                 db.execute("UPDATE tracks SET plan_json=?,status=?,edited=?,reviewed=1 WHERE hash=?",
                            (json.dumps(plan, ensure_ascii=False), status, int(changed), file_hash))
-                correction_path = DATA / "corrections.json"
-                corrections = []
-                if correction_path.is_file():
-                    with open(correction_path, encoding="utf-8") as source:
-                        corrections = json.load(source)
-                corrections.extend(events)
-                temporary = correction_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(corrections, ensure_ascii=False, indent=2), encoding="utf-8")
-                os.replace(temporary, correction_path)
-            return json_response(self, {"ok": True})
+                receipt = review_store.acknowledge(db, request_id, request, file_hash, events)
+            return json_response(self, receipt)
+        except review_store.ReviewConflict as error:
+            return json_response(self, {"error": str(error)}, 409)
+        except sqlite3.Error as error:
+            self.log_error("Review transaction failed: %s", error)
+            return json_response(self, {"error": "Review was not saved: " + str(error)}, 503)
         except (ValueError, TypeError, OSError, json.JSONDecodeError) as error:
             return json_response(self, {"error": str(error)}, 400)
 

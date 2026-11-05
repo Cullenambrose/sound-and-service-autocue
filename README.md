@@ -1,5 +1,13 @@
 # Sound & Service AutoCue
 
+**Personal DJ app foundation (November 4, 2026):** the supported app is
+`web/server.py` with the Python `engine/analyze.py` worker, launched by `./run.sh`.
+Cue review saves now use a transactional SQLite journal, idempotent receipts,
+revision conflicts and recoverable browser drafts. Start with the
+[foundation handoff](docs/FOUNDATION.md) for configuration, migration, tests,
+known limits and the next milestone. Historical `review-ui/` is not a supported
+way to collect new corrections.
+
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)
 for the measured sample, remaining gates, and local review instructions.
@@ -109,6 +117,11 @@ config/           Learned profiles + genre bucket params (no keys)
 ```
 
 Open `http://127.0.0.1:8770`. The app keeps its SQLite library, staged audio copies, jobs, and corrections in the ignored `web-data/` directory. It binds only to loopback. Music is not uploaded; dragged/picked files are copied to the local app for analysis and their originals are left in place. Paste a local folder path or use the crate picker to link originals for Finder access and Serato writes.
+
+Before the first updated launch, stop the server and back up the whole data
+directory. Existing correction JSON is imported once and left unchanged; new
+corrections live in SQLite and can be retrieved from `/api/corrections`.
+See the [save and recovery contract](docs/FOUNDATION.md#save-and-recovery-contract).
 
 To move the local library, stop the server and copy the **whole** `web-data/` directory,
 then set `AUTOCUE_WEB_DATA` to its new location before restarting. Staged audio is stored as

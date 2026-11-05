@@ -1,4 +1,4 @@
-"""Correction learner. Truth = Cullen's Serato cues, overridden per cue by review-page corrections (corrections.json) when present.
+"""Historical correction learner. Truth comes only from confirmed review marks, never Mixed In Key tags.
 Learns per cue and per song group the bar offset (truth - engine) and keeps a rule only when leave-one-out scoring says it helps.
 Writes ../learned_profile_marks.json (loaded by rules_v2) and ../learn_loo_marks.json (per-song LOO picks for scoring)."""
 import json, os, re, sys, statistics as stt
@@ -79,11 +79,10 @@ def tune_buckets(min_marks=8):
     per track+cue, within 1 beat). A bucket's value changes only when it has >= min_marks marks AND strictly beats the default.
     Writes ../genre_params_v5.tuned.json (use with rules_v5.py --config). The default file is never overwritten."""
     import glob, itertools, rules_v5 as V5
-    ev = []
-    for f in sorted(glob.glob(f"{R}/corrections/corrections*.json")): ev += json.load(open(f))
-    last = {}
-    for e in ev:
-        if e.get("cue") in list("ABCDGH") and e.get("action") in ("correct", "set_here") and e.get("to_beat") is not None: last[(e["track"], e["cue"])] = e["to_beat"]
+    import marks
+    last = {key: beat for key, beat in marks.truth_beats(
+        marks.events(sorted(glob.glob(f"{R}/corrections/corrections*.json")))).items()
+        if key[1] in "ABCDGH"}
     cfg = json.load(open(f"{R}/genre_params_v5.json")); grid = {"exit_phrase_bars": [4, 8], "exit_snap_radius": [1, 2], "chorus_sim_thr": [0.7, 0.8, 0.9], "drop_frac": [0.15, 0.25, 0.35]}
     songs = sorted({k[0] for k in last}); on = lambda f: True; byb = {}
     for nn in songs: byb.setdefault(V5.bucket(V5.Song(R, nn))[0], []).append(nn)
