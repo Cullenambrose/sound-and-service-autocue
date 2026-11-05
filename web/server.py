@@ -32,6 +32,7 @@ from serato_tags import (
 import serato_tags
 import serato_writer
 import review_store
+import autocue_worker
 from project_config import project_path
 
 WEB = Path(__file__).resolve().parent
@@ -1150,8 +1151,7 @@ def waveform_peaks(file_hash, points=900):
     return {"peaks": [round(float(value) / top, 3) for value in trimmed], "duration": len(peak) / 50}
 
 
-def process_builtin(row, settings, map_override=None):
-    analyze = _analysis_import()
+def process_builtin(row, settings, map_override=None, cancelled=None):
     _live_reset(row)
     audio_path = str(staged_audio_path(row))
     artist, title, genre = _tags(audio_path)
@@ -1161,13 +1161,20 @@ def process_builtin(row, settings, map_override=None):
     if map_override in ("DROP", "VOCAL"):
         cue_maps["mode"] = map_override
 
-    def progress(step, state, detail):
-        LIVE["steps"][step] = state
-        LIVE["detail"] = detail or LIVE["detail"]
+    def progress(message):
+        if message["kind"] == "progress":
+            event = message["data"]
+            LIVE["steps"][event["step"]] = message["status"]
+            LIVE["detail"] = event["detail"] or LIVE["detail"]
 
-    plan = analyze.analyze(audio_path, artist, title, genre, progress, cue_maps=cue_maps,
-                           experiments=_enabled_experiments(settings),
-                           gemini=settings.get("gemini") == "true")
+    result = autocue_worker.run({
+        "schema_version": 1, "job_id": str(uuid.uuid4()), "profile": "local",
+        "source": audio_path, "track_hash": row["hash"],
+        "artist": artist, "title": title, "genre": genre, "cue_maps": cue_maps,
+        "experiments": _enabled_experiments(settings), "allow_lyrics": True,
+        "gemini": settings.get("gemini") == "true",
+    }, progress, cancelled)
+    plan = result["plan"]
     LIVE["cues_found"] = [slot for slot, cue in plan["cues"].items() if cue.get("bar") is not None]
     return plan
 
@@ -1191,7 +1198,7 @@ def _store_plan(file_hash, plan, status):
                    (json.dumps(plan, ensure_ascii=False), status, file_hash))
 
 
-def process_track(file_hash):
+def process_track(file_hash, cancelled=None):
     with connect() as db:
         row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         settings = {item["key"]: item["value"] for item in db.execute("SELECT * FROM settings")}
@@ -1202,7 +1209,7 @@ def process_track(file_hash):
         try:
             previous = json.loads(row["plan_json"]) if row["plan_json"] else {}
             override = previous.get("map_override")
-            plan = process_builtin(row, settings, override)
+            plan = process_builtin(row, settings, override, cancelled)
             if override:
                 plan["map_override"] = override
         except Exception as error:
@@ -1212,6 +1219,8 @@ def process_track(file_hash):
         threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
             settings.get("strictness", "standard"), 0.6)
         low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
+        if cancelled and cancelled():
+            raise autocue_worker.analyze.AnalysisCancelled("Analysis cancelled before saving the plan.")
         _store_plan(file_hash, plan, "Needs a look" if low else "Cues ready")
         return
     import shlex
@@ -1241,6 +1250,8 @@ def process_track(file_hash):
         plan = json.load(stream)
     if not isinstance(plan.get("cues"), dict):
         raise RuntimeError("Processor output must contain a cues object.")
+    if cancelled and cancelled():
+        raise autocue_worker.analyze.AnalysisCancelled("Cancelled before storing external processor output.")
     threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
         settings.get("strictness", "standard"), 0.6)
     low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
@@ -1291,7 +1302,11 @@ def worker():
                     _update_job(job_id, status="cancelled", completed=done, message="Cancelled")
                     break
                 try:
-                    process_track(file_hash)
+                    process_track(file_hash, cancelled=lambda: job_id in cancelled_jobs)
+                except autocue_worker.analyze.AnalysisCancelled:
+                    _update_job(job_id, status="cancelled", completed=done,
+                                message="Cancelled; the active track was not saved")
+                    break
                 except Exception as error:
                     with connect() as db:
                         db.execute("UPDATE tracks SET error=? WHERE hash=?", (str(error), file_hash))

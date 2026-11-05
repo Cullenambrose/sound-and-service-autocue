@@ -8,6 +8,21 @@ revision conflicts and recoverable browser drafts. Start with the
 known limits and the next milestone. Historical `review-ui/` is not a supported
 way to collect new corrections.
 
+The supported worker now has an installable Python package and versioned JSONL
+job contract. Run a generated, offline fixture without model packages:
+
+```bash
+python3 -m venv /path/to/disposable-worker-env
+/path/to/disposable-worker-env/bin/python -m pip install .
+/path/to/disposable-worker-env/bin/autocue-worker check
+/path/to/disposable-worker-env/bin/autocue-worker fixture --out /tmp/autocue-fixture-result.json
+```
+
+This fixture uses declared beat observations, **not model inference or musical
+accuracy evidence**. See the [worker handoff](docs/WORKER.md) for request/result
+schemas, optional analyzers, cache isolation, cancellation and verification.
+The wheel packages the worker, not the web app or historical research tools.
+
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)
 for the measured sample, remaining gates, and local review instructions.

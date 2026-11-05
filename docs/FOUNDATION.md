@@ -140,7 +140,8 @@ Malformed or missing configured files fail explicitly. The shared marks loader
 requires explicit paths or `research_root` / `AUTOCUE_RESEARCH_ROOT`; it no longer
 silently reads an old `/workspace` tree.
 
-This begins path configuration, not complete engine packaging. Many historical
+This begins path configuration; the supported worker is now packaged separately
+(see [the worker handoff](WORKER.md)). Many historical
 research scripts still embed their original paths and import-time execution.
 Do not run those supervisors, paid Gemini scripts or Google handover writers as
 part of the supported workflow.
@@ -172,7 +173,7 @@ checked against a disposable synthetic library: a response deliberately dropped
 after commit showed a persistent failure, reload recovered the edits, and retry
 cleared the draft without adding journal events.
 
-Final local results: **330 engine cases, 49 server cases and 25 Node cases
+Foundation milestone local results: **330 engine cases, 49 server cases and 25 Node cases
 passed** in the existing environment. In a separate clean Python 3.10 virtual
 environment installed only from `requirements-test.txt`, the engine suite passed
 with three optional model-compatibility checks skipped, and all 49 server cases
@@ -195,9 +196,17 @@ requirement for waveform tests before finalizing CI.
 - No production database was migrated during development. Back up before the
   first real launch; do not use the historical server concurrently.
 
-**Next concrete milestone: package the supported Python worker.** Add a root
-project/dependency contract with optional analyzer groups, versioned worker
-messages/provenance, isolated job/cache paths and a reproducible one-fixture CLI.
-Preserve the synthetic baseline and keep AI disabled. Then implement catalog
-snapshot import, selected-folder indexing and exact-version match decisions
-before adding a desktop shell or AI chat.
+**Worker milestone:** implemented the root dependency/package contract,
+versioned messages and provenance, per-track locks, unique job workspaces,
+atomic cache/result replacement, cooperative cancellation and an offline
+one-fixture CLI. The web built-in processor now uses the same worker function.
+See [WORKER.md](WORKER.md) for implementation boundaries, verification and resume
+instructions; the original synthetic cue baseline remains unchanged.
+
+**Next concrete milestone: catalog snapshots and exact-version matching.**
+Start with a synthetic catalog import and a selected-folder, read-only library
+index. Keep catalog song/version identities separate from exact-file hashes;
+persist explicit exact/ambiguous/missing match decisions. Do not select a remix,
+clean/explicit version or intro edit from title similarity alone. Build a review
+surface for those decisions before editable personal crates, verified playlist
+export, a desktop shell or AI chat.

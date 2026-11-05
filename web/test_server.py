@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -386,7 +387,7 @@ class WebServerTests(unittest.TestCase):
                 patch.object(server, "_tags", return_value=("", "", "")) as tags:
             os.environ.pop("AUTOCUE_PROCESSOR", None)
             server.process_track(file_hash)
-        self.assertEqual(run.call_args.args[0], expected)
+        self.assertEqual(str(run.call_args.args[0]), expected)
         tags.assert_called_once_with(expected)
 
         def external(argv, **kwargs):
@@ -398,6 +399,75 @@ class WebServerTests(unittest.TestCase):
                 patch.object(subprocess, "run", side_effect=external) as run:
             server.process_track(file_hash)
         self.assertEqual(run.call_count, 1)
+
+    def test_cancelled_analysis_preserves_reviewed_track_and_source_for_both_processors(self):
+        file_hash, _ = self.seeded_review()
+        with server.connect() as db:
+            db.execute("UPDATE tracks SET reviewed=1,edited=1,error='previous error' WHERE hash=?", (file_hash,))
+            before = dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone())
+        source = server.staged_audio_path(before)
+        original = source.read_bytes()
+        for external in (False, True):
+            stop = threading.Event()
+
+            def built_in(*args):
+                stop.set()
+                return {"cues": {}}
+
+            def custom(argv, **kwargs):
+                stop.set()
+                Path(argv[2]).write_text('{"cues":{}}')
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with self.subTest(external=external), \
+                    patch.dict(os.environ, {"AUTOCUE_PROCESSOR": 'fake "{input}" "{output}"'} if external else {}), \
+                    patch.object(server, "process_builtin", side_effect=built_in), \
+                    patch.object(subprocess, "run", side_effect=custom):
+                if not external:
+                    os.environ.pop("AUTOCUE_PROCESSOR", None)
+                with self.assertRaises(server.autocue_worker.analyze.AnalysisCancelled):
+                    server.process_track(file_hash, stop.is_set)
+            with server.connect() as db:
+                self.assertEqual(dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()), before)
+            self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(self.corrections(), [])
+
+    def test_cancelled_active_job_does_not_count_track_completed_or_save_error(self):
+        file_hash, _ = self.seeded_review()
+        with server.connect() as db:
+            db.execute("INSERT INTO jobs(id,status,track_hashes,completed,created_at,updated_at,message) "
+                       "VALUES('cancel-test','queued',?,0,1,1,'queued')", (json.dumps([file_hash]),))
+            before = dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone())
+        jobs = queue.Queue()
+        jobs.put("cancel-test")
+        get = jobs.get
+        calls = 0
+
+        def next_job():
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise StopIteration
+            return get()
+
+        def cancel_track(track, cancelled):
+            self.assertEqual(track, file_hash)
+            self.assertFalse(cancelled())
+            server.cancelled_jobs.add("cancel-test")
+            self.assertTrue(cancelled())
+            raise server.autocue_worker.analyze.AnalysisCancelled("Synthetic cancellation")
+
+        with patch.object(server, "worker_queue", jobs), patch.object(jobs, "get", side_effect=next_job), \
+                patch.object(server, "process_track", side_effect=cancel_track):
+            with self.assertRaises(StopIteration):
+                server.worker()
+        with server.connect() as db:
+            job = db.execute("SELECT * FROM jobs WHERE id='cancel-test'").fetchone()
+            self.assertEqual(job["status"], "cancelled")
+            self.assertEqual(job["completed"], 0)
+            self.assertEqual(dict(db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()), before)
+        self.assertEqual(jobs.unfinished_tasks, 0)
+        self.assertNotIn("cancel-test", server.cancelled_jobs)
 
     def test_library_exposes_outro_evidence_and_cue_warnings_for_review(self):
         source = Path(self.temporary.name) / "song.mp3"

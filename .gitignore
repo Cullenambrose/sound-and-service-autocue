@@ -66,6 +66,8 @@ venv-*/
 .venv/
 env/
 *.egg-info/
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

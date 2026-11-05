@@ -6,6 +6,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def engine_config():
+    checkout = ROOT / "config" / "genre_params_v6.json"
+    if checkout.is_file():
+        return checkout
+    from importlib.resources import files
+    return Path(str(files("autocue_config").joinpath("genre_params_v6.json")))
+
+
 def project_path(key, environment, default=None):
     config_file = os.environ.get("AUTOCUE_PROJECT")
     values = {}

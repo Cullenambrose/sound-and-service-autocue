@@ -197,9 +197,9 @@ def _roformer(context):
     paths = context.get("paths")
     if paths is None or context.get("decoded_wav") is None:
         raise Unavailable("no decoded audio to separate")
-    target = paths.root / "work" / "roformer_vocals.wav"
+    target = paths.work / "roformer_vocals.wav"
     if not target.exists():
-        output = paths.root / "work" / "roformer"
+        output = paths.work / "roformer"
         output.mkdir(parents=True, exist_ok=True)
         done = subprocess.run([command, str(context["decoded_wav"]), "--model_filename", ROFORMER_MODEL,
                                "--single_stem", "Vocals", "--output_format", "WAV", "--output_dir", str(output),
