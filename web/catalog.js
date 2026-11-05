@@ -137,6 +137,7 @@
       const song = item.song;
       return `<article class="catalog-song" data-catalog-search="${escapeHtml(`${song.artist} ${song.title} ${song.version || ""}`.toLowerCase())}">
         <h4>${index + 1}. ${escapeHtml(song.artist)} — ${escapeHtml(song.title)} ${escapeHtml(song.version || "")}</h4>
+        ${(song.source_warnings || []).map(warning => `<p class="catalog-error">${escapeHtml(warning)}</p>`).join("")}
         <p class="muted">Source ID ${escapeHtml(song.id)} · ${escapeHtml(item.state)}${item.decision ? ` · reviewed revision ${item.revision} · ${escapeHtml(item.decision.note)}` : " · no reviewed file selection"} · BPM ${escapeHtml(song.bpm ?? "unknown")} · Key ${escapeHtml(song.key ?? "unknown")}</p>
         ${item.selected_file ? `<p class="muted">Reviewed file: ${escapeHtml(item.selected_file.path)} · ${escapeHtml(item.selected_file.state)} · SHA-256 ${escapeHtml(item.decision.content_hash)}</p>` : ""}
         <div class="path-row">

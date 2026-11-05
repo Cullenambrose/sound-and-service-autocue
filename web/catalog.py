@@ -125,8 +125,8 @@ def validate_snapshot(document):
             if not isinstance(song, dict):
                 raise ValueError("Each song must be an object.")
             song_id = text(song.get("id"), "song id", required=True)
-            for field in ("artist", "title"):
-                text(song.get(field), "song " + field, required=True)
+            text(song.get("artist"), "song artist")
+            text(song.get("title"), "song title", required=True)
             text(song.get("version", ""), "song version")
             for field in ("bpm", "duration_s"):
                 value = song.get(field)
@@ -465,13 +465,15 @@ def candidates(song, files):
         metadata = file["metadata"]
         if not metadata.get("artist") or not metadata.get("title") or file["error"]:
             continue
-        if normalize(metadata["artist"]) != normalize(song["artist"]):
+        unknown_artist = not song["artist"].strip()
+        if not unknown_artist and normalize(metadata["artist"]) != normalize(song["artist"]):
             continue
         same = version_title(metadata) == version_title(song)
         if not same and base_title(metadata["title"]) != base_title(song["title"]):
             continue
-        found.append({**file, "metadata_equal": same,
-                      "reason": "Artist/title/version tags agree; recording still requires review." if same else
+        found.append({**file, "metadata_equal": same and not unknown_artist,
+                      "reason": "Source artist is missing; title-only candidate requires explicit override." if unknown_artist else
+                                "Artist/title/version tags agree; recording still requires review." if same else
                                 "Same song-title family; version text differs. Explicit override required."})
     return sorted(found, key=lambda row: (not row["metadata_equal"], row["path"]))
 
@@ -562,7 +564,8 @@ def decide(db, body):
             raise Conflict("Selected file changed while verifying; rescan before selecting it.")
         metadata = file["metadata"]
         catalog_song = json.loads(song["metadata_json"])
-        agrees = normalize(metadata.get("artist", "")) == normalize(catalog_song["artist"]) \
+        agrees = bool(catalog_song["artist"].strip()) \
+            and normalize(metadata.get("artist", "")) == normalize(catalog_song["artist"]) \
             and version_title(metadata) == version_title(catalog_song)
         if not agrees and (not body.get("override") or not body.get("note", "").strip()):
             raise ValueError("Version/metadata conflict requires explicit override and a review note.")

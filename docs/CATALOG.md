@@ -909,3 +909,27 @@ missing audio. Corrupting the saved fixture then removed the link and showed the
 integrity error through refresh/reload. The browser automation again produced no
 download-completion event; browser filesystem delivery is still unverified.
 No production audio, tags or library data were touched.
+
+## Manifest-backed CSV adapter checkpoint
+
+`python -m web.vendor_import --directory "/explicit/export/folder" --output
+"/outside/source/catalog-snapshot.json"` converts the actual manifest/reference
+layout into the existing schema-1 JSON upload format. It reads only the reference,
+manifest and declared CSVs; earlier unreferenced duplicate exports are not
+silently merged. Output is atomic, outside the source folder and never overwritten.
+Source files remain read-only. CSV row order, repeated memberships, source crate
+IDs, preambles/links, raw fields and numeric zero/unknown distinctions are retained.
+CSV rows have no vendor song ID: their IDs hash exact metadata excluding order,
+not recording identity. Missing artists remain blank, with visible warnings;
+title-only match candidates require an explicit override and note.
+
+This checkpoint is intentionally fail-closed and **not yet real-collection
+acceptance**. Conversion of the supplied real folder discovered blank titles
+after handling blank artists. It currently rejects those rows rather than
+dropping memberships or inventing metadata; complete reconciliation is pending.
+Cloud-materialized files whose stats change during reading require an identical
+second read with stable stats and emit a warning, otherwise conversion fails.
+Synthetic adapter/catalog/web tests: **170 passed**; Node tests: **58 passed**.
+No actual export metadata or music is committed. Next preserve the newly observed
+unknown-title cases explicitly and rerun full real-count reconciliation before
+claiming the adapter complete.
