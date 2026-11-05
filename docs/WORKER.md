@@ -222,3 +222,6 @@ Next: synthetic catalog snapshots plus read-only selected-folder indexing and
 explicit exact/ambiguous/missing version matches. Keep catalog entities separate
 from physical file hashes. Do not add AI or tag-writing/export changes until
 those operations are reliable.
+
+Update: that first catalog slice is implemented; see the [catalog handoff](CATALOG.md)
+for its demo and remaining real-export/job-infrastructure acceptance gates.

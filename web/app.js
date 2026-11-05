@@ -5,7 +5,7 @@ const SLOT_COLOR_IDS = ["red", "orange", "sky", "yellow", "magenta", "green", "t
 let tracks = [], selected = new Set(), activeTrack = null, activeJob = null, soundOn = false, refreshTimer;
 let eventSource;
 let lastCompletedJob = "";
-let sessionToken;
+let sessionToken, sessionPromise;
 let datasetId, reviewDraft = null, reviewSaveError = "";
 let cueMapSettings = null, cueMapCatalog = null, activeCueMap = "VOCAL";
 let reviewSaved = "", reviewSaving = false, reviewLeaveResolve = null;
@@ -13,11 +13,16 @@ let eventReviewSaving = false;
 
 async function api(url, options = {}) {
   if (sessionToken === undefined) {
-    const sessionResponse = await fetch("/api/session");
-    const session = await sessionResponse.json();
-    if (!sessionResponse.ok) throw new Error(session.error || "Could not establish local session.");
-    sessionToken = session.token;
-    datasetId = session.dataset_id;
+    if (!sessionPromise) {
+      sessionPromise = (async () => {
+        const sessionResponse = await fetch("/api/session");
+        const session = await sessionResponse.json();
+        if (!sessionResponse.ok) throw new Error(session.error || "Could not establish local session.");
+        sessionToken = session.token;
+        datasetId = session.dataset_id;
+      })().finally(() => { sessionPromise = null; });
+    }
+    await sessionPromise;
   }
   options.headers = {...options.headers, "X-AutoCue-Token":sessionToken};
   const response = await fetch(url, options);

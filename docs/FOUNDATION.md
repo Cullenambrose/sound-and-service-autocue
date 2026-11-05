@@ -204,9 +204,12 @@ See [WORKER.md](WORKER.md) for implementation boundaries, verification and resum
 instructions; the original synthetic cue baseline remains unchanged.
 
 **Next concrete milestone: catalog snapshots and exact-version matching.**
-Start with a synthetic catalog import and a selected-folder, read-only library
-index. Keep catalog song/version identities separate from exact-file hashes;
-persist explicit exact/ambiguous/missing match decisions. Do not select a remix,
-clean/explicit version or intro edit from title similarity alone. Build a review
-surface for those decisions before editable personal crates, verified playlist
-export, a desktop shell or AI chat.
+The first slice is now implemented: immutable schema-v1 snapshots, selected-folder
+read-only indexing, offline/error states and a version-candidate review surface
+with durable decision receipts. See [CATALOG.md](CATALOG.md) for a disposable demo,
+contracts and remaining stage-3 work. The actual vendor CSV adapter, real-export
+reconciliation, durable scan jobs and volume reassociation are not yet complete.
+Keep catalog song/version identities separate from exact-file hashes; never
+select a remix, clean/explicit version or intro edit from title similarity alone.
+Next inspect representative actual exports, then connect reviewed current hashes
+to cue review before personal crates, verified playlist export or AI chat.

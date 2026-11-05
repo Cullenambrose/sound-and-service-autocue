@@ -23,6 +23,12 @@ accuracy evidence**. See the [worker handoff](docs/WORKER.md) for request/result
 schemas, optional analyzers, cache isolation, cancellation and verification.
 The wheel packages the worker, not the web app or historical research tools.
 
+The web app now also has a catalog snapshot browser, selected-folder read-only
+index and explicitly reviewed exact-file matches. Start with the
+[catalog demo and handoff](docs/CATALOG.md). This first slice accepts a documented
+JSON schema; the original vendor CSV adapter and real-export reconciliation
+remain unverified. Nothing is auto-matched, copied or analyzed by indexing.
+
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)
 for the measured sample, remaining gates, and local review instructions.

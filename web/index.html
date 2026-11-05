@@ -59,6 +59,37 @@
       </section>
     </div>
 
+    <section id="catalog-section" class="library-section">
+      <div class="library-head"><div><span class="eyebrow">CATALOG · READ-ONLY SOURCES</span><h2>Find your exact versions</h2></div></div>
+      <p class="muted">Import a schema-v1 catalog snapshot, index only a folder you select, then review each file match. No copying, analysis or tag writes.</p>
+      <div class="columns">
+        <div class="import-card">
+          <label for="catalog-upload">Catalog snapshot JSON</label>
+          <input id="catalog-upload" type="file" accept=".json,application/json">
+          <div class="path-row"><select id="catalog-snapshot" aria-label="Catalog snapshot"><option value="">No snapshots imported</option></select></div>
+          <div class="path-row"><input id="catalog-search" type="search" placeholder="Filter crate title" aria-label="Filter catalog crates"></div>
+          <div id="catalog-crates" class="crate-list"></div>
+        </div>
+        <div class="crate-card">
+          <label for="catalog-folder">Selected folder (read-only index)</label>
+          <div class="path-row"><input id="catalog-folder" placeholder="/absolute/path/to/disposable/music"><button id="catalog-scan" class="button secondary">Index folder</button></div>
+          <p class="muted">Initial scanner: up to 10,000 audio files per folder. Leave this page open while scanning. Offline folders retain their index.</p>
+          <div id="catalog-roots" class="crate-list"></div>
+          <details><summary>Indexed files and metadata errors</summary><button id="catalog-files-refresh" class="quiet">Refresh file list</button><div id="catalog-files" class="crate-list"></div><button id="catalog-files-more" class="quiet" hidden>Next page</button></details>
+        </div>
+      </div>
+      <div id="catalog-status" class="notice" role="status" aria-live="polite"></div>
+      <div id="catalog-pending" class="catalog-pending" hidden>
+        <strong>Unacknowledged match decision retained on this browser.</strong>
+        <button id="catalog-retry" class="button secondary">Retry exact request</button>
+        <button id="catalog-download" class="button secondary">Download pending decision</button>
+        <button id="catalog-discard" class="quiet">Discard pending request</button>
+      </div>
+      <h3 id="catalog-crate-title">Choose a catalog crate</h3>
+      <div class="path-row"><input id="catalog-song-search" type="search" aria-label="Filter songs in this crate" placeholder="Filter this crate by artist, title or version"></div>
+      <div id="catalog-songs"></div>
+    </section>
+
     <section class="library-section">
       <div class="library-head"><div><span class="eyebrow">03 · YOUR LIBRARY</span><h2>Tracks <span id="visible-count">0</span></h2></div>
         <div class="filters"><input id="search" type="search" placeholder="Search title or artist">
@@ -190,5 +221,7 @@
   <script src="/timing.js"></script>
   <script src="/review-state.js"></script>
   <script src="/app.js"></script>
+  <script src="/catalog-state.js"></script>
+  <script src="/catalog.js"></script>
 </body>
 </html>

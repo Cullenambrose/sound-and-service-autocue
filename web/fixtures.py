@@ -4,6 +4,27 @@ import struct
 AUDIO = bytes(range(256)) * 8
 
 
+def tagged_wav(version="Clean"):
+    import io
+    import wave
+    from mutagen.wave import WAVE
+    from mutagen.id3 import TIT2, TPE1, TXXX
+    stream = io.BytesIO()
+    with wave.open(stream, "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(8000)
+        target.writeframes(b"\0\0" * 16000)
+    stream.seek(0)
+    audio = WAVE(stream)
+    audio.add_tags()
+    audio.tags.add(TPE1(encoding=3, text=["Invented Artist"]))
+    audio.tags.add(TIT2(encoding=3, text=["Synthetic Song"]))
+    audio.tags.add(TXXX(encoding=3, desc="VERSION", text=[version]))
+    audio.save(stream)
+    return stream.getvalue()
+
+
 def mp3(frames=3):
     return (b"\xff\xfb\x90\x64" + b"\x00" * 413) * frames
 

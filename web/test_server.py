@@ -21,6 +21,90 @@ from web import fixtures, server
 
 
 class WebServerTests(unittest.TestCase):
+    def catalog_post(self, endpoint, body, *, authenticated=True):
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        request = urllib.request.Request(base + "/api/catalog/" + endpoint,
+            data=json.dumps(body).encode(), method="POST",
+            headers={"Content-Type": "application/json", "Origin": base,
+                     "X-AutoCue-Token": server.SESSION_TOKEN if authenticated else ""})
+        return self.submit_review(request)
+
+    def catalog_get(self, endpoint, **query):
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        with urllib.request.urlopen(base + "/api/catalog/" + endpoint + "?" + urllib.parse.urlencode(query)) as response:
+            return json.load(response)
+
+    def catalog_fixture(self):
+        from web.test_catalog import snapshot
+        document = snapshot()
+        code, imported = self.catalog_post("import", document)
+        self.assertEqual(code, 200, imported)
+        folder = Path(self.temporary.name) / "indexed-music"
+        folder.mkdir()
+        source = folder / "Clean.wav"
+        source.write_bytes(fixtures.tagged_wav())
+        code, scanned = self.catalog_post("scan", {"path": str(folder)})
+        self.assertEqual(code, 200, scanned)
+        file = self.catalog_get("files")["files"][0]
+        with server.connect() as db:
+            dataset = server.review_store.dataset_id(db)
+        decision = {"request_id": "synthetic-match", "dataset_id": dataset,
+                    "snapshot_id": imported["snapshot_id"], "song_id": "song-1",
+                    "base_revision": 0, "file_id": file["id"], "content_hash": file["content_hash"],
+                    "note": "Synthetic review"}
+        return imported, source, decision
+
+    def test_catalog_http_import_index_and_concurrent_receipt_retries_preserve_sources(self):
+        imported, source, decision = self.catalog_fixture()
+        original = source.read_bytes()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            replies = list(pool.map(lambda _: self.catalog_post("decide", decision), range(12)))
+        self.assertTrue(all(status == 200 and receipt == replies[0][1] for status, receipt in replies))
+        songs = self.catalog_get("songs", snapshot_id=imported["snapshot_id"], crate_id="crate-1")["songs"]
+        self.assertEqual([song["state"] for song in songs], ["exact", "exact"])
+        self.assertEqual([song["revision"] for song in songs], [1, 1])
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(list(server.UPLOADS.iterdir()), [])
+        self.assertEqual(self.catalog_post("decide", {**decision, "request_id": "stale"})[0], 409)
+        server.initialize()
+        self.assertEqual(self.catalog_post("decide", decision), replies[0])
+
+    def test_catalog_mutations_require_session_and_correct_dataset(self):
+        from web.test_catalog import snapshot
+        self.assertEqual(self.catalog_post("import", snapshot(), authenticated=False)[0], 403)
+        imported, _, decision = self.catalog_fixture()
+        self.assertEqual(self.catalog_post("decide", {**decision, "dataset_id": "other"})[0], 409)
+        self.assertIsNone(self.catalog_get("songs", snapshot_id=imported["snapshot_id"],
+                                         crate_id="crate-1")["songs"][0]["decision"])
+
+    def test_catalog_storage_failure_returns_503_and_retains_previous_decision(self):
+        _, _, decision = self.catalog_fixture()
+        with server.connect() as db:
+            db.execute("""CREATE TRIGGER reject_match BEFORE INSERT ON catalog_match_receipts
+                          BEGIN SELECT RAISE(ABORT,'synthetic receipt error'); END""")
+        status, error = self.catalog_post("decide", decision)
+        self.assertEqual(status, 503)
+        self.assertIn("synthetic receipt error", error["error"])
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM catalog_match_decisions").fetchone()[0], 0)
+            db.execute("DROP TRIGGER reject_match")
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+
+    def test_catalog_malformed_input_and_scan_errors_are_explicit(self):
+        from web.test_catalog import snapshot
+        document = snapshot()
+        document["crates"][0]["songs"][0]["artist"] = None
+        self.assertEqual(self.catalog_post("import", document)[0], 400)
+        self.assertEqual(self.catalog_get("snapshots")["snapshots"], [])
+        self.assertEqual(self.catalog_post("scan", {"path": ""})[0], 400)
+        folder = Path(self.temporary.name) / "bad-tags"
+        folder.mkdir()
+        (folder / "bad.mp3").write_bytes(b"not audio")
+        code, scanned = self.catalog_post("scan", {"path": str(folder)})
+        self.assertEqual(code, 200)
+        self.assertEqual(len(scanned["errors"]), 1)
+        self.assertEqual(self.catalog_get("files")["files"][0]["state"], "error")
+
     def review_request(self, url, data, **kwargs):
         body = json.loads(data)
         with server.connect() as db:
@@ -155,7 +239,7 @@ class WebServerTests(unittest.TestCase):
         server.DB_PATH = server.DATA / "library.sqlite3"
         server.SESSION_TOKEN = "test-token"
         server.initialize()
-        self.http = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.http = server.LocalHTTPServer(("127.0.0.1", 0), server.Handler)
         self.http_thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.http_thread.start()
 
@@ -164,6 +248,17 @@ class WebServerTests(unittest.TestCase):
         self.http.server_close()
         self.http_thread.join(timeout=2)
         self.temporary.cleanup()
+
+    def test_parallel_catalog_startup_burst_does_not_reset_connections(self):
+        base = f"http://127.0.0.1:{self.http.server_address[1]}"
+        paths = ["/api/session", "/api/catalog/snapshots", "/api/catalog/roots",
+                 "/catalog.js", "/catalog-state.js", "/api/library", "/api/settings", "/api/jobs"] * 3
+        def fetch(path):
+            with urllib.request.urlopen(base + path, timeout=5) as response:
+                response.read()
+                return response.status
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            self.assertEqual(list(pool.map(fetch, paths)), [200] * len(paths))
 
     def test_import_hash_deduplicates_renamed_files_and_links_original(self):
         root = Path(self.temporary.name)

@@ -20,6 +20,10 @@ import glob
 import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+if __package__:
+    from . import catalog
+else:
+    import catalog
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "engine") not in sys.path:
@@ -57,6 +61,11 @@ paused_jobs = set()
 cancelled_jobs = set()
 write_lock = threading.Lock()
 SESSION_TOKEN = ""
+
+
+class LocalHTTPServer(ThreadingHTTPServer):
+    # The catalog adds static/API requests to the existing parallel startup burst.
+    request_queue_size = 32
 
 
 def connect():
@@ -191,6 +200,7 @@ def initialize():
                 db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {declaration}")
         db.commit()
         review_store.initialize(db, DATA / "corrections.json")
+        catalog.initialize(db)
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
         for row in db.execute("SELECT hash,audio_path,error FROM tracks").fetchall():
             previous = "\n".join(line for line in (row["error"] or "").splitlines()
@@ -1405,6 +1415,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(WEB / "index.html", "text/html; charset=utf-8")
         if parsed.path == "/app.js":
             return self._static(WEB / "app.js", "text/javascript; charset=utf-8")
+        if parsed.path in ("/catalog.js", "/catalog-state.js"):
+            return self._static(WEB / parsed.path.removeprefix("/"), "text/javascript; charset=utf-8")
         if parsed.path == "/timing.js":
             return self._static(WEB / "timing.js", "text/javascript; charset=utf-8")
         if parsed.path == "/review-state.js":
@@ -1542,6 +1554,37 @@ class Handler(BaseHTTPRequestHandler):
             except ImportError:
                 found = None
             return json_response(self, found or {"peaks": [], "duration": 0})
+        if parsed.path.startswith("/api/catalog/"):
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                with connect() as db:
+                    if parsed.path == "/api/catalog/snapshots":
+                        result = {"snapshots": catalog.snapshots(db)}
+                    elif parsed.path == "/api/catalog/crates":
+                        result = {"crates": catalog.crates(db, query.get("snapshot_id", [""])[0],
+                                                         query.get("q", [""])[0])}
+                    elif parsed.path == "/api/catalog/songs":
+                        result = {"songs": catalog.songs(db, query.get("snapshot_id", [""])[0],
+                                                       query.get("crate_id", [""])[0])}
+                    elif parsed.path == "/api/catalog/roots":
+                        result = {"roots": catalog.roots(db)}
+                    elif parsed.path == "/api/catalog/files":
+                        files = catalog.file_records(db)
+                        search = query.get("q", [""])[0].casefold()
+                        files = [file for file in files if search in
+                                 (file["path"] + " " + json.dumps(file["metadata"], ensure_ascii=False)).casefold()]
+                        offset = int(query.get("offset", ["0"])[0])
+                        if offset < 0:
+                            raise ValueError("File offset must be nonnegative.")
+                        result = {"files": files[offset:offset + 100], "total": len(files), "offset": offset}
+                    else:
+                        return json_response(self, {"error": "Catalog endpoint not found."}, 404)
+                return json_response(self, result)
+            except ValueError as error:
+                return json_response(self, {"error": str(error)}, 400)
+            except (OSError, sqlite3.Error) as error:
+                self.log_error("Catalog read failed: %s", error)
+                return json_response(self, {"error": str(error)}, 503)
         if parsed.path == "/api/crates":
             return json_response(self, {"crates": list_crates()})
         if parsed.path == "/api/crates/detail":
@@ -1589,6 +1632,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path in ("/api/catalog/import", "/api/catalog/scan", "/api/catalog/decide"):
+                body = self._body_json(max_length=64 * 1024 * 1024 if parsed.path.endswith("/import") else 1024 * 1024)
+                if not isinstance(body, dict):
+                    raise ValueError("Catalog request must be an object.")
+                with connect() as db:
+                    if parsed.path.endswith("/import"):
+                        result = catalog.import_snapshot(db, body)
+                    elif parsed.path.endswith("/scan"):
+                        result = catalog.scan_folder(db, body.get("path"))
+                    else:
+                        if body.get("dataset_id") != review_store.dataset_id(db):
+                            raise catalog.Conflict("Match belongs to a different dataset; reload the app.")
+                        result = catalog.decide(db, body)
+                return json_response(self, result)
             if parsed.path.startswith("/api/event-reviews/"):
                 file_hash = parsed.path.removeprefix("/api/event-reviews/")
                 if not _valid_track_hash(file_hash):
@@ -1869,6 +1926,11 @@ class Handler(BaseHTTPRequestHandler):
                                    (json.dumps(normalized_cue_maps),))
                 return json_response(self, {"ok": True})
             self.send_error(404)
+        except catalog.Conflict as error:
+            return json_response(self, {"error": str(error)}, 409)
+        except sqlite3.Error as error:
+            self.log_error("Local transaction failed: %s", error)
+            return json_response(self, {"error": "Operation was not saved: " + str(error)}, 503)
         except (ValueError, OSError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError) as error:
             return json_response(self, {"error": str(error)}, 400)
 
@@ -1984,9 +2046,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, OSError, json.JSONDecodeError) as error:
             return json_response(self, {"error": str(error)}, 400)
 
-    def _body_json(self):
+    def _body_json(self, max_length=1024 * 1024):
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 1024 * 1024:
+        if length < 0 or length > max_length:
             raise ValueError("Request body is too large.")
         return json.loads(self.rfile.read(length) or b"{}")
 
@@ -2014,7 +2076,7 @@ def main():
     for row in queued:
         worker_queue.put(row["id"])
     threading.Thread(target=worker, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
+    server = LocalHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
     print("AutoCue web app: http://127.0.0.1:%d" % server.server_address[1], flush=True)
     try:
         server.serve_forever()

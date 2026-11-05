@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "source": "Synthetic catalog demonstration",
+  "crates": [
+    {
+      "id": "synthetic-crate-1",
+      "title": "Synthetic warmup",
+      "available": true,
+      "curator": "Invented fixture",
+      "songs": [
+        {
+          "id": "synthetic-song-1",
+          "artist": "Invented Artist",
+          "title": "Synthetic Song",
+          "version": "Clean",
+          "bpm": 0,
+          "key": null
+        },
+        {
+          "id": "synthetic-song-2",
+          "artist": "Invented Artist",
+          "title": "Missing Song",
+          "version": "Extended",
+          "bpm": null
+        }
+      ]
+    },
+    {
+      "id": "synthetic-crate-2",
+      "title": "Synthetic warmup",
+      "available": false,
+      "songs": []
+    }
+  ]
+}
