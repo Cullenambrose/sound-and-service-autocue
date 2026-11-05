@@ -206,10 +206,12 @@ def read_metadata(path):
             "provenance": "file_tags"}
 
 
-def file_hash(path):
+def file_hash(path, checkpoint=None):
     value = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
+            if checkpoint:
+                checkpoint()
             value.update(block)
     return value.hexdigest()
 
@@ -237,13 +239,17 @@ def roots(db):
     return result
 
 
-def scan_folder(db, path_text, metadata_reader=None):
+def scan_folder(db, path_text, metadata_reader=None, *, checkpoint=None, progress=None, expected_identity=None):
     metadata_reader = metadata_reader or read_metadata
     text(path_text, "folder path", required=True)
     requested = Path(path_text).expanduser()
     if not requested.is_absolute():
         raise ValueError("Select an absolute folder path.")
     path = requested.resolve()
+    if expected_identity is not None:
+        stat = path.stat()
+        if (stat.st_dev, stat.st_ino) != expected_identity:
+            raise Conflict("Selected folder identity changed since this scan was queued.")
     root = db.execute("SELECT * FROM library_roots WHERE path=?", (str(path),)).fetchone()
     existing_root = root is not None
     if root:
@@ -268,16 +274,27 @@ def scan_folder(db, path_text, metadata_reader=None):
         "SELECT * FROM library_files WHERE root_id=?", (root["id"],))}
     seen, errors, skipped, reused, updates = set(), [], [], 0, []
 
+    def report(phase, current_path=""):
+        if checkpoint:
+            checkpoint()
+        if progress:
+            progress({"phase": phase, "scanned": len(seen), "reused": reused,
+                      "errors": len(errors), "skipped": len(skipped), "current_path": current_path})
+
     def walk_error(error):
         raise error
 
+    report("walking")
     for folder, directories, filenames in os.walk(path, followlinks=False, onerror=walk_error):
+        report("walking", str(Path(folder).relative_to(path)))
         for directory in list(directories):
             entry = Path(folder) / directory
             if entry.is_symlink():
                 skipped.append(str(entry.relative_to(path)))
                 directories.remove(directory)
         for name in sorted(filenames):
+            if checkpoint:
+                checkpoint()
             entry = Path(folder) / name
             if entry.suffix.lower() not in AUDIO_EXTENSIONS:
                 continue
@@ -288,6 +305,7 @@ def scan_folder(db, path_text, metadata_reader=None):
             seen.add(relative)
             if len(seen) > MAX_FILES:
                 raise ValueError(f"Initial scanner supports at most {MAX_FILES} audio files per root.")
+            report("indexing", relative)
             before = entry.stat()
             if not entry.is_file():
                 raise ValueError("Audio path is not a regular file: " + relative)
@@ -298,7 +316,7 @@ def scan_folder(db, path_text, metadata_reader=None):
             identity = old["id"] if old else str(uuid.uuid4())
             error, metadata, content_hash = "", {}, None
             try:
-                content_hash = file_hash(entry)
+                content_hash = file_hash(entry, checkpoint) if checkpoint else file_hash(entry)
                 metadata = metadata_reader(entry)
                 if signature(entry.stat()) != signature(before):
                     raise OSError("File changed during scan; retry after the file is stable.")
@@ -306,10 +324,13 @@ def scan_folder(db, path_text, metadata_reader=None):
                 error = str(failure) or type(failure).__name__
                 errors.append({"path": relative, "error": error})
             updates.append((identity, root["id"], relative, content_hash, *signature(before), canonical(metadata), error))
+    report("publishing")
     if root_status(root)[0] != "online":
         raise OSError("Folder disconnected during scan; previous index was preserved.")
     # Hashing/tag parsing never holds the database write lock used by cue review.
     db.execute("BEGIN IMMEDIATE")
+    if checkpoint:
+        checkpoint()
     current = db.execute("SELECT * FROM library_roots WHERE path=?", (str(path),)).fetchone()
     if (existing_root and (not current or current["scan_revision"] != root["scan_revision"])) \
             or (not existing_root and current):

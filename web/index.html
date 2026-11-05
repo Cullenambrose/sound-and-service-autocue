@@ -73,7 +73,15 @@
         <div class="crate-card">
           <label for="catalog-folder">Selected folder (read-only index)</label>
           <div class="path-row"><input id="catalog-folder" placeholder="/absolute/path/to/disposable/music"><button id="catalog-scan" class="button secondary">Index folder</button></div>
-          <p class="muted">Initial scanner: up to 10,000 audio files per folder. Leave this page open while scanning. Offline folders retain their index.</p>
+          <p class="muted">Up to 10,000 audio files per folder. Scans continue after reload or closing this page while the server runs. Cancelled or interrupted scans preserve the previous index.</p>
+          <div id="catalog-scan-status" class="notice" role="status" aria-live="polite"></div>
+          <div id="catalog-scan-pending" class="catalog-pending" hidden>
+            <strong>Unacknowledged scan request retained on this browser.</strong>
+            <button id="catalog-scan-retry" class="button secondary">Retry scan request</button>
+            <button id="catalog-scan-download" class="button secondary">Download pending scan request</button>
+            <button id="catalog-scan-discard" class="quiet">Discard scan request</button>
+          </div>
+          <div id="catalog-scans" class="crate-list" aria-label="Library scan jobs"></div>
           <div id="catalog-roots" class="crate-list"></div>
           <details><summary>Indexed files and metadata errors</summary><button id="catalog-files-refresh" class="quiet">Refresh file list</button><div id="catalog-files" class="crate-list"></div><button id="catalog-files-more" class="quiet" hidden>Next page</button></details>
         </div>

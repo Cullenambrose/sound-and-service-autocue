@@ -22,9 +22,10 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 if __package__:
-    from . import catalog
+    from . import catalog, scan_jobs
 else:
     import catalog
+    import scan_jobs
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "engine") not in sys.path:
@@ -202,6 +203,7 @@ def initialize():
         db.commit()
         review_store.initialize(db, DATA / "corrections.json")
         catalog.initialize(db)
+        scan_jobs.initialize(db)
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
         for row in db.execute("SELECT hash,audio_path,error FROM tracks").fetchall():
             previous = "\n".join(line for line in (row["error"] or "").splitlines()
@@ -1663,6 +1665,8 @@ class Handler(BaseHTTPRequestHandler):
                                                         query.get("crate_id", [""])[0])}
                     elif parsed.path == "/api/catalog/roots":
                         result = {"roots": catalog.roots(db)}
+                    elif parsed.path == "/api/catalog/scans":
+                        result = {"jobs": scan_jobs.jobs(db)}
                     elif parsed.path == "/api/catalog/files":
                         files = catalog.file_records(db)
                         search = query.get("q", [""])[0].casefold()
@@ -1729,15 +1733,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/catalog/stage":
                 return json_response(self, stage_catalog_match(self._body_json()))
-            if parsed.path in ("/api/catalog/import", "/api/catalog/scan", "/api/catalog/decide"):
+            if parsed.path in ("/api/catalog/scan", "/api/catalog/scans/cancel"):
+                body = self._body_json()
+                with connect() as db:
+                    dataset = review_store.dataset_id(db)
+                    result = (scan_jobs.submit(db, body, dataset) if parsed.path.endswith("/scan")
+                              else scan_jobs.cancel(db, body, dataset))
+                return json_response(self, result, 202 if parsed.path.endswith("/scan") else 200)
+            if parsed.path in ("/api/catalog/import", "/api/catalog/decide"):
                 body = self._body_json(max_length=64 * 1024 * 1024 if parsed.path.endswith("/import") else 1024 * 1024)
                 if not isinstance(body, dict):
                     raise ValueError("Catalog request must be an object.")
                 with connect() as db:
                     if parsed.path.endswith("/import"):
                         result = catalog.import_snapshot(db, body)
-                    elif parsed.path.endswith("/scan"):
-                        result = catalog.scan_folder(db, body.get("path"))
                     else:
                         if body.get("dataset_id") != review_store.dataset_id(db):
                             raise catalog.Conflict("Match belongs to a different dataset; reload the app.")
@@ -2168,12 +2177,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     initialize()
+    server = LocalHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
     with connect() as db:
+        scan_jobs.recover(db)
         queued = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at").fetchall()
     for row in queued:
         worker_queue.put(row["id"])
     threading.Thread(target=worker, daemon=True).start()
-    server = LocalHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
+    scan_stop = threading.Event()
+    scan_thread = threading.Thread(target=scan_jobs.worker, args=(connect, scan_stop), daemon=True)
+    scan_thread.start()
     print("AutoCue web app: http://127.0.0.1:%d" % server.server_address[1], flush=True)
     try:
         server.serve_forever()
@@ -2181,6 +2194,10 @@ def main():
         pass
     finally:
         server.server_close()
+        scan_stop.set()
+        scan_thread.join(timeout=5)
+        if scan_thread.is_alive():
+            print("Catalog scan still inside filesystem/metadata I/O; startup will mark it interrupted.", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ Implemented plan:
 4. An integrated catalog browser, synthetic regression fixtures and CI.
 5. Explicit verified staging of reviewed files into the existing analysis/cue
    editor, retaining match provenance and idempotent staging receipts.
+6. Durable background index jobs with retry receipts, persisted progress,
+   cooperative cancellation and explicit restart recovery.
 
 The actual saved CSV/catalog exports were not supplied at a known path for this
 milestone. Their headers, preambles and identity/link fields have **not** been
@@ -48,7 +50,8 @@ AUTOCUE_WEB_DATA="$DEMO/data" AUTOCUE_PORT=8771 ./run.sh
 Open `http://127.0.0.1:8771`. Under **Find your exact versions**:
 
 1. Import [the synthetic snapshot](../tests/fixtures/catalog/synthetic.json).
-2. Enter the generated `music` folder path and choose **Index folder**.
+2. Enter the generated `music` folder path and choose **Index folder**. Wait for
+   the scan job to show `completed`; indexing continues across browser reloads.
 3. Choose the available **Synthetic warmup** crate. The other same-title crate
    remains separately identified and explicitly unavailable.
 4. Review the Clean and Explicit candidates. No choice is preselected.
@@ -139,6 +142,9 @@ there is no partial-success importer or silently skipped input row.
 - `catalog_staged_tracks`, `catalog_staging_receipts`: immutable decision-to-hash
   provenance and acknowledged staging operations. Historical links deliberately
   do not reference the mutable/deletable `tracks` row with a foreign key.
+- `catalog_scan_jobs`: original submission/receipt, captured folder identity,
+  lifecycle/progress, terminal result and errors. Admission receipts remain
+  replayable after the job finishes; they never start another scan.
 
 These are not a recording-fingerprint graph. A catalog source song/version is
 not the staged `tracks.hash` entity. Renames currently appear as a missing old
@@ -179,11 +185,94 @@ identical timestamps. Unrelated database writers can proceed during parsing.
 
 Initial scope: at most **10,000 audio paths per root**, held in memory during
 enumeration. This is a declared safety bound, not a measured performance target.
-Scanning runs on the HTTP request thread, not a durable job queue; the UI
-disables its catalog actions until completion. Closing the page does not
-guarantee server cancellation. Server restart before commit preserves the prior
-index; repeating the scan is safe. Progress/cancellation, crash receipts and
-production-scale latency benchmarks remain stage-3 follow-up work.
+Production-scale latency, parser memory usage and network/removable-volume
+behavior remain unbenchmarked. The bound has not been raised.
+
+### Durable scan jobs
+
+The supported browser no longer holds a long HTTP scan request open or blocks
+other catalog actions while hashing. A dedicated worker polls durable SQLite
+jobs independently of the analysis worker. Only one scan runs at a time; other
+non-overlapping folders queue in submission order. Pending overlapping scans
+are rejected, rather than doing competing disk work. No inference, staging,
+tag-writing or network lookup is scheduled by an index job.
+
+`POST /api/catalog/scan` requires exactly:
+
+```json
+{
+  "request_id": "new-client-generated-UUID",
+  "dataset_id": "current-dataset-UUID",
+  "path": "/absolute/path/to/selected/music"
+}
+```
+
+Admission validates the dataset and checks the folder/device/inode outside the
+write lock. A short transaction rechecks receipt/overlap and records the job.
+`202` acknowledges `ok: true`, every submitted field, and a
+server-generated `job_id`. It means **queued**, not successfully indexed. The
+receipt and job are one durable record. Retry the identical body after a lost
+response: it returns the same admission receipt without checking the source or
+rescheduling work, even after cancellation, failure, completion or disconnection.
+Request-ID reuse with different content or wrong dataset returns `409`.
+Malformed/absent paths return `400`; database failures return `503`.
+The former synchronous path-only request shape is intentionally rejected:
+clients must supply dataset/request identity and poll for the outcome.
+
+`GET /api/catalog/scans` returns all active jobs plus the 20 most recent terminal
+jobs, with `id`, normalized `path`, `status`, `progress`, `result`, `error` and
+timestamps. Historical admission receipts remain in SQLite even when no longer
+in this recent list. No automatic history/receipt deletion is implemented.
+Progress includes phase (`queued`, `walking`, `indexing`, `publishing`), audio
+paths encountered, unchanged files reused, error/symlink counts and current
+relative path. It is not a percentage or an assertion that encountered files
+have already been indexed. Updates are throttled to approximately 250 ms except
+phase transitions. Completion carries the full scan result, including errors
+and skipped paths; individual tag errors are retained in the file index and
+do not masquerade as successfully parsed metadata.
+
+Lifecycle:
+
+- `queued` -> `running` -> `completed` or `failed`.
+- Cancelling queued work immediately records `cancelled`.
+- Cancelling running work records `cancelling`, then `cancelled` when observed.
+- A stopped server marks unfinished running work `interrupted` on next startup;
+  pending cancellation becomes `cancelled`. Queued work survives and runs.
+
+`POST /api/catalog/scans/cancel` requires exactly `dataset_id` and `job_id` and
+acknowledges the current job record. It is safe to retry. Cancellation after a
+terminal result leaves that result unchanged; it does not undo a published
+index. Checks occur between directory/file entries, each 1 MiB hash chunk,
+after tag parsing and at the final transaction gate. A blocking filesystem
+read/directory enumeration or Mutagen call cannot be forcibly interrupted.
+Shutdown waits up to five seconds for cooperative completion, then logs if
+work remains; the durable startup recovery covers an abrupt exit.
+
+The final transaction commits the complete index and the completed job/result
+together. Cancellation and publication serialize at that transaction: whichever
+passes the gate first wins. Failed/cancelled/interrupted scans never mark
+previously indexed files missing or publish a partial replacement. Root
+identity is captured at admission and revalidated when execution starts and
+before publication, so a queued request cannot silently adopt a replacement
+folder. Existing root/scan-revision guards remain in place.
+
+Failed or interrupted work is **not** automatically rerun: inspect the error,
+correct the cause and choose **Index folder** or **Rescan** to submit a new
+request ID. Retrying an old admission only retrieves its historical receipt.
+Run only one supported server per data directory; multi-process ownership/
+leases and forcibly interrupting hung storage are outside this milestone.
+A storage failure that also prevents terminal status persistence is logged by
+the worker; restart recovery handles any retained running/cancelling row.
+
+The browser keeps a separate dataset-scoped scan outbox before admission and
+validates request/dataset/path/job identity before clearing it. A reload retains
+unacknowledged submission and automatically discovers active/recent jobs.
+Use **Retry scan request**, or download/discard only the browser retry state
+after reconciling with the listed jobs. Discarding does **not** cancel admitted
+server work. Status polling failures remain visible and retry automatically;
+they never imply completion. Browser polling is every 1.5 seconds and refreshes
+the root/file/match views after a terminal transition, including completion
+while the page was closed. It does not alter pending match or staging outboxes.
 
 ## Matching and decision acknowledgment
 
@@ -341,7 +430,9 @@ independently. No new copy can be made from an offline original.
 All mutation routes use the existing loopback/origin/session-token checks.
 
 - `POST /api/catalog/import`: document above, max 64 MB.
-- `POST /api/catalog/scan`: `{"path": "/absolute/selected/folder"}`.
+- `POST /api/catalog/scan`: acknowledged durable admission contract above (`202`).
+- `GET /api/catalog/scans`: active and recent terminal progress/results.
+- `POST /api/catalog/scans/cancel`: acknowledged cancellation contract above.
 - `POST /api/catalog/decide`: acknowledged match protocol above.
 - `POST /api/catalog/stage`: explicit acknowledged staging protocol above.
 - `GET /api/catalog/snapshots`, `/roots`.
@@ -356,7 +447,7 @@ handshake; the local server accept backlog now covers the larger static/API
 burst (the default backlog caused reproducible reset connections).
 
 ```bash
-.venv/bin/python -m unittest web.test_catalog web.test_server
+.venv/bin/python -m unittest web.test_catalog web.test_scan_jobs web.test_server
 .venv/bin/python -m unittest discover -s engine -p 'test_*.py'
 node --test web/test_*.cjs
 ```
@@ -374,7 +465,8 @@ unapproved conflict, deliberately dropped a post-commit acknowledgment, reloaded
 and retried without advancing the saved revision. No original library, music
 file, production database or Serato tag was modified.
 
-Current bridge results: **345 engine, 92 web/catalog and 36 Node cases passed**.
+Current durable-scan results: **345 engine, 118 web/catalog/scan and 44 Node cases
+passed**.
 A fresh Python 3.10 environment with only core dependencies also passed both
 Python suites (three optional model-compatibility checks skipped). Hosted CI
 has not run because this work has not been pushed.
@@ -390,13 +482,32 @@ drop acknowledgment after commit, reload/retry, explicitly analyze, open cue
 review, change B and save/reopen. The source hash stays unchanged, exactly one
 staging receipt remains, and original-file writes remain disabled.
 
+Scan regression coverage includes acknowledged concurrent admission/replay,
+separate browser outboxes, queued/running cancellation, chunk checkpoints,
+final-publication races, failed admission/completion writes, progress/read
+responsiveness during hashing and slow admission stat calls, folder replacement,
+file bounds and source
+invariance. A separate disposable server process verifies real startup wiring:
+running work becomes interrupted, queued work runs, and the previous index is
+retained. Node tests execute the actual catalog controller, including polling
+failure/retry and completion while the page was closed.
+
+Browser scan validation used 60 generated tagged WAVs and **artificially delayed
+tag reads**, not a performance benchmark. A dropped response after durable
+admission survived reload/exact retry without duplicating the job. Cancellation
+published no partial root/index; a new explicit scan completed across another
+reload. Final state was one cancelled job, one completed job, 60 exact unchanged
+source files, no staged copies and no analysis jobs. Production databases,
+real tracks, external volumes and paid/network AI were not exercised.
+
 ## Next concrete work
 
 1. Inspect a representative **actual** CSV plus catalog index/export manifest at
    a user-supplied path. Build a deterministic adapter (including preambles,
    source IDs and unavailable entries) and reconcile the real 1,423/81,153 counts.
-2. Add durable cancellable scan jobs and explicit volume reassociation; benchmark
-   on a disposable representative library before raising the initial bound.
+2. Durable cancellable scan jobs are implemented. Add explicit volume
+   reassociation and benchmark on a disposable representative library before
+   raising the initial bound.
 3. The reviewed-match/cue-review bridge is implemented. Next add ordered personal
    crates and verified M3U8/CSV export manifests after the real adapter and scan
    acceptance gates. No production tag-writing or AI expansion here.

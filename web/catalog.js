@@ -1,5 +1,6 @@
 (() => {
-  let outbox, stageOutbox, snapshot = "", crate = null, allCrates = [], busy = false, generation = 0, fileOffset = 0;
+  let outbox, stageOutbox, scanOutbox, scanPoll, snapshot = "", crate = null, allCrates = [], busy = false, generation = 0, fileOffset = 0;
+  const scanStates = new Map(), activeScans = new Set(["queued", "running", "cancelling"]);
   const status = (message, failed = false) => {
     $("#catalog-status").textContent = message;
     $("#catalog-status").classList.toggle("catalog-error", failed);
@@ -8,6 +9,7 @@
   function pending() {
     $("#catalog-pending").hidden = !outbox?.pending;
     $("#catalog-stage-pending").hidden = !stageOutbox?.pending;
+    $("#catalog-scan-pending").hidden = !scanOutbox?.pending;
   }
   async function action(run) {
     if (busy) return;
@@ -63,15 +65,58 @@
     $("#catalog-files-more").hidden = fileOffset + data.files.length >= data.total;
   }
   async function scan(path) {
-    status("Indexing the selected folder read-only. No audio is copied or analyzed.");
-    const data = await request("/api/catalog/scan", {path});
-    status(data.state === "offline" ? `Folder offline; index retained. ${data.error}` :
-      `${data.scanned} audio paths indexed · ${data.reused} unchanged · ${data.errors.length} metadata/read errors · ${data.skipped_symlinks.length} symlinks skipped.`,
-      data.state === "offline" || data.errors?.length > 0);
-    await refreshRoots();
-    fileOffset = 0;
-    await loadFiles();
-    if (crate) await loadSongs();
+    scanOutbox.prepare({path});
+    pending();
+    await sendScanPending();
+  }
+  async function sendScanPending() {
+    if (!scanOutbox?.pending) throw new Error("No pending scan request.");
+    const receipt = await request("/api/catalog/scan", scanOutbox.pending);
+    scanOutbox.accept(receipt);
+    status("Scan submission acknowledged. Inspect current job status below; retrying submission never reruns a finished scan.");
+    await refreshScanJobs();
+  }
+  function refreshScanJobs() {
+    if (scanPoll) return scanPoll;
+    scanPoll = (async () => {
+      const {jobs} = await api("/api/catalog/scans");
+      $("#catalog-scans").innerHTML = jobs.map(job => {
+        const progress = job.progress, result = job.result;
+        const detail = result ? `${result.scanned} audio paths · ${result.reused} unchanged · ${result.errors.length} metadata/read errors · ${result.skipped_symlinks.length} symlinks skipped` :
+          `${progress.phase} · ${progress.scanned} audio paths encountered · ${progress.reused} unchanged · ${progress.errors} errors${progress.current_path ? " · " + progress.current_path : ""}`;
+        return `<div class="crate-item"><div><strong>${escapeHtml(job.path)}</strong><span class="crate-meta">${escapeHtml(job.status)} · ${escapeHtml(detail)}</span>${job.error ? `<span class="catalog-error">${escapeHtml(job.error)}</span>` : ""}
+          ${result?.errors.length ? `<details><summary>First ${Math.min(10, result.errors.length)} errors (all retained in indexed files)</summary>${result.errors.slice(0, 10).map(error => `<p>${escapeHtml(error.path)}: ${escapeHtml(error.error)}</p>`).join("")}</details>` : ""}</div>
+          ${activeScans.has(job.status) ? `<button class="quiet" data-catalog-scan-cancel="${job.id}" ${job.status === "cancelling" ? "disabled" : ""}>Cancel scan</button>` : ""}</div>`;
+      }).join("") || '<p class="muted">No scan jobs yet.</p>';
+      $$("[data-catalog-scan-cancel]").forEach(button => button.onclick = () => action(async () => {
+        const reply = await request("/api/catalog/scans/cancel", {dataset_id:datasetId, job_id:button.dataset.catalogScanCancel});
+        status(`Scan cancellation acknowledged: ${reply.job.status}. A completed publication cannot be undone by cancellation.`);
+        await refreshScanJobs();
+      }));
+      const finished = jobs.some(job => !activeScans.has(job.status) &&
+        (!scanStates.has(job.id) || activeScans.has(scanStates.get(job.id))));
+      $("#catalog-scan-status").textContent = jobs.some(job => activeScans.has(job.status)) ?
+        "Scanning read-only in the background. Cancellation waits for current filesystem/tag I/O; no partial index is published." :
+        "No active scans. Failed, cancelled and interrupted jobs require a new explicit Index folder action.";
+      $("#catalog-scan-status").classList.remove("catalog-error");
+      if (finished) {
+        await refreshRoots();
+        fileOffset = 0;
+        await loadFiles();
+        if (crate) await loadSongs();
+      }
+      scanStates.clear();
+      jobs.forEach(job => scanStates.set(job.id, job.status));
+    })().finally(() => { scanPoll = null; });
+    return scanPoll;
+  }
+  async function pollScans() {
+    try { await refreshScanJobs(); }
+    catch (error) {
+      $("#catalog-scan-status").textContent = `Scan status unavailable: ${error.message}. Retrying automatically; do not assume completion.`;
+      $("#catalog-scan-status").classList.add("catalog-error");
+    }
+    setTimeout(pollScans, 1500);
   }
   async function loadSongs() {
     const current = ++generation, selectedSnapshot = snapshot, selectedCrate = crate;
@@ -185,6 +230,20 @@
   $("#catalog-files-refresh").onclick = () => action(async () => { fileOffset = 0; await loadFiles(); });
   $("#catalog-files-more").onclick = () => action(async () => { fileOffset += 100; await loadFiles(); });
   $("#catalog-retry").onclick = () => action(sendPending);
+  $("#catalog-scan-retry").onclick = () => action(sendScanPending);
+  $("#catalog-scan-download").onclick = () => action(async () => {
+    if (!scanOutbox?.pending) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(scanOutbox.pending, null, 2)], {type:"application/json"}));
+    const link = document.createElement("a");
+    link.href = url; link.download = "autocue-pending-scan.json"; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  $("#catalog-scan-discard").onclick = () => action(async () => {
+    if (!confirm("Discard only this browser's scan submission retry? An admitted job may still be running. Inspect scan jobs and cancel it separately if needed.")) return;
+    scanOutbox.clear();
+    status("Browser scan request discarded. This did not cancel a server job.");
+    await refreshScanJobs();
+  });
   $("#catalog-matches-refresh").onclick = () => action(async () => {
     if (crate) await loadSongs();
     else status("Choose a crate to refresh its match and cue status.");
@@ -220,7 +279,9 @@
     await api("/api/session");
     outbox = new MatchOutbox(localStorage, datasetId);
     stageOutbox = new StageOutbox(localStorage, datasetId);
+    scanOutbox = new ScanOutbox(localStorage, datasetId);
     await Promise.all([refreshSnapshots(), refreshRoots()]);
     pending();
+    pollScans();
   });
 })();

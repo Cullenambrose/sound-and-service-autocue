@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -35,6 +36,17 @@ class WebServerTests(unittest.TestCase):
         with urllib.request.urlopen(base + "/api/catalog/" + endpoint + "?" + urllib.parse.urlencode(query)) as response:
             return json.load(response)
 
+    def scan_folder(self, folder):
+        with server.connect() as db:
+            dataset = server.review_store.dataset_id(db)
+        code, receipt = self.catalog_post("scan", {"path": str(folder), "dataset_id": dataset,
+                                                  "request_id": str(uuid.uuid4())})
+        self.assertEqual(code, 202, receipt)
+        self.assertTrue(server.scan_jobs.run_next(server.connect))
+        job = next(item for item in self.catalog_get("scans")["jobs"] if item["id"] == receipt["job_id"])
+        self.assertEqual(job["status"], "completed", job)
+        return job["result"]
+
     def catalog_fixture(self, audio=None):
         from web.test_catalog import snapshot
         document = snapshot()
@@ -44,8 +56,7 @@ class WebServerTests(unittest.TestCase):
         folder.mkdir()
         source = folder / "Clean.wav"
         source.write_bytes(audio if audio is not None else fixtures.tagged_wav())
-        code, scanned = self.catalog_post("scan", {"path": str(folder)})
-        self.assertEqual(code, 200, scanned)
+        self.scan_folder(folder)
         file = self.catalog_get("files")["files"][0]
         with server.connect() as db:
             dataset = server.review_store.dataset_id(db)
@@ -78,6 +89,120 @@ class WebServerTests(unittest.TestCase):
         self.assertIsNone(self.catalog_get("songs", snapshot_id=imported["snapshot_id"],
                                          crate_id="crate-1")["songs"][0]["decision"])
 
+    def test_scan_admission_is_async_idempotent_and_authenticates_cancellation(self):
+        folder = Path(self.temporary.name) / "scan-source"
+        folder.mkdir()
+        (folder / "Clean.wav").write_bytes(fixtures.tagged_wav())
+        with server.connect() as db:
+            dataset = server.review_store.dataset_id(db)
+        body = {"dataset_id": dataset, "request_id": "http-scan", "path": str(folder)}
+        self.assertEqual(self.catalog_post("scan", body, authenticated=False)[0], 403)
+        self.assertEqual(self.catalog_post("scan", {**body, "dataset_id": "other"})[0], 409)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            replies = list(pool.map(lambda _: self.catalog_post("scan", body), range(8)))
+        self.assertTrue(all(reply == replies[0] for reply in replies))
+        self.assertEqual(replies[0][0], 202)
+        self.assertEqual(self.catalog_get("files")["total"], 0)
+        jobs = self.catalog_get("scans")["jobs"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["status"], "queued")
+        cancellation = {"dataset_id": dataset, "job_id": jobs[0]["id"]}
+        self.assertEqual(self.catalog_post("scans/cancel", cancellation, authenticated=False)[0], 403)
+        self.assertEqual(self.catalog_post("scans/cancel", {**cancellation, "dataset_id": "other"})[0], 409)
+        first = self.catalog_post("scans/cancel", cancellation)
+        self.assertEqual(first[1]["job"]["status"], "cancelled")
+        self.assertEqual(self.catalog_post("scans/cancel", cancellation), first)
+        self.assertFalse(server.scan_jobs.run_next(server.connect))
+        shutil.rmtree(folder)
+        self.assertEqual(self.catalog_post("scan", body), replies[0])
+
+    def test_scan_http_progress_and_review_save_remain_responsive_during_hashing(self):
+        file_hash, review = self.seeded_review()
+        folder = Path(self.temporary.name) / "scan-source"
+        folder.mkdir()
+        (folder / "Clean.wav").write_bytes(fixtures.tagged_wav())
+        with server.connect() as db:
+            dataset = server.review_store.dataset_id(db)
+        self.assertEqual(self.catalog_post("scan", {"path": str(folder), "dataset_id": dataset,
+                                                   "request_id": "slow-scan"})[0], 202)
+        entered, release = threading.Event(), threading.Event()
+        original = server.catalog.file_hash
+        def delayed_hash(path, checkpoint):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return original(path, checkpoint)
+        with patch.object(server.catalog, "file_hash", side_effect=delayed_hash), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            work = pool.submit(server.scan_jobs.run_next, server.connect)
+            try:
+                self.assertTrue(entered.wait(5))
+                job = self.catalog_get("scans")["jobs"][0]
+                self.assertEqual(job["status"], "running")
+                self.assertEqual(job["progress"]["current_path"], "Clean.wav")
+                self.assertEqual(self.submit_review(review)[0], 200)
+                self.assertEqual(len(self.corrections()), 1)
+            finally:
+                release.set()
+            self.assertTrue(work.result(timeout=5))
+        self.assertEqual(self.catalog_get("scans")["jobs"][0]["status"], "completed")
+
+    def test_real_server_startup_recovers_interrupted_and_runs_durable_queued_scan(self):
+        first = Path(self.temporary.name) / "first-root"
+        second = Path(self.temporary.name) / "second-root"
+        for folder in (first, second):
+            folder.mkdir()
+            (folder / "Clean.wav").write_bytes(fixtures.tagged_wav())
+        self.scan_folder(first)
+        with server.connect() as db:
+            dataset = server.review_store.dataset_id(db)
+        _, interrupted = self.catalog_post("scan", {"path": str(first), "dataset_id": dataset,
+                                                   "request_id": "interrupted-before-restart"})
+        _, queued = self.catalog_post("scan", {"path": str(second), "dataset_id": dataset,
+                                             "request_id": "queued-before-restart"})
+        with server.connect() as db:
+            db.execute("UPDATE catalog_scan_jobs SET status='running' WHERE id=?", (interrupted["job_id"],))
+        lines = queue.Queue()
+        env = {**os.environ, "AUTOCUE_WEB_DATA": str(server.DATA), "AUTOCUE_PORT": "0",
+               "AUTOCUE_CACHE_DIR": str(Path(self.temporary.name) / "cache")}
+        process = subprocess.Popen([sys.executable, "-u", "-m", "web.server"], cwd=server.ROOT,
+                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        def read_output():
+            for line in process.stdout:
+                lines.put(line)
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        try:
+            output = []
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                line = lines.get(timeout=max(.01, deadline - time.monotonic()))
+                output.append(line)
+                if line.startswith("AutoCue web app: "):
+                    base = line.split(": ", 1)[1].strip()
+                    break
+            else:
+                self.fail("Server failed to start: " + "".join(output))
+            deadline = time.monotonic() + 10
+            while True:
+                with urllib.request.urlopen(base + "/api/catalog/scans", timeout=3) as response:
+                    jobs = {job["id"]: job for job in json.load(response)["jobs"]}
+                if jobs[queued["job_id"]]["status"] == "completed":
+                    break
+                self.assertLess(time.monotonic(), deadline, jobs)
+                time.sleep(.05)
+            self.assertEqual(jobs[interrupted["job_id"]]["status"], "interrupted")
+            self.assertEqual(len(self.catalog_get("roots")["roots"]), 2)
+            self.assertEqual(self.catalog_get("files")["total"], 2)
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            reader.join(timeout=3)
+            process.stdout.close()
+
     def test_catalog_storage_failure_returns_503_and_retains_previous_decision(self):
         _, _, decision = self.catalog_fixture()
         with server.connect() as db:
@@ -101,8 +226,7 @@ class WebServerTests(unittest.TestCase):
         folder = Path(self.temporary.name) / "bad-tags"
         folder.mkdir()
         (folder / "bad.mp3").write_bytes(b"not audio")
-        code, scanned = self.catalog_post("scan", {"path": str(folder)})
-        self.assertEqual(code, 200)
+        scanned = self.scan_folder(folder)
         self.assertEqual(len(scanned["errors"]), 1)
         self.assertEqual(self.catalog_get("files")["files"][0]["state"], "error")
 

@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const {MatchOutbox, StageOutbox} = require("./catalog-state.js");
+const {MatchOutbox, StageOutbox, ScanOutbox} = require("./catalog-state.js");
 function fixture() {
   const values = new Map(), storage = {
     getItem:key => values.get(key) ?? null,
@@ -93,4 +93,41 @@ test("staging storage errors and stale tabs never clear or replace a retry reque
   storage.removeItem = () => { throw new Error("synthetic quota"); };
   assert.throws(() => first.accept(stageReceipt(pending)), /quota/);
   assert.deepEqual(new StageOutbox(storage, "dataset").pending, pending);
+});
+const scanReceipt = pending => ({...pending, ok:true, job_id:"a".repeat(32)});
+test("scan admission survives lost acknowledgment and reload independently of other outboxes", () => {
+  const {storage, open} = fixture(), match = open();
+  match.prepare(fields);
+  const scan = new ScanOutbox(storage, "dataset", () => "scan-id");
+  const pending = scan.prepare({path:"/synthetic/music"});
+  const restored = new ScanOutbox(storage, "dataset");
+  assert.deepEqual(restored.pending, pending);
+  restored.accept(scanReceipt(pending));
+  assert.equal(new ScanOutbox(storage, "dataset").pending, null);
+  assert.deepEqual(open().pending, match.pending);
+  assert.equal(new ScanOutbox(storage, "another-dataset").pending, null);
+});
+test("scan acknowledgment validates original path, request, dataset and durable job identity", () => {
+  const {storage} = fixture(), scan = new ScanOutbox(storage, "dataset", () => "scan-id");
+  const pending = scan.prepare({path:"/synthetic/music"});
+  for (const invalid of [{ok:true}, {...scanReceipt(pending), path:"/other"},
+    {...scanReceipt(pending), request_id:"other"}, {...scanReceipt(pending), dataset_id:"other"},
+    {...scanReceipt(pending), job_id:""}, {...scanReceipt(pending), job_id:"not-an-id"}]) {
+    assert.throws(() => scan.accept(invalid), /Scan acknowledgment/);
+    assert.deepEqual(new ScanOutbox(storage, "dataset").pending, pending);
+  }
+});
+test("scan storage failures and stale tabs cannot lose or replace admitted request recovery", () => {
+  const {storage} = fixture(), scan = new ScanOutbox(storage, "dataset", () => "scan-id");
+  const stale = new ScanOutbox(storage, "dataset");
+  const write = storage.setItem;
+  storage.setItem = () => { throw new Error("quota"); };
+  assert.throws(() => scan.prepare({path:"/music"}), /quota/);
+  assert.equal(scan.pending, null);
+  storage.setItem = write;
+  const pending = scan.prepare({path:"/music"});
+  assert.throws(() => stale.prepare({path:"/other"}), /Another tab.*scan request/);
+  storage.removeItem = () => { throw new Error("denied"); };
+  assert.throws(() => scan.accept(scanReceipt(pending)), /denied/);
+  assert.deepEqual(new ScanOutbox(storage, "dataset").pending, pending);
 });
