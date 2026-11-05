@@ -39,11 +39,24 @@ test("personal outbox storage failures, dataset isolation and stale tabs retain 
 
 function fixture() {
   const store = storage(), crates = new Map(), receipts = new Map();
-  let loseAck = false, conflict = false, failDetail = false, counter = 0;
+  let loseAck = false, conflict = false, failDetail = false, failExport = false, counter = 0;
+  const downloads = [];
   const source = fs.readFileSync(path.join(__dirname, "personal.js"), "utf8");
   const enrich = value => ({...value, entries:value.entries.map(entry => ({...entry,
     song:{artist:"Invented", title:entry.song_id, version:"Clean"}, match_state:"unreviewed", decision_revision:0}))});
   async function api(url, options) {
+    if (url === "/api/catalog/personal/export/preview") {
+      if (failExport) throw new Error("Synthetic export unavailable");
+      const request = JSON.parse(options.body), crate = crates.get(request.crate_id);
+      return {preview_id:"proof", manifest:{requested:crate.entries.length, eligible:crate.entries.length,
+        blocked:0, ready:crate.entries.length > 0, blockers:crate.entries.length ? [] : ["Empty crate"],
+        entries:crate.entries.map((entry, index) => ({...entry, position:index + 1,
+          song:{artist:"Invented", title:entry.song_id}, eligible:true, path:"/synthetic.wav"}))}};
+    }
+    if (url === "/api/catalog/personal/export/download") {
+      if (failExport) throw new Error("Synthetic export stale");
+      return {preview_id:"proof", manifest:{ready:true}, filename:"proof.zip", bundle_base64:"emlw"};
+    }
     if (url === "/api/session") return {};
     if (url === "/api/catalog/personal") return {crates:[...crates.values()].map(crate => ({...crate, entries:crate.entries.length}))};
     if (url.startsWith("/api/catalog/personal/detail?")) {
@@ -82,12 +95,16 @@ function fixture() {
     };
     const context = vm.createContext({$, $$, api, PersonalOutbox, datasetId:"dataset", localStorage:store,
       crypto:{randomUUID:() => `generated-${++counter}`}, escapeHtml:value => String(value),
-      confirm:() => true});
+      confirm:() => true, atob:value => Buffer.from(value, "base64").toString("binary"),
+      Uint8Array, Blob, URL:{createObjectURL:() => "blob:synthetic", revokeObjectURL(){}},
+      document:{createElement:() => {const link = {click:() => downloads.push(link.download)}; return link;}},
+      setTimeout:run => run()});
     vm.runInContext(source, context);
     await new Promise(resolve => setImmediate(resolve));
     return {$, context, buttons};
   }
-  return {open, store, crates, receipts, set loseAck(value) {loseAck = value;},
+  return {open, store, crates, receipts, downloads, set failExport(value) {failExport = value;},
+    set loseAck(value) {loseAck = value;},
     set failDetail(value) {failDetail = value;}, set conflict(value) {conflict = value;}};
 }
 test("actual personal controller recovers lost create acknowledgment after reload without duplicating crate", async () => {
@@ -158,4 +175,33 @@ test("catalog filtering never hides or dereferences personal entries sharing the
   context.filterSongs();
   assert.equal(catalogCard.hidden, true);
   assert.equal(personalCard.hidden, false);
+});
+test("export controller requires inspected preview and clears it after edits or failed revalidation", async () => {
+  const app = fixture(), ui = await app.open();
+  ui.$("#personal-new-name").value = "Export set";
+  await ui.$("#personal-create").onclick();
+  await ui.$("#personal-export-preview").onclick();
+  assert.equal(ui.$("#personal-export-download").disabled, true);
+  assert.match(ui.$("#personal-export-status").textContent, /Empty/);
+  await ui.context.PersonalCrates.add("snapshot", "first");
+  await ui.$("#personal-export-preview").onclick();
+  assert.equal(ui.$("#personal-export-download").disabled, false);
+  await ui.$("#personal-export-download").onclick();
+  assert.deepEqual(app.downloads, ["proof.zip"]);
+  assert.equal(ui.$("#personal-export-download").disabled, true);
+  await ui.$("#personal-export-download").onclick();
+  assert.match(ui.$("#personal-status").textContent, /preview first/);
+  await ui.$("#personal-export-preview").onclick();
+  app.failExport = true;
+  await ui.$("#personal-export-download").onclick();
+  assert.deepEqual(app.downloads, ["proof.zip"]);
+  assert.match(ui.$("#personal-export-status").textContent, /Export failed/);
+  app.failExport = false;
+  await ui.$("#personal-export-preview").onclick();
+  await ui.context.PersonalCrates.add("snapshot", "second");
+  assert.equal(ui.$("#personal-export-download").disabled, true);
+  app.failExport = true;
+  await ui.$("#personal-export-preview").onclick();
+  assert.equal(ui.$("#personal-export-download").disabled, true);
+  assert.match(ui.$("#personal-export-status").textContent, /Verification failed/);
 });

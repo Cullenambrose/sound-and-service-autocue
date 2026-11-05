@@ -1,5 +1,11 @@
 (() => {
-  let outbox, selected = "", current = null, busy = false;
+  let outbox, selected = "", current = null, busy = false, exportPreview = null;
+  function clearExport() {
+    exportPreview = null;
+    $("#personal-export-download").disabled = true;
+    $("#personal-export-status").textContent = "";
+    $("#personal-export-entries").innerHTML = "";
+  }
   const status = (message, failed = false) => {
     $("#personal-status").textContent = message;
     $("#personal-status").classList.toggle("catalog-error", failed);
@@ -28,6 +34,7 @@
     if (outbox.pending) throw new Error("Resolve the pending personal crate save before making another change.");
   }
   async function refresh() {
+    clearExport();
     current = null;
     const data = await api("/api/catalog/personal");
     if (!data.crates.some(crate => crate.id === selected)) selected = data.crates[0]?.id || "";
@@ -91,6 +98,50 @@
     await save(current.id, current.revision, name, refs(current.entries));
   });
   bind("#personal-refresh", refresh);
+  bind("#personal-export-preview", async () => {
+    requireCurrent();
+    clearExport();
+    $("#personal-export-status").textContent = "Reading and hashing reviewed source files; no audio is uploaded.";
+    try {
+      const request = {dataset_id:datasetId, crate_id:current.id, base_revision:current.revision};
+      const result = await api("/api/catalog/personal/export/preview", {
+        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(request)});
+      const manifest = result.manifest;
+      exportPreview = {...request, preview_id:result.preview_id};
+      status("Export preview completed. Review the byte-verification results below.");
+      $("#personal-export-status").textContent = `${manifest.requested} requested · ${manifest.eligible} byte-verified · ${manifest.blocked} blocked. ${manifest.ready ? "Ready for reverified export." : "No playlist can be exported. " + manifest.blockers.join(" ")}`;
+      $("#personal-export-entries").innerHTML = manifest.entries.map(entry =>
+        `<p class="${entry.eligible ? "muted" : "catalog-error"}">${entry.position}. ${escapeHtml(entry.song.artist)} — ${escapeHtml(entry.song.title)} ${escapeHtml(entry.song.version || "")}: ${escapeHtml(entry.reason || "Reviewed bytes verified")} ${escapeHtml(entry.path || "")}</p>`
+      ).join("");
+      $("#personal-export-download").disabled = !manifest.ready;
+    } catch (error) {
+      clearExport();
+      $("#personal-export-status").textContent = "Verification failed; no export is available.";
+      throw error;
+    }
+  });
+  bind("#personal-export-download", async () => {
+    requireCurrent();
+    if (!exportPreview) throw new Error("Verify and inspect an export preview first.");
+    const request = exportPreview;
+    clearExport();
+    $("#personal-export-status").textContent = "Reverifying bytes and crate/match revisions before publication…";
+    try {
+      const result = await api("/api/catalog/personal/export/download", {
+        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(request)});
+      if (result.preview_id !== request.preview_id || !result.manifest.ready)
+        throw new Error("Export acknowledgment did not match the inspected preview.");
+      const bytes = Uint8Array.from(atob(result.bundle_base64), character => character.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], {type:"application/zip"}));
+      const link = document.createElement("a");
+      link.href = url; link.download = result.filename; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      $("#personal-export-status").textContent = "Verified ZIP saved in this app and download requested. Extract it before opening playlist.m3u8. Source files can change afterward; preview again for a new export.";
+    } catch (error) {
+      $("#personal-export-status").textContent = "Export failed; preview again. No unverified download was requested.";
+      throw error;
+    }
+  });
   $("#personal-select").onchange = () => action(async () => {
     selected = $("#personal-select").value;
     await refresh();

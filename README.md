@@ -39,7 +39,10 @@ location after full relative-path/hash verification, preserving file IDs and
 reviewed matches without moving original-file Serato write links.
 The **Arrange your set** section now supports ordered personal crates: create,
 rename, add catalog songs, reorder and remove individual memberships. Changes
-have revision checks and durable retry recovery; playlist export is not yet wired.
+have revision checks and durable retry recovery. Explicit export previews verify
+reviewed source bytes; download rechecks revisions and hashes before atomically
+saving an app-local ZIP containing ordered UTF-8 M3U8, CSV and a manifest.
+Missing or unreviewed entries block the entire export; no original tags change.
 
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)

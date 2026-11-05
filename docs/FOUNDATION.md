@@ -221,16 +221,28 @@ indexed file's exact bytes at the same relative path before atomically updating
 root identity, index and history. File IDs, reviewed matches and cue corrections
 survive; historical provenance and original-file write links are not retargeted.
 Next inspect representative actual exports and benchmark disposable
-representative libraries before personal crates, verified playlist export or AI
-chat.
+representative libraries before production acceptance or AI chat.
 
 **Personal-crate slice:** ordered, revisioned catalog memberships are now editable
 in **Arrange your set**, independently of immutable imported crates. Create,
 rename, add, move and remove actions commit with acknowledged retry receipts and
 a dataset-scoped browser outbox. Membership IDs distinguish repeated songs;
 current match status is resolved on refresh, not pinned as export verification.
-Next implement a verified playlist export preview/manifest, revalidating exact
-source hashes and match/crate revisions before producing M3U8/CSV. Real vendor
+Verified playlist export previews and ZIP bundles now revalidate exact source
+hashes and match/crate revisions before producing M3U8/CSV. Real vendor
 CSV compatibility still requires representative exports. See
 [the personal-crate contract](CATALOG.md#ordered-personal-crates) before extending
 this slice; no Serato crate writes or AI changes were introduced.
+
+**Verified-export slice:** use **Verify export preview**, inspect all ordered
+entries and then **Reverify and download playlist ZIP**. Every entry must have a
+current human-reviewed exact file with freshly verified bytes. The app atomically
+saves a content-addressed ZIP under its own data directory and requests a browser
+download; extract it before opening the M3U8. This does not certify cue quality,
+embed cues, write Serato crates or modify tags. See
+[the export contract](CATALOG.md#verified-playlist-export) for revision gates,
+retry semantics, manifest privacy and filesystem-race limitations.
+Next validate extracted playlists in the actual target DJ software using only a
+disposable representative library, then add a representative vendor CSV adapter
+when the user supplies source examples. Browser download completion and actual DJ
+software import remain acceptance gates; do not claim production compatibility.

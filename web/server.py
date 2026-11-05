@@ -39,6 +39,10 @@ from serato_tags import (
 import serato_tags
 import serato_writer
 import review_store
+if __package__:
+    from . import playlist_export
+else:
+    import playlist_export
 import autocue_worker
 from project_config import project_path
 
@@ -1739,6 +1743,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path in ("/api/catalog/personal/export/preview", "/api/catalog/personal/export/download"):
+                try:
+                    result = playlist_export.prepare(connect, DATA / "exports", self._body_json(),
+                                                     download=parsed.path.endswith("/download"))
+                except OSError as error:
+                    self.log_error("Playlist verification/publication failed: %s", error)
+                    return json_response(self, {"error": "Export was not completed: " + str(error)}, 503)
+                return json_response(self, result)
             if parsed.path == "/api/catalog/personal/save":
                 body = self._body_json()
                 with connect() as db:

@@ -2,6 +2,8 @@ import base64
 import concurrent.futures
 from contextlib import contextmanager
 import hashlib
+import csv
+import io
 import json
 import math
 import os
@@ -14,6 +16,7 @@ import threading
 import time
 import unittest
 import uuid
+import zipfile
 from unittest.mock import patch
 import urllib.error
 import urllib.request
@@ -23,6 +26,208 @@ from web import fixtures, server
 
 
 class WebServerTests(unittest.TestCase):
+    def export_fixture(self, *, duplicates=False):
+        imported, source, decision = self.catalog_fixture()
+        self.assertEqual(self.catalog_post("decide", decision)[0], 200)
+        body = {"dataset_id": decision["dataset_id"], "request_id": "export-create",
+                "crate_id": "export-crate", "base_revision": 0, "name": 'Warmup, "test"',
+                "entries": [{"id": "entry-1", "snapshot_id": imported["snapshot_id"], "song_id": "song-1"}]}
+        if duplicates:
+            body["entries"].append({**body["entries"][0], "id": "entry-2"})
+        self.assertEqual(self.catalog_post("personal/save", body)[0], 200)
+        request = {"dataset_id": body["dataset_id"], "crate_id": body["crate_id"], "base_revision": 1}
+        return source, decision, body, request
+
+    def export_preview(self, request):
+        code, result = self.catalog_post("personal/export/preview", request)
+        self.assertEqual(code, 200, result)
+        return result, {**request, "preview_id": result["preview_id"]}
+
+    def test_export_ordered_duplicates_round_trip_and_deterministic_retry_preserve_source(self):
+        source, _, _, request = self.export_fixture(duplicates=True)
+        before = (source.read_bytes(), server.catalog.signature(source.stat()))
+        with patch.object(server.catalog, "file_hash", wraps=server.catalog.file_hash) as hashing:
+            preview, download = self.export_preview(request)
+        self.assertEqual(hashing.call_count, 1)
+        self.assertEqual((preview["manifest"]["requested"], preview["manifest"]["included"]), (2, 2))
+        code, exported = self.catalog_post("personal/export/download", download)
+        self.assertEqual(code, 200, exported)
+        self.assertEqual(self.catalog_post("personal/export/download", download), (code, exported))
+        data = base64.b64decode(exported["bundle_base64"])
+        self.assertEqual((server.DATA / "exports" / exported["filename"]).read_bytes(), data)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest, preview["manifest"])
+            self.assertEqual(archive.read("playlist.m3u8").decode().splitlines(), ["#EXTM3U", str(source.resolve()), str(source.resolve())])
+            rows = list(csv.DictReader(io.StringIO(archive.read("playlist.csv").decode())))
+            self.assertEqual([row["entry_id"] for row in rows], ["entry-1", "entry-2"])
+            self.assertEqual([row["path"] for row in rows], [str(source.resolve())] * 2)
+        self.assertEqual(before, (source.read_bytes(), server.catalog.signature(source.stat())))
+        with server.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+
+    def test_export_preview_blocks_unreviewed_cleared_offline_and_empty_sets(self):
+        source, decision, body, request = self.export_fixture()
+        source.rename(source.with_suffix(".offline"))
+        preview, download = self.export_preview(request)
+        self.assertFalse(preview["manifest"]["ready"])
+        self.assertEqual(preview["manifest"]["included"], 0)
+        self.assertIn("stale", preview["manifest"]["entries"][0]["reason"])
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        self.assertEqual(self.catalog_post("decide", {**decision, "request_id": "export-clear", "base_revision": 1,
+                                                    "file_id": None, "content_hash": None})[0], 200)
+        preview, _ = self.export_preview(request)
+        self.assertIn("missing", preview["manifest"]["entries"][0]["reason"])
+        with server.connect() as db:
+            db.execute("DELETE FROM catalog_match_decisions")
+        preview, _ = self.export_preview(request)
+        self.assertIn("unreviewed", preview["manifest"]["entries"][0]["reason"])
+        self.assertEqual(self.catalog_post("personal/save", {**body, "request_id": "empty", "base_revision": 1,
+                                                           "entries": []})[0], 200)
+        preview, download = self.export_preview({**request, "base_revision": 2})
+        self.assertIn("Empty", preview["manifest"]["blockers"][0])
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        self.assertFalse((server.DATA / "exports").exists())
+
+    def test_export_hashes_bytes_even_when_index_signatures_agree(self):
+        source, _, _, request = self.export_fixture()
+        original = source.read_bytes()
+        source.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        value = source.stat()
+        with server.connect() as db:
+            db.execute("UPDATE library_files SET size=?,mtime_ns=?,ctime_ns=?", server.catalog.signature(value))
+        preview, download = self.export_preview(request)
+        self.assertIn("bytes differ", preview["manifest"]["entries"][0]["reason"])
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        self.assertFalse((server.DATA / "exports").exists())
+
+    def test_export_rejects_stale_preview_after_match_revision_changes(self):
+        _, decision, _, request = self.export_fixture()
+        _, download = self.export_preview(request)
+        self.assertEqual(self.catalog_post("decide", {**decision, "request_id": "review-again", "base_revision": 1})[0], 200)
+        code, result = self.catalog_post("personal/export/download", download)
+        self.assertEqual(code, 409, result)
+        self.assertIn("stale", result["error"])
+        self.assertFalse((server.DATA / "exports").exists())
+
+    def test_export_rejects_changed_crate_and_wrong_dataset_and_malformed_requests(self):
+        _, _, body, request = self.export_fixture()
+        _, download = self.export_preview(request)
+        self.assertEqual(self.catalog_post("personal/export/preview", request, authenticated=False)[0], 403)
+        for edit in ({"base_revision": True}, {"extra": 0}, {"crate_id": ""}):
+            self.assertEqual(self.catalog_post("personal/export/preview", {**request, **edit})[0], 400)
+        self.assertEqual(self.catalog_post("personal/export/download", request)[0], 400)
+        self.assertEqual(self.catalog_post("personal/export/preview", {**request, "dataset_id": "other"})[0], 409)
+        self.assertEqual(self.catalog_post("personal/save", {**body, "request_id": "rename-export",
+                                                           "base_revision": 1, "name": "New name"})[0], 200)
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        self.assertFalse((server.DATA / "exports").exists())
+
+    def test_export_rechecks_authoritative_state_without_holding_lock_during_hash(self):
+        _, decision, _, request = self.export_fixture()
+        original = server.catalog.file_hash
+        def change_during_hash(path):
+            # A competing writer can commit during hash I/O.
+            with server.connect() as db:
+                server.catalog.decide(db, {**decision, "request_id": "concurrent-review", "base_revision": 1,
+                                          "file_id": None, "content_hash": None})
+            return original(path)
+        with patch.object(server.catalog, "file_hash", side_effect=change_during_hash):
+            code, result = self.catalog_post("personal/export/preview", request)
+        self.assertEqual(code, 409, result)
+        self.assertFalse((server.DATA / "exports").exists())
+
+    def test_export_detects_file_mutation_during_and_after_hash(self):
+        source, _, _, request = self.export_fixture()
+        original = server.catalog.file_hash
+        def change_after_hash(path):
+            result = original(path)
+            path.write_bytes(path.read_bytes() + b"changed")
+            return result
+        with patch.object(server.catalog, "file_hash", side_effect=change_after_hash):
+            code, result = self.catalog_post("personal/export/preview", request)
+        self.assertEqual(code, 409, result)
+        self.assertFalse((server.DATA / "exports").exists())
+        self.assertTrue(source.exists())
+
+    def test_export_atomic_publication_failure_has_no_partial_bundle(self):
+        _, _, _, request = self.export_fixture()
+        _, download = self.export_preview(request)
+        with patch.object(server.playlist_export.os, "replace", side_effect=OSError("Synthetic full disk")):
+            code, result = self.catalog_post("personal/export/download", download)
+        self.assertEqual(code, 503, result)
+        self.assertEqual(list((server.DATA / "exports").iterdir()), [])
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 200)
+
+    def test_export_existing_bundle_does_not_bypass_fresh_source_verification(self):
+        source, _, _, request = self.export_fixture()
+        _, download = self.export_preview(request)
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 200)
+        source.unlink()
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        self.assertEqual(len(list((server.DATA / "exports").glob("*.zip"))), 1)
+
+    def test_export_rejects_index_root_change_and_symlink_source(self):
+        source, _, _, request = self.export_fixture()
+        _, download = self.export_preview(request)
+        with server.connect() as db:
+            db.execute("UPDATE library_roots SET scan_revision=scan_revision+1")
+        self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        moved = source.with_suffix(".original")
+        source.rename(moved)
+        source.symlink_to(moved)
+        preview, _ = self.export_preview(request)
+        self.assertFalse(preview["manifest"]["ready"])
+
+    def test_export_unicode_spaces_csv_escaping_and_line_delimiter_blocking(self):
+        source, decision, _, request = self.export_fixture()
+        renamed = source.parent / 'caf\u00e9, "warm up".wav'
+        source.rename(renamed)
+        self.scan_folder(source.parent)
+        file = next(item for item in self.catalog_get("files")["files"] if item["state"] == "available")
+        self.assertEqual(self.catalog_post("decide", {**decision, "request_id": "unicode-match", "base_revision": 1,
+                                                    "file_id": file["id"], "content_hash": file["content_hash"]})[0], 200)
+        with server.connect() as db:
+            row = db.execute("SELECT metadata_json FROM catalog_songs LIMIT 1").fetchone()
+            metadata = json.loads(row["metadata_json"])
+            metadata.update(artist="=SUM(1,2)", title='Quoted, "title"\nwith newline')
+            db.execute("UPDATE catalog_songs SET metadata_json=?", (json.dumps(metadata),))
+        preview, download = self.export_preview(request)
+        code, result = self.catalog_post("personal/export/download", download)
+        self.assertEqual(code, 200, result)
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(result["bundle_base64"]))) as archive:
+            self.assertEqual(archive.read("playlist.m3u8").decode().splitlines()[1], str(renamed.resolve()))
+            row = next(csv.DictReader(io.StringIO(archive.read("playlist.csv").decode())))
+            self.assertEqual(row["path"], str(renamed.resolve()))
+            self.assertEqual(row["artist"], "'=SUM(1,2)")
+            self.assertEqual(row["title"], metadata["title"])
+            self.assertEqual(preview["manifest"]["entries"][0]["song"]["artist"], "=SUM(1,2)")
+        newline = renamed.parent / "bad\npath.wav"
+        renamed.rename(newline)
+        self.scan_folder(newline.parent)
+        file = next(item for item in self.catalog_get("files")["files"] if item["state"] == "available")
+        self.assertEqual(self.catalog_post("decide", {**decision, "request_id": "newline-match", "base_revision": 2,
+                                                    "file_id": file["id"], "content_hash": file["content_hash"],
+                                                    "override": True, "note": "Synthetic deliberate conflict"})[0], 200)
+        preview, _ = self.export_preview(request)
+        self.assertIn("delimiter", preview["manifest"]["entries"][0]["reason"])
+
+    def test_export_rechecks_source_after_bundle_serialization_and_reports_unreadable_bytes(self):
+        source, _, _, request = self.export_fixture()
+        _, download = self.export_preview(request)
+        with patch.object(server.catalog, "file_hash", side_effect=PermissionError("Synthetic read denied")):
+            preview, _ = self.export_preview(request)
+        self.assertIn("read denied", preview["manifest"]["entries"][0]["reason"])
+        original = server.playlist_export.bundle
+        def mutate_during_serialization(document):
+            data = original(document)
+            source.write_bytes(source.read_bytes() + b"changed")
+            return data
+        with patch.object(server.playlist_export, "bundle", side_effect=mutate_during_serialization):
+            self.assertEqual(self.catalog_post("personal/export/download", download)[0], 409)
+        self.assertFalse((server.DATA / "exports").exists())
+
     def personal_fixture(self):
         from web.test_catalog import snapshot
         code, imported = self.catalog_post("import", snapshot())

@@ -600,8 +600,9 @@ This tests local disposable folders, not actual external-drive reconnection.
    the initial bound; broader volume identity/partial relocation remains future
    work.
 3. Ordered personal crates now work independently of the blocked real adapter.
-   Next add verified M3U8/CSV export previews/manifests, explicitly rechecking
-   source bytes and match/crate revisions. Do not equate this synthetic workflow
+   Verified M3U8/CSV export previews/manifests now explicitly recheck
+   source bytes and match/crate revisions. Next verify extracted playlists in the
+   actual target DJ software on disposable representative files. Do not equate this synthetic workflow
    with actual vendor compatibility or production-scale acceptance.
    No production tag-writing or AI expansion here.
 
@@ -619,7 +620,7 @@ to the personal section to move entries up/down, remove one membership or rename
 the crate. Repeated songs are intentional: each addition has a separate entry ID.
 Names need not be unique; crate identity is its client-generated ID, not its name.
 This slice has no whole-crate deletion/archive, drag/drop, global song search,
-bulk source-crate copying, notes or export controls. Empty crates are supported.
+bulk source-crate copying or notes. Empty crates are supported, but not exportable.
 
 Each action commits immediately only after acknowledgment; changes to name
 textboxes are not saved until **Create**/**Rename** is clicked and are not draft
@@ -714,3 +715,113 @@ rename, remove one membership and reload. The final crate had revision 6 and
 six receipts, with its original first membership retained in the expected
 position. All three source memberships remained unchanged; there were no scan,
 audio-track or model jobs. This is not a real-library export/accuracy test.
+
+## Verified playlist export
+
+Implementation plan: capture a consistent crate/match/index snapshot, verify
+reviewed source bytes outside database locks, gate publication on a second
+snapshot and final file identities, then round-trip and atomically publish a
+single bundle. No source audio, original tags, cue plans or source catalogs are
+written by this operation. No model or external request is made.
+
+In **Arrange your set**, click **Verify export preview**. Each ordered membership
+shows its source artist/title/version, selected path and either byte verification
+or an explicit blocker. Duplicate memberships are retained. Empty crates and any
+unreviewed, cleared, stale, offline, changed, unreadable or symlinked source block
+the whole export. There is deliberately no partial-export/skip option and no
+automatic replacement file. Hash agreement proves the reviewed file bytes, not
+the correct recording/edit or cue quality. Cue review is available separately;
+this playlist does not embed or approve cues.
+
+Only a completely eligible preview enables **Reverify and download playlist ZIP**.
+That action repeats the full hash pass and rejects any changed crate revision,
+match revision, index/root metadata or final source identity. A prior preview is
+not permission to use a cached path/hash. Refresh, crate selection and edits clear
+the preview; pending crate saves block export. Other tabs and removable drives
+may invalidate a displayed preview; failures require a new explicit preview.
+
+### API and artifact contract
+
+Both POST routes use existing same-origin/session protection:
+
+- `/api/catalog/personal/export/preview` takes exactly `dataset_id`, `crate_id`
+  and positive integer `base_revision`.
+- `/api/catalog/personal/export/download` additionally requires `preview_id`.
+
+Preview returns `ok`, a SHA-256 `preview_id` over the canonical manifest and the
+manifest. Manifest schema 1 records dataset and crate identity/name/revision,
+ordered source membership/song metadata, decision revisions, file IDs, absolute
+paths, expected/verified SHA-256, reasons, indexed root records and final
+device/inode/size/mtime/ctime proof identities. `requested`, `eligible`, `blocked`
+reconcile the whole membership list; `included` is the proposed complete playlist
+size if `ready`, otherwise zero. A preview writes no artifact. Empty crates have
+an explicit top-level blocker. The manifest contains **local paths and source
+metadata**: keep it private and do not upload it as diagnostic data.
+
+Download returns the same manifest/token plus `filename` and `bundle_base64`.
+The server saves the ZIP under `<app-data>/exports/<preview_id>.zip` via a unique
+temporary file, flush/fsync and atomic replacement. No caller-supplied output path
+is accepted. All three files are in one atomic bundle:
+
+- `playlist.m3u8`: UTF-8, `#EXTM3U` and one absolute original-file path per entry.
+  Order and duplicates are exact; no EXTINF/tag assumptions. Paths with playlist
+  line delimiters/NUL are blocked instead of escaped into ambiguous entries.
+- `playlist.csv`: ordered position/membership/source IDs, artist/title/version,
+  path/file ID/hash and match revision, using standard CSV quoting. Text that
+  could become a spreadsheet formula is prefixed with an apostrophe; raw source
+  values remain unchanged in the manifest. This is a generic interchange format,
+  **not** an implementation of any particular vendor CSV import contract.
+- `manifest.json`: the inspected/revalidated proof described above.
+
+M3U8 and CSV are reparsed to reconcile path order/count; every ZIP member is
+reopened and compared before publication. ZIP bytes are deterministic for the
+same manifest. A lost download response can safely be retried with the identical
+preview while all state/bytes remain unchanged; it re-verifies instead of
+replaying a historical receipt. If state changed, the retry returns `409` and
+never restores an older playlist as current. Previously saved bundles remain
+historical artifacts, not continuing availability guarantees.
+
+`400` rejects malformed requests; `409` rejects wrong datasets, stale crate or
+preview state and blocked downloads. A source-read error during preview appears
+as an entry blocker; database/publication failures are explicitly reported
+(`503` for storage errors, with server logging). A failed atomic replace removes
+its temporary file and preserves any previous complete artifact. There is no
+automatic export retention/pruning or saved-artifact browser in this slice.
+
+Extract the ZIP before opening `playlist.m3u8`. The browser reports **download
+requested**, not that the browser saved it successfully. If the browser blocks a
+download, allow downloads and explicitly preview/download again; the server's
+complete bundle remains in its app-local exports directory. Moving the playlist
+does not relocate audio. Absolute paths remain tied to this machine/mount.
+
+### Verification and limits
+
+Current results: **345 engine, 154 web/catalog/scan and 55 Node tests passed**.
+New HTTP regressions cover duplicate order and deterministic retries, byte-hash
+mismatch despite agreeing index signatures, unreadable/offline/cleared/unreviewed
+and empty blockers, Unicode/spaces/quotes/newlines, spreadsheet-safe CSV, stale
+preview/crate/match/index state, writers committing during hash reads, mutation
+during hashing or bundle serialization, missing sources after a prior successful
+export, symlink rejection and atomic-publication failure/retry. Controller tests
+execute the actual preview/download code, enforce preview invalidation and
+verify that failures never initiate an unverified download.
+
+Browser verification used two generated tagged WAVs and three ordered entries
+(first, second, first). The real UI verified all three and published one complete
+bundle; independently reopening it confirmed exact order, Unicode/quoted paths,
+duplicate membership identity, source hashes and no analysis/staged-track jobs.
+Removing the second disposable source after a new preview made download fail
+closed; a new preview showed two eligible and one blocked, with download disabled.
+The browser automation did **not** receive a download-completion event, so actual
+browser filesystem delivery remains unverified even though the persisted
+app-local ZIP was checked. Actual Serato/DJ-software import/playback is untested.
+
+Hash reads are synchronous HTTP work (bounded by the existing 1,000-entry crate
+limit), not durable/cancellable jobs; each distinct selected file is hashed once
+per action. Slow/disconnected filesystem calls can delay the request. No audio
+read holds the SQLite writer lock; final publication briefly does. The filesystem
+cannot be locked transactionally: stat/identity/root checks detect normal changes
+up to the publication gate, but cannot prevent a concurrent external edit or
+disconnect afterward. Export only stable folders; regenerate after changes.
+Production-size performance, external-drive behavior and target-software
+compatibility require disposable representative acceptance before production use.
