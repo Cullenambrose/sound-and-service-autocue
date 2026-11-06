@@ -126,7 +126,7 @@ def validate_snapshot(document):
                 raise ValueError("Each song must be an object.")
             song_id = text(song.get("id"), "song id", required=True)
             text(song.get("artist"), "song artist")
-            text(song.get("title"), "song title", required=True)
+            text(song.get("title"), "song title")
             text(song.get("version", ""), "song version")
             for field in ("bpm", "duration_s"):
                 value = song.get(field)
@@ -461,6 +461,8 @@ def reviewed_file(db, body):
 
 def candidates(song, files):
     found = []
+    if not song["title"].strip():
+        return found
     for file in files:
         metadata = file["metadata"]
         if not metadata.get("artist") or not metadata.get("title") or file["error"]:
@@ -564,7 +566,7 @@ def decide(db, body):
             raise Conflict("Selected file changed while verifying; rescan before selecting it.")
         metadata = file["metadata"]
         catalog_song = json.loads(song["metadata_json"])
-        agrees = bool(catalog_song["artist"].strip()) \
+        agrees = bool(catalog_song["artist"].strip() and catalog_song["title"].strip()) \
             and normalize(metadata.get("artist", "")) == normalize(catalog_song["artist"]) \
             and version_title(metadata) == version_title(catalog_song)
         if not agrees and (not body.get("override") or not body.get("note", "").strip()):

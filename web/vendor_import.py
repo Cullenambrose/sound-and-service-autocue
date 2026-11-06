@@ -1,6 +1,7 @@
 """Read-only adapter for the manifest-backed Crate Hackers CSV export."""
 import argparse
 import csv
+import errno
 import hashlib
 import json
 import math
@@ -17,6 +18,16 @@ REFERENCE = "Crate Hackers Reference"
 
 
 def read_source(root, relative):
+    for attempt in range(3):
+        try:
+            return _read_source(root, relative)
+        except OSError as error:
+            if error.errno != errno.ETIMEDOUT or attempt == 2:
+                raise OSError(error.errno, f"Could not read declared source {relative}: {error.strerror}") from error
+            warnings.warn(f"Timed out reading {relative}; retrying read-only ({attempt + 1}/2).")
+
+
+def _read_source(root, relative):
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
         raise ValueError("Export filenames must be nonempty relative paths.")
     path = root / relative
@@ -63,16 +74,18 @@ def parse_csv(data, filename):
         if len(row) != len(HEADER) or row[0] != str(len(songs) + 1):
             raise ValueError(f"{filename}:{line}: invalid columns or nonsequential track order.")
         raw = dict(zip(HEADER[1:], row[1:]))
-        catalog.text(raw["Title"], "Title", required=True)
+        catalog.text(raw["Title"], "Title")
         catalog.text(raw["Artist"], "Artist")
         attributes = {field.lower(): number(raw[field], field)
                       for field in ("BPM", "Danceability", "Energy", "Mood")}
         # This CSV has no vendor song ID. Hash exact row metadata, excluding
         # membership order; never claim it identifies a recording or local file.
+        unknown = [field for field in ("Artist", "Title") if not raw[field].strip()]
         songs.append({"id": "csv-row-" + catalog.digest(raw), "artist": raw["Artist"],
                       "title": raw["Title"], "version": "", "key": raw["Key"],
                       **attributes, "source_fields": raw,
-                      "source_warnings": [] if raw["Artist"].strip() else ["Source artist is missing; explicit match override required."]})
+                      "source_warnings": [f"Source {field.lower()} is missing; no automatic tag agreement."
+                                          for field in unknown]})
     return songs, rows[:start]
 
 
@@ -148,6 +161,7 @@ def convert(directory, progress=None):
               "memberships": sum(len(c["songs"]) for c in crates), "distinct_row_metadata": len(songs),
               "declared_csv_files": len(filenames),
               "memberships_missing_artist": sum(not song["artist"].strip() for c in crates for song in c["songs"]),
+              "memberships_missing_title": sum(not song["title"].strip() for c in crates for song in c["songs"]),
               "unreferenced_csv_files": len(list(root.glob("*.csv"))) - len(filenames)}
     return document, report
 

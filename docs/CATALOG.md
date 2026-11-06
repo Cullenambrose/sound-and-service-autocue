@@ -924,12 +924,44 @@ not recording identity. Missing artists remain blank, with visible warnings;
 title-only match candidates require an explicit override and note.
 
 This checkpoint is intentionally fail-closed and **not yet real-collection
-acceptance**. Conversion of the supplied real folder discovered blank titles
-after handling blank artists. It currently rejects those rows rather than
-dropping memberships or inventing metadata; complete reconciliation is pending.
+acceptance**. Blank artist/title fields are preserved verbatim with source
+warnings and never count as metadata agreement; title-less rows get no match
+candidates. A real conversion attempt was stopped by repeated cloud-filesystem
+timeouts before publication. Do not retry until the user can provide an available
+local copy, and do not report inferred/reconciled counts from a partial attempt.
 Cloud-materialized files whose stats change during reading require an identical
-second read with stable stats and emit a warning, otherwise conversion fails.
-Synthetic adapter/catalog/web tests: **170 passed**; Node tests: **58 passed**.
-No actual export metadata or music is committed. Next preserve the newly observed
-unknown-title cases explicitly and rerun full real-count reconciliation before
-claiming the adapter complete.
+second read with stable stats; transient read timeouts receive only two retries.
+Synthetic adapter/catalog/web tests: **172 passed**; engine: **348 passed**;
+Node: **58 passed**. No actual export metadata or music is committed.
+
+### Serato 5 playlist acceptance package
+
+The read-only QA package generator creates original synthetic percussion,
+verified backups and disposable playback copies, imports only those copies into
+an isolated AutoCue data directory, and exports an ordered playlist
+`copy 1, copy 2, copy 1`. It never discovers or scans a user library and does not
+write Serato tags. To prepare a fresh package, use a new empty directory:
+
+```bash
+.venv/bin/python -m scripts.serato_playlist_qa create \
+  --directory /path/to/new/disposable/serato-qa
+```
+
+In Serato DJ Pro **5.0**, import
+`/path/to/new/disposable/serato-qa/playlist/playlist.m3u8`, confirm the order and
+duplicate, and play only the generated copies. Do not save/write tags. For an
+optional read-only post-check, close Serato and run:
+
+```bash
+.venv/bin/python -m scripts.serato_playlist_qa capture \
+  --directory /path/to/disposable/serato-qa \
+  --serato-version 5.0 \
+  --order-ok --playback-ok --duplicates-ok
+```
+
+The capture verifies untouched originals/backups and the generated copies'
+audio hashes, then records observed Serato frames; it does not edit media.
+`--*-ok` options are human assertions, not automatically verified acceptance.
+The installed target-app import/playback remains blocked until that human check
+is completed. Any future Serato metadata write is outside this helper and must
+first use the approved `tag_gate`, with Serato closed and dry-run reviewed.

@@ -71,7 +71,7 @@
     $("#personal-title").textContent = current ? `${current.name} · revision ${current.revision}` : "Choose or create a personal crate";
     $("#personal-name").value = current?.name || "";
     $("#personal-entries").innerHTML = current?.entries.map((entry, index) =>
-      `<article class="catalog-song"><h4>${index + 1}. ${escapeHtml(entry.song.artist)} — ${escapeHtml(entry.song.title)} ${escapeHtml(entry.song.version || "")}</h4>
+      `<article class="catalog-song"><h4>${index + 1}. ${escapeHtml(entry.song.artist || "Unknown artist")} — ${escapeHtml(entry.song.title || "Unknown title")} ${escapeHtml(entry.song.version || "")}</h4>
       <p class="muted">Catalog ${escapeHtml(entry.snapshot_id.slice(0, 10))} / ${escapeHtml(entry.song_id)} · ${escapeHtml(entry.match_state)} · match revision ${entry.decision_revision}${entry.selected_file ? " · " + escapeHtml(entry.selected_file.path) : ""}</p>
       <div class="path-row"><button class="quiet" data-personal-up="${index}" ${index === 0 ? "disabled" : ""}>Move up</button><button class="quiet" data-personal-down="${index}" ${index === current.entries.length - 1 ? "disabled" : ""}>Move down</button><button class="quiet" data-personal-remove="${index}">Remove entry</button></div></article>`
     ).join("") || '<p class="muted">No entries. Browse a catalog crate and add songs to this selected personal crate.</p>';
@@ -137,7 +137,7 @@
       status("Export preview completed. Review the byte-verification results below.");
       $("#personal-export-status").textContent = `${manifest.requested} requested · ${manifest.eligible} byte-verified · ${manifest.blocked} blocked. ${manifest.ready ? "Ready for reverified export." : "No playlist can be exported. " + manifest.blockers.join(" ")}`;
       $("#personal-export-entries").innerHTML = manifest.entries.map(entry =>
-        `<p class="${entry.eligible ? "muted" : "catalog-error"}">${entry.position}. ${escapeHtml(entry.song.artist)} — ${escapeHtml(entry.song.title)} ${escapeHtml(entry.song.version || "")}: ${escapeHtml(entry.reason || "Reviewed bytes verified")} ${escapeHtml(entry.path || "")}</p>`
+        `<p class="${entry.eligible ? "muted" : "catalog-error"}">${entry.position}. ${escapeHtml(entry.song.artist || "Unknown artist")} — ${escapeHtml(entry.song.title || "Unknown title")} ${escapeHtml(entry.song.version || "")}: ${escapeHtml(entry.reason || "Reviewed bytes verified")} ${escapeHtml(entry.path || "")}</p>`
       ).join("");
       $("#personal-export-download").disabled = !manifest.ready;
     } catch (error) {

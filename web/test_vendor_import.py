@@ -1,5 +1,6 @@
 import copy
 import csv
+import errno
 import io
 import json
 from pathlib import Path
@@ -125,6 +126,20 @@ class VendorImportTests(unittest.TestCase):
         self.assertFalse(candidates[0]["metadata_equal"])
         self.assertIn("missing", candidates[0]["reason"])
 
+    def test_missing_titles_are_preserved_without_candidate_substitutions(self):
+        songs, _ = vendor_import.parse_csv(
+            (",".join(vendor_import.HEADER) + "\n1,,Invented,0,,0,0,0\n2,,,0,,0,0,0\n").encode(),
+            "unknown-title.csv")
+        self.assertEqual(len(songs), 2)
+        self.assertEqual([song["title"] for song in songs], ["", ""])
+        self.assertNotEqual(songs[0]["id"], songs[1]["id"])
+        self.assertEqual(catalog.candidates(songs[0], [{"metadata": {"title": "", "artist": "Invented"},
+                                                     "path": "/synthetic.wav", "error": ""}]), [])
+        self.assertTrue(all(song["source_warnings"] for song in songs))
+        document = {"schema_version": 1, "source": "synthetic",
+                    "crates": [{"id": "unknown", "title": "Unknowns", "available": True, "songs": songs}]}
+        self.assertEqual(len(catalog.validate_snapshot(document)), 2)
+
     def test_paths_symlinks_and_missing_csv_are_rejected(self):
         for filename in ("../outside.csv", "/absolute.csv", "sub/file.csv", ""):
             self.manifest[0]["file"] = filename
@@ -158,6 +173,17 @@ class VendorImportTests(unittest.TestCase):
                 patch.object(Path, "read_bytes", mutate):
             with self.assertRaisesRegex(ValueError, "changed"):
                 vendor_import.read_source(self.root, "first.csv")
+
+    def test_cloud_timeouts_retry_bounded_and_name_the_failed_source(self):
+        timeout = OSError(errno.ETIMEDOUT, "Synthetic cloud timeout")
+        with patch.object(vendor_import, "_read_source", side_effect=[timeout, self.csv_bytes]) as reader:
+            with self.assertWarnsRegex(UserWarning, "retrying"):
+                self.assertEqual(vendor_import.read_source(self.root, "first.csv"), self.csv_bytes)
+            self.assertEqual(reader.call_count, 2)
+        with patch.object(vendor_import, "_read_source", side_effect=timeout) as reader:
+            with self.assertWarns(UserWarning), self.assertRaisesRegex(OSError, "first.csv"):
+                vendor_import.read_source(self.root, "first.csv")
+            self.assertEqual(reader.call_count, 3)
 
     def test_row_identity_excludes_position_but_preserves_version_and_metadata_differences(self):
         songs, _ = vendor_import.parse_csv(self.csv_bytes, "synthetic.csv")
