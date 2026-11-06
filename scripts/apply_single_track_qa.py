@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """Analyze ONE MP3 and write the v6.1 Pop/Vocal 8-pad cues to its Serato tags, with backups and verification.
 
-Run on the DJ MacBook Pro from the repo root, with Serato DJ Pro closed:
+With Serato DJ Pro closed, inspect a disposable MP3 with a dry run:
 
     .venv/bin/python scripts/apply_single_track_qa.py \
-        --track "/Users/cullenambrose/Music/Master Music/Van Morrison - Into The Mystic (Re-Drum) - 5B - 84.mp3"
+        --track "/path/to/disposable-test.mp3" --dry-run
 
-Use --dry-run first to see the planned pads without touching the file.
+Only after reviewing the dry run, pass --apply to write through tag_gate.
 """
 import argparse
-import datetime
-import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,8 +19,11 @@ sys.path.insert(0, str(ROOT))
 
 import serato_tags  # noqa: E402
 import serato_writer  # noqa: E402
+from library.adapters.serato import SeratoAdapter  # noqa: E402
+from library.model import Cue, Track  # noqa: E402
+from library.tag_gate import tag_write  # noqa: E402
 
-PROTECTED_NAMES = ("Happy (N And D Chorus Intro)",)
+PROTECTED_NAMES = ("happy", "into the mystic")
 SERATO_PROCESSES = ("Serato", "Serato DJ Pro", "Serato DJ Lite")
 DEFAULT_BACKUP_DIR = Path.home() / "Music" / "AutoCue Backups"
 
@@ -33,8 +33,8 @@ class Refused(Exception):
 
 
 def check_track(path):
-    if any(name.casefold() in path.name.casefold() for name in PROTECTED_NAMES):
-        raise Refused(f"{path.name} is the read-only Track #1 reference fixture; refusing to touch it.")
+    if any(name in path.name.casefold() for name in PROTECTED_NAMES):
+        raise Refused(f"{path.name} is a protected reference track; refusing to touch it.")
     if path.suffix.lower() != ".mp3":
         raise Refused(f"{path.name}: only MP3 files are supported by this script.")
     if not path.is_file():
@@ -76,24 +76,6 @@ def artist_title(path):
         guessed_artist, guessed_title = path.stem.split(" - ", 1)
         artist, title = artist or guessed_artist.strip(), title or guessed_title.split(" - ")[0].strip()
     return artist, title
-
-
-def backup(path, backup_dir):
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = backup_dir / f"{stamp} {path.name}"
-    if target.exists():
-        raise Refused(f"Backup already exists: {target}")
-    original_sha = serato_writer.file_sha256(path)
-    shutil.copy2(path, target)
-    backup_sha = serato_writer.file_sha256(target)
-    if backup_sha != original_sha:
-        target.unlink(missing_ok=True)
-        raise Refused("Backup SHA-256 does not match the original; nothing was written.")
-    target.with_name(target.name + ".json").write_text(json.dumps({
-        "original_path": str(path), "backup_path": str(target), "sha256": original_sha,
-        "created": stamp}, indent=2) + "\n")
-    return target, original_sha
 
 
 def fmt_time(ms):
@@ -164,9 +146,22 @@ def run(args):
     check_serato_closed()
     if serato_writer.file_sha256(path) != sha_before_analysis:
         raise Refused(f"{path.name} changed during analysis; nothing was written.")
-    backup_path, original_sha = backup(path, Path(args.backup_dir).expanduser())
-    print(f"\nBackup: {backup_path} (SHA-256 verified {original_sha[:12]}...)")
-    result = serato_writer.write_mp3_pads(path, pads)
+    adapter = SeratoAdapter(process_checker=lambda: bool(serato_running()))
+    cues = [Cue(index=pad["index"], label=pad["name"], time_ms=pad["position_ms"], color=pad["color"])
+            for pad in pads]
+    write_plan = adapter.plan_write(Track(path=str(path)), cues)
+    result = tag_write(
+        str(path),
+        adapter,
+        write_plan,
+        apply=args.apply,
+        backup_root=str(Path(args.backup_dir).expanduser()),
+    )
+    if result.get("dry_run"):
+        print("\nDry run: the file was not changed.")
+        return 0
+    backup_path = Path(result["backup_path"])
+    print(f"\nBackup: {backup_path}")
     audio_after = serato_writer.mp3_audio_sha256(path)
     if audio_after != result["audio_sha256_before"]:
         raise RuntimeError(f"Audio stream hash changed after writing! Restore from {backup_path}")
@@ -192,7 +187,9 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--track", required=True, help="Full path to the single MP3 to update")
-    parser.add_argument("--dry-run", action="store_true", help="Analyze and print the pads without writing")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Analyze and print the pads without writing (default)")
+    mode.add_argument("--apply", action="store_true", help="Write through tag_gate after reviewing a dry run")
     parser.add_argument("--genre", default="", help="Override the genre tag (default: ID3 genre, else pop)")
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR), help="Where timestamped backups go")
     args = parser.parse_args(argv)

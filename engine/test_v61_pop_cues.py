@@ -409,6 +409,12 @@ class SingleTrackScriptTests(unittest.TestCase):
                 self.assertEqual(script.quiet_main(["--track", str(happy)]), 2)
                 analyze.assert_not_called()
             self.assertEqual(happy.read_bytes(), b"do not touch")
+            into_the_mystic = Path(directory) / "Into The Mystic.mp3"
+            into_the_mystic.write_bytes(b"do not touch")
+            with patch.object(script, "analyze_track") as analyze:
+                self.assertEqual(script.quiet_main(["--track", str(into_the_mystic)]), 2)
+                analyze.assert_not_called()
+            self.assertEqual(into_the_mystic.read_bytes(), b"do not touch")
             other = Path(directory) / "Other.mp3"
             other.write_bytes(b"x")
             with patch.object(script, "serato_running", return_value=["Serato DJ Pro"]), \
@@ -430,10 +436,16 @@ class SingleTrackScriptTests(unittest.TestCase):
             backups = Path(directory) / "backups"
             with patch.object(script, "serato_running", return_value=[]), \
                     patch.object(script, "analyze_track", return_value=plan):
-                self.assertEqual(script.quiet_main(["--track", str(song), "--dry-run"]), 0)
+                self.assertEqual(script.quiet_main(["--track", str(song)]), 0)
                 self.assertEqual(song.read_bytes(), original)
-                self.assertEqual(script.quiet_main(["--track", str(song), "--backup-dir", str(backups)]), 0)
-            saved = [path for path in backups.iterdir() if path.suffix == ".mp3"]
+            self.assertFalse(backups.exists())
+            with patch.object(script, "serato_running", return_value=[]), \
+                    patch.object(script, "analyze_track", return_value=plan), \
+                    patch.object(script, "tag_write", wraps=script.tag_write) as gate:
+                self.assertEqual(script.quiet_main(["--track", str(song), "--backup-dir", str(backups),
+                                                     "--apply"]), 0)
+                gate.assert_called_once()
+            saved = list(backups.rglob("*.mp3"))
             self.assertEqual(len(saved), 1)
             self.assertEqual(saved[0].read_bytes(), original)
             self.assertEqual(serato_writer.mp3_audio_sha256(song), audio_before)
