@@ -415,6 +415,9 @@ class SingleTrackScriptTests(unittest.TestCase):
                 self.assertEqual(script.quiet_main(["--track", str(into_the_mystic)]), 2)
                 analyze.assert_not_called()
             self.assertEqual(into_the_mystic.read_bytes(), b"do not touch")
+            happy_together = Path(directory) / "Happy Together.mp3"
+            happy_together.write_bytes(b"synthetic name-check fixture")
+            script.check_track(happy_together)
             other = Path(directory) / "Other.mp3"
             other.write_bytes(b"x")
             with patch.object(script, "serato_running", return_value=["Serato DJ Pro"]), \

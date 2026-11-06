@@ -23,7 +23,7 @@ from library.adapters.serato import SeratoAdapter  # noqa: E402
 from library.model import Cue, Track  # noqa: E402
 from library.tag_gate import tag_write  # noqa: E402
 
-PROTECTED_NAMES = ("happy", "into the mystic")
+PROTECTED_NAMES = ("happy (n and d chorus intro)", "into the mystic")
 SERATO_PROCESSES = ("Serato", "Serato DJ Pro", "Serato DJ Lite")
 DEFAULT_BACKUP_DIR = Path.home() / "Music" / "AutoCue Backups"
 
