@@ -179,6 +179,82 @@ class V61AlgorithmTests(unittest.TestCase):
         found = pop_cues.refine_vocal_onset(15.9, grid, fine, 0.001)
         self.assertEqual((found["time_s"], found["source"]), (15.9, "whisperx_first_word"))
 
+    def test_long_pickup_bar_assignment_leads_into_structural_downbeat(self):
+        """Pickups >0.25 bars after a downbeat should be assigned to the next bar they lead into.
+        
+        This prevents validation failures when a pickup starts >0.5 bars before the structural
+        downbeat, which would be assigned to the previous bar by rounding.
+        """
+        grid = pop_cues.beatgrid_ruler(0.0, 120.0)  # bar_s = 2.0
+        bar8_time = bar_to_time(8, grid)  # 16.0 seconds
+        
+        # Test case 1: pickup 0.6 bars before bar 8 (at bar position 7.4)
+        # Should be assigned to bar 8, not bar 7
+        onset_06 = bar8_time - 0.6 * 2.0  # 14.8 seconds
+        fine = [0.0] * int(onset_06 * 1000) + [0.3] * 3000
+        found = pop_cues.refine_vocal_onset(onset_06, grid, fine, 0.001)
+        self.assertEqual(found["anchor_bar"], 8, "0.6-bar pickup should lead into bar 8")
+        self.assertAlmostEqual(found["time_s"], onset_06, places=3)
+        self.assertLess(found["offset_from_downbeat_s"], 0, "Pickup should be before its anchor")
+        
+        # Test case 2: pickup 0.9 bars before bar 8 (at bar position 7.1)
+        # Should still be assigned to bar 8 if it's leading into that phrase
+        # But if it's only 0.1 bars after bar 7, it could be assigned to bar 7
+        onset_09 = bar8_time - 0.9 * 2.0  # 14.2 seconds
+        fine = [0.0] * int(onset_09 * 1000) + [0.3] * 3000
+        found = pop_cues.refine_vocal_onset(onset_09, grid, fine, 0.001)
+        # This is 0.1 bars after bar 7, so assigned to bar 7
+        self.assertEqual(found["anchor_bar"], 7, "0.1-bar offset from bar 7 assigns to bar 7")
+        
+        # Test case 3: onset 0.1 bars after bar 8 (just after the downbeat)
+        # Should be assigned to bar 8, not bar 9
+        onset_after = bar8_time + 0.1 * 2.0  # 16.2 seconds
+        fine = [0.0] * int(onset_after * 1000) + [0.3] * 3000
+        found = pop_cues.refine_vocal_onset(onset_after, grid, fine, 0.001)
+        self.assertEqual(found["anchor_bar"], 8, "0.1 bars after bar 8 should assign to bar 8")
+        self.assertGreater(found["offset_from_downbeat_s"], 0, "Should be after the anchor")
+        
+        # Test case 4: onset 0.3 bars after bar 8 (more than 0.25 bars after)
+        # Should be assigned to bar 9 (pickup leading into bar 9)
+        onset_late = bar8_time + 0.3 * 2.0  # 16.6 seconds
+        fine = [0.0] * int(onset_late * 1000) + [0.3] * 3000
+        found = pop_cues.refine_vocal_onset(onset_late, grid, fine, 0.001)
+        self.assertEqual(found["anchor_bar"], 9, "0.3 bars after bar 8 should lead into bar 9")
+        self.assertLess(found["offset_from_downbeat_s"], 0, "Should be a pickup before bar 9")
+        
+        # Test case 5: onset exactly on the downbeat
+        fine = [0.0] * int(bar8_time * 1000) + [0.3] * 3000
+        found = pop_cues.refine_vocal_onset(bar8_time, grid, fine, 0.001)
+        self.assertEqual(found["anchor_bar"], 8, "Onset on downbeat should assign to that bar")
+        self.assertAlmostEqual(found["offset_from_downbeat_s"], 0.0, places=2)
+
+    def test_onset_more_than_one_bar_before_assigned_bar_fails_validation(self):
+        """Onsets more than 1 bar from their assigned bar should fail validation clearly."""
+        import cue_maps
+        grid = pop_cues.beatgrid_ruler(0.0, 120.0)  # bar_s = 2.0
+        
+        # Create a proper mapped plan with START at bar 8
+        base_plan = {"map_type": "VOCAL", "bar_count": 100, "mix_end_bar": 100,
+                     "grid": grid, "cues": {slot: {} for slot in "ABCDEFGH"}}
+        plan = cue_maps.apply_cue_map(base_plan, None, {"start": {"bar": 8}, "out": {"bar": 80}}, 0)
+        
+        # Make START unsnapped with a time that's just at the limit (1 bar before)
+        plan["cues"]["B"]["unsnapped"] = True
+        plan["cues"]["B"]["time_s"] = 14.001  # bar 8 at 16.0, onset at 14.001 = -1.999s
+        cue_maps.validate_automatic_plan(plan)  # Should not raise
+        
+        # Slightly more than 1 bar before should fail
+        plan["cues"]["B"]["time_s"] = 13.999  # -2.001 seconds from bar 8
+        with self.assertRaisesRegex(ValueError, "B timestamp disagrees"):
+            cue_maps.validate_automatic_plan(plan)
+        
+        # Reset and test more than 0.25 bars after
+        plan = cue_maps.apply_cue_map(base_plan, None, {"start": {"bar": 8}, "out": {"bar": 80}}, 0)
+        plan["cues"]["B"]["unsnapped"] = True
+        plan["cues"]["B"]["time_s"] = 16.502  # +0.502 seconds = +0.251 bars
+        with self.assertRaisesRegex(ValueError, "B timestamp disagrees"):
+            cue_maps.validate_automatic_plan(plan)
+
     def test_exit_moves_to_stronger_vocal_drop_off(self):
         grid = pop_cues.beatgrid_ruler(0.0, 120.0)
         hop = 0.05

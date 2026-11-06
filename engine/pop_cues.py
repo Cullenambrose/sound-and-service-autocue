@@ -162,10 +162,19 @@ def _rising_edges(values, hop_s, threshold, left_s, right_s, quiet_s=0.1, sustai
 def refine_vocal_onset(word_start, grid, vocals=None, hop_s=None):
     """Exact un-snapped START time near the first sung word, plus its structural anchor bar.
 
-    The anchor is the downbeat nearest the first word; the vocal energy onset is searched within
-    [-1.2 s, +0.5 s] of that downbeat so pickups before the bar keep their real millisecond position.
+    The anchor is the structural downbeat the vocal phrase leads into, determined from word_start.
+    For pickups more than 0.25 bars after a downbeat, this is the next bar; otherwise the nearest.
+    The vocal energy onset is searched within [-1.2 s, +0.5 s] of that structural downbeat.
     """
-    anchor = int(round(time_to_bar(word_start, grid)))
+    # Assign anchor based on word_start (phrase structure), not rounded nearest.
+    # Pickups more than 0.25 bars after a downbeat lead into the next bar.
+    bar_position = time_to_bar(word_start, grid)
+    fractional = bar_position - math.floor(bar_position)
+    if fractional <= 0.25:
+        anchor = int(math.floor(bar_position))
+    else:
+        anchor = int(math.ceil(bar_position))
+    
     downbeat = bar_to_time(anchor, grid)
     time_s, source = float(word_start), "whisperx_first_word"
     if _valid_envelope(vocals, hop_s):
