@@ -75,6 +75,53 @@ class MustPlayConflict:
 
 
 @dataclass(frozen=True)
+class RequestDiagnostic:
+    """Matcher evidence for one positive request; alternatives retain source records."""
+    category: str
+    request: SongRequest
+    status: str
+    confidence: Optional[float]
+    alternatives: Tuple[Mapping[str, Any], ...] = ()
+    identity: Optional[SongIdentity] = None
+    reason: Optional[str] = None
+    match_status: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DoNotPlayDiagnostic:
+    """Exact song identities excluded by a prohibition, including broad title-only bans."""
+    request: SongRequest
+    identities: Tuple[SongIdentity, ...]
+    artist_unspecified: bool
+
+
+@dataclass(frozen=True)
+class RequestConflict:
+    """A positive request colliding with a hard exclusion."""
+    category: str
+    request: SongRequest
+    identity: SongIdentity
+    reason: str
+
+
+@dataclass(frozen=True)
+class VersionConflict:
+    """Positive requests disagree on one song's version and the chosen version."""
+    identity: SongIdentity
+    requests: Tuple[SongRequest, ...]
+    requested_versions: Tuple[str, ...]
+    selected_version: Optional[str]
+
+
+@dataclass(frozen=True)
+class CapacityOverflow:
+    """A Prep result expanded past its requested limit to retain all must-plays."""
+    requested_limit: int
+    required_must_play_count: int
+    resulting_count: int
+
+
+@dataclass(frozen=True)
 class Recommendation:
     """One local file/version selected to represent a song identity."""
     song_identity: SongIdentity
@@ -91,6 +138,11 @@ class Recommendations:
     unresolved_must_play: List[SongRequest] = field(default_factory=list)
     conflicting_must_play: List[MustPlayConflict] = field(default_factory=list)
     phase: str = "generic"
+    resolution_diagnostics: List[RequestDiagnostic] = field(default_factory=list)
+    do_not_play_diagnostics: List[DoNotPlayDiagnostic] = field(default_factory=list)
+    conflicting_requests: List[RequestConflict] = field(default_factory=list)
+    version_conflicts: List[VersionConflict] = field(default_factory=list)
+    capacity_overflow: Optional[CapacityOverflow] = None
 
     def __iter__(self):
         return iter(self.items)

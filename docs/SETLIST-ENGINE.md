@@ -16,13 +16,41 @@ unresolved; an absent artist remains absent and is never fabricated.
 ## Rules
 
 - The only hard exclusions are resolved do-not-play requests and identities
-  already played or placed. Do-not-play wins a must-play conflict. Conflicts
-  and unresolved must-plays are returned explicitly.
-- Prep returns every resolvable, eligible must-play. If `limit` is less than
-  that count, the result expands to include all of them, then fills remaining
-  slots with the highest-ranked other songs. Duplicate must-play requests for
-  the same normalized identity are represented once, using the first resolved
-  request's selected local version.
+  already played or placed. A do-not-play title is compared by exact matcher-
+  normalized song title after supported version and featuring removal. With an
+  artist, only that normalized primary artist is excluded; without one, every
+  exact title identity across artists is excluded. No fuzzy title ban is used.
+  `do_not_play_diagnostics` reports the identities excluded by each ban,
+  including whether the artist was unspecified. Do-not-play wins must-play and
+  guest-request conflicts; `conflicting_requests` and the backwards-compatible
+  `conflicting_must_play` report those collisions.
+- Positive must-play, play-if-possible, and Live guest requests are resolved
+  only when `library.matcher.match_track()` returns `matched`. Ambiguous and
+  missing outcomes are not treated as fulfilled. `resolution_diagnostics`
+  retains each matcher status, actual confidence, alternatives, and any
+  requested-version failure. `unresolved_must_play` remains available for
+  callers that used the earlier result shape.
+- Versioned positive requests must resolve to that exact normalized local
+  version; another version remains an ordinary candidate, not fulfillment and
+  receives no boost from that request. When same-song requests conflict, the
+  selected version comes from the highest-priority category with a confident
+  local match: must-play, then play-if-possible, then (Live only) guest request.
+  Within that category, the lexically smallest normalized available version
+  wins. `version_conflicts` reports all requested versions and the selection;
+  non-selected version requests are reported in `conflicting_requests`.
+- Prep returns every confidently resolved, eligible must-play identity. If
+  `limit` is below their count, the result expands and `capacity_overflow`
+  explicitly reports the requested limit, required count, and resulting count.
+  Remaining slots are filled by rank. Multiple requests for one identity
+  produce one recommendation, using the selected version policy above.
+- When files duplicate one song, the existing matcher chooses the ordinary
+  song representative using its configured version preferences. Exact-version
+  requests first restrict matching to that version. Matcher ties and fallback
+  file selection use a stable key of library/file IDs, path, version, then the
+  complete sorted metadata record. This chooses one intact source record; it
+  never combines metadata from files.
+- Guest requests, their customer badges, boosts, reasons, and diagnostics are
+  Live-only. Changing `guest_requests` does not change `rank_prep_crate()`.
 - Scoring is additive and deterministic. `SetlistSettings` exposes weights for
   must-play (100), play-if-possible (30), relevant song cue (25), guest request
   (35), DJ-memory floor-filler (18), played-next Markov prior (20), BPM (12),
@@ -36,7 +64,8 @@ unresolved; an absent artist remains absent and is never fabricated.
   House, Latin, Country, Throwback, and Slow / Ballad. Any other genre is
   neutral.
 - Direct request, customer, and crate-membership badges are `requested`,
-  `customer`, and `in_crate`. Song-cue boosts are deduplicated by song identity.
+  `customer`, and `in_crate`. Customer badges/reasons are Live-only.
+  Song-cue boosts are deduplicated by song identity.
 - With no `now_playing`, BPM/key transition, genre-continuity, and Markov terms
   are omitted. Phase-relevant cues and an available open-dancing energy target
   can still rank openers.
@@ -65,3 +94,9 @@ must-play, play-if-possible, and do-not-play; sending special moments, timeline
 song metadata, guest requests, or DJ-memory data through that route is later
 integration work. Synthetic in-memory tests establish software behavior, not
 musical quality, cue accuracy, or real-world transition quality.
+
+The recommendation result keeps its original `items`,
+`unresolved_must_play`, `conflicting_must_play`, and `phase` fields, and adds
+`resolution_diagnostics`, `do_not_play_diagnostics`, `conflicting_requests`,
+`version_conflicts`, and optional `capacity_overflow` for explicit review
+outcomes.

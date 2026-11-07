@@ -10,27 +10,37 @@ from .engine import rank_next_song, rank_prep_crate
 from .inputs import context_from_event, song_identity
 from .scoring import GENRES, SetlistSettings
 from .types import (
+    CapacityOverflow,
+    DoNotPlayDiagnostic,
     MustPlayConflict,
     Recommendation,
     Recommendations,
+    RequestConflict,
+    RequestDiagnostic,
     SetlistContext,
     SongCue,
     SongIdentity,
     SongRequest,
     TimelineEntry,
+    VersionConflict,
 )
 
 __all__ = [
     "GENRES",
+    "CapacityOverflow",
+    "DoNotPlayDiagnostic",
     "MustPlayConflict",
     "Recommendation",
     "Recommendations",
+    "RequestConflict",
+    "RequestDiagnostic",
     "SetlistContext",
     "SetlistSettings",
     "SongCue",
     "SongIdentity",
     "SongRequest",
     "TimelineEntry",
+    "VersionConflict",
     "context_from_event",
     "rank_next_song",
     "rank_prep_crate",

@@ -11,12 +11,17 @@ from .inputs import song_identity
 from .phase import PhaseState, select_phase
 from .scoring import SetlistSettings, score_candidate
 from .types import (
+    CapacityOverflow,
+    DoNotPlayDiagnostic,
     MustPlayConflict,
     Recommendation,
     Recommendations,
+    RequestConflict,
+    RequestDiagnostic,
     SetlistContext,
     SongIdentity,
     SongRequest,
+    VersionConflict,
 )
 
 
@@ -48,12 +53,13 @@ def _file_key(track: Mapping[str, Any]) -> str:
         track.get("id") or track.get("track_id") or "",
         version or "",
     )
-    if any(identifiers):
-        return "\x1f".join(str(value) for value in identifiers)
     try:
-        return json.dumps(track, ensure_ascii=False, sort_keys=True, default=str)
+        metadata = json.dumps(track, ensure_ascii=False, sort_keys=True, default=str,
+                              separators=(",", ":"))
     except (TypeError, ValueError):
-        return repr(sorted((str(key), repr(value)) for key, value in track.items()))
+        metadata = repr(sorted((str(key), repr(value)) for key, value in track.items()))
+    # Identifiers lead the key; complete metadata breaks identifier collisions deterministically.
+    return json.dumps(identifiers, ensure_ascii=False, default=str) + "\x1f" + metadata
 
 
 def _clean_match_track(track: Mapping[str, Any]) -> Dict[str, Any]:
@@ -93,29 +99,65 @@ def _sorted_library(library: Iterable[Any]):
     return records
 
 
-def _resolve(request: SongRequest, library_records) -> Optional[Tuple[SongIdentity, Dict[str, Any]]]:
-    if not isinstance(request.title, str) or not request.title.strip():
-        return None
-    matched = match_track(
-        {"artist": request.artist or "", "title": request.title},
-        [track for _, track in library_records],
+def _match(request: SongRequest, records):
+    return match_track(
+        {"artist": request.artist or "", "title": request.title or ""},
+        [track for _, track in records],
         _MATCH_CONFIG,
     )
-    if matched.status not in {"matched", "ambiguous"} or not matched.matched_track:
-        return None
-    selected = _clean_match_track(matched.matched_track)
-    identity = song_identity(selected.get("title"), selected.get("artist"))
-    requested_version = _request_version(request)
-    if identity is not None and requested_version:
-        versioned_matches = [
-            track for candidate_identity, track in library_records
-            if candidate_identity == identity and _version_label(track) == requested_version
+
+
+def _candidate_identity(track):
+    return song_identity(track.get("title"), track.get("artist"))
+
+
+def _resolve_request(request: SongRequest, category: str, library_records):
+    """Keep matcher evidence intact and require a confident exact-version match when requested."""
+    version = _request_version(request)
+    if version:
+        version_records = [
+            record for record in library_records if _version_label(record[1]) == version
         ]
-        if not versioned_matches:
-            return None
-        selected = min(versioned_matches, key=_file_key)
-        identity = song_identity(selected.get("title"), selected.get("artist"))
-    return (identity, selected) if identity is not None else None
+        if not version_records:
+            base = _match(request, library_records)
+            identity = (_candidate_identity(base.matched_track)
+                        if base.status == "matched" and base.matched_track else None)
+            version_found_song = base.status in {"matched", "ambiguous"} and bool(base.candidates)
+            return None, RequestDiagnostic(
+                category, request,
+                "version_unavailable" if version_found_song else "missing",
+                base.confidence,
+                tuple(dict(item) for item in base.candidates),
+                identity,
+                (f"Requested version {version!r} is not available in the local library."
+                 if version_found_song else base.reason),
+                base.status,
+            )
+        matched = _match(request, version_records)
+        alternatives = tuple(dict(item) for item in matched.candidates)
+        if matched.status != "matched" or not matched.matched_track:
+            return None, RequestDiagnostic(
+                category, request, matched.status, matched.confidence, alternatives,
+                reason=matched.reason, match_status=matched.status,
+            )
+        selected = _clean_match_track(matched.matched_track)
+        identity = _candidate_identity(selected)
+        diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
+                                       alternatives, identity, matched.reason, matched.status)
+        return ((identity, selected, version), diagnostic) if identity else (None, diagnostic)
+
+    matched = _match(request, library_records)
+    alternatives = tuple(dict(item) for item in matched.candidates)
+    if matched.status != "matched" or not matched.matched_track:
+        return None, RequestDiagnostic(
+            category, request, matched.status, matched.confidence, alternatives,
+            reason=matched.reason, match_status=matched.status,
+        )
+    selected = _clean_match_track(matched.matched_track)
+    identity = _candidate_identity(selected)
+    diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
+                                   alternatives, identity, matched.reason, matched.status)
+    return ((identity, selected, ""), diagnostic) if identity else (None, diagnostic)
 
 
 def _representatives(library_records):
@@ -150,18 +192,6 @@ def _cue_identities(context: SetlistContext, phase: PhaseState):
     return relevant
 
 
-def _request_identities(requests, library_records):
-    resolved = []
-    unresolved = []
-    for request in requests:
-        result = _resolve(request, library_records)
-        if result is None:
-            unresolved.append(request)
-        else:
-            resolved.append((request, result[0], result[1]))
-    return resolved, unresolved
-
-
 def _normal_identity_set(values) -> frozenset:
     return frozenset(
         identity for value in values if isinstance(value, SongIdentity)
@@ -176,11 +206,48 @@ def _track_identity(track):
 
 
 def _resolve_hard_excludes(context, library_records):
-    do_not_play, _ = _request_identities(context.do_not_play, library_records)
-    do_not_play_identities = {identity for _, identity, _ in do_not_play}
+    do_not_play_identities = set()
+    diagnostics = []
+    for request in context.do_not_play:
+        requested = song_identity(request.title, None)
+        if requested is None:
+            diagnostics.append(DoNotPlayDiagnostic(request, (), not bool(request.artist)))
+            continue
+        artist_unspecified = not isinstance(request.artist, str) or not request.artist.strip()
+        requested_artist = song_identity("artist", request.artist).artist if not artist_unspecified else None
+        matches = tuple(sorted({
+            identity for identity, _ in library_records
+            if identity.title == requested.title
+            and (artist_unspecified or identity.artist == requested_artist)
+        }))
+        do_not_play_identities.update(matches)
+        diagnostics.append(DoNotPlayDiagnostic(request, matches, artist_unspecified))
     played = _normal_identity_set(context.already_played)
     placed = _normal_identity_set(context.already_placed)
-    return do_not_play_identities | played | placed, do_not_play_identities, played, placed
+    return (do_not_play_identities | played | placed, do_not_play_identities,
+            played, placed, diagnostics)
+
+
+def _diagnostic_alternative_identities(diagnostic):
+    identities = set()
+    for track in diagnostic.alternatives:
+        identity = _candidate_identity(track)
+        if identity:
+            identities.add(identity)
+    if diagnostic.identity:
+        identities.add(diagnostic.identity)
+    return identities
+
+
+def _resolution_for_category(requests, category, library_records):
+    resolved = []
+    diagnostics = []
+    for request in requests:
+        result, diagnostic = _resolve_request(request, category, library_records)
+        diagnostics.append(diagnostic)
+        if result:
+            resolved.append((request, *result))
+    return resolved, diagnostics
 
 
 def _file_tie_key(track):
@@ -203,33 +270,137 @@ def _rank(
     phase = select_phase(context, at, phase_override)
     library_records = _sorted_library(library)
     representatives = _representatives(library_records)
-    excluded, do_not_play_identities, already_played, already_placed = _resolve_hard_excludes(
-        context, library_records
+    excluded, do_not_play_identities, already_played, already_placed, dnp_diagnostics = (
+        _resolve_hard_excludes(context, library_records)
     )
-    resolved_must, unresolved_must = _request_identities(context.must_play, library_records)
-    resolved_play_if, _ = _request_identities(context.play_if_possible, library_records)
-    resolved_guests, _ = _request_identities(context.guest_requests, library_records)
 
-    required_tracks = {}
-    conflicts = []
-    for request, identity, exact_track in resolved_must:
-        if identity in excluded:
+    positive_requests = [
+        ("must_play", context.must_play),
+        ("play_if_possible", context.play_if_possible),
+    ]
+    if not prep:
+        positive_requests.append(("guest_request", context.guest_requests))
+    resolved_by_category = {}
+    resolution_diagnostics = []
+    for category, requests in positive_requests:
+        resolved_by_category[category], diagnostics = _resolution_for_category(
+            requests, category, library_records
+        )
+        resolution_diagnostics.extend(diagnostics)
+
+    request_conflicts = []
+    must_conflicts = []
+    for diagnostic in resolution_diagnostics:
+        candidate_identities = (
+            {diagnostic.identity} if diagnostic.status == "matched" and diagnostic.identity
+            else _diagnostic_alternative_identities(diagnostic)
+        )
+        for identity in sorted(candidate_identities.intersection(excluded)):
             if identity in do_not_play_identities:
                 reason = "do_not_play"
             elif identity in already_played:
                 reason = "already_played"
             else:
                 reason = "already_placed"
-            conflicts.append(MustPlayConflict(request, identity, reason))
-            continue
-        required_tracks.setdefault(identity, exact_track)
+            request_conflicts.append(RequestConflict(
+                diagnostic.category, diagnostic.request, identity, reason
+            ))
+            if diagnostic.category == "must_play":
+                must_conflicts.append(MustPlayConflict(diagnostic.request, identity, reason))
 
-    if prep:
-        must_identities = set(required_tracks)
-    else:
-        must_identities = {identity for _, identity, _ in resolved_must if identity not in excluded}
-    play_if_identities = {identity for _, identity, _ in resolved_play_if if identity not in excluded}
-    guest_identities = {identity for _, identity, _ in resolved_guests if identity not in excluded}
+    def positive_version_groups():
+        groups = defaultdict(list)
+        for diagnostic in resolution_diagnostics:
+            version = _request_version(diagnostic.request)
+            if version and diagnostic.identity:
+                groups[diagnostic.identity].append((diagnostic.request, version))
+        return groups
+
+    version_requests = positive_version_groups()
+    selected_tracks = {}
+    selected_versions = {}
+    categories = ("must_play", "play_if_possible", "guest_request")
+    for identity in representatives:
+        if identity in excluded:
+            continue
+        for category in categories:
+            if prep and category == "guest_request":
+                continue
+            entries = [entry for entry in resolved_by_category.get(category, ())
+                       if entry[1] == identity]
+            if not entries:
+                continue
+            versioned_entries = [entry for entry in entries if entry[3]]
+            if versioned_entries:
+                chosen_version = min(entry[3] for entry in versioned_entries)
+                chosen_tracks = [entry[2] for entry in versioned_entries
+                                 if entry[3] == chosen_version]
+                selected_tracks[identity] = min(chosen_tracks, key=_file_key)
+                selected_versions[identity] = chosen_version
+            else:
+                selected_tracks[identity] = min((entry[2] for entry in entries), key=_file_key)
+                selected_versions[identity] = _version_label(selected_tracks[identity])
+            break
+
+    version_conflicts = []
+    for identity, entries in sorted(version_requests.items()):
+        requested_versions = tuple(sorted({version for _, version in entries}))
+        if len(requested_versions) > 1:
+            version_conflicts.append(VersionConflict(
+                identity,
+                tuple(request for request, _ in sorted(
+                    entries, key=lambda item: (item[1], item[0].title or "", item[0].artist or "")
+                )),
+                requested_versions,
+                selected_versions.get(identity) or None,
+            ))
+
+    def request_matches_selected(entry, identity):
+        request, entry_identity, _track, version = entry
+        if entry_identity != identity:
+            return False
+        return not version or version == selected_versions.get(identity, "")
+
+    applicable_by_category = {}
+    for category in categories:
+        if prep and category == "guest_request":
+            continue
+        applicable_by_category[category] = {
+            identity for identity in representatives if identity not in excluded
+            and any(request_matches_selected(entry, identity)
+                    for entry in resolved_by_category.get(category, ()))
+        }
+
+    for diagnostic in resolution_diagnostics:
+        if (diagnostic.status != "matched" or diagnostic.identity in excluded
+                or not diagnostic.identity):
+            continue
+        requested_version = _request_version(diagnostic.request)
+        if requested_version and selected_versions.get(diagnostic.identity) != requested_version:
+            request_conflicts.append(RequestConflict(
+                diagnostic.category, diagnostic.request, diagnostic.identity,
+                "version_conflict_not_selected",
+            ))
+            if diagnostic.category == "must_play":
+                must_conflicts.append(MustPlayConflict(
+                    diagnostic.request, diagnostic.identity, "version_conflict_not_selected"
+                ))
+
+    must_identities = applicable_by_category.get("must_play", set())
+    play_if_identities = applicable_by_category.get("play_if_possible", set())
+    guest_identities = applicable_by_category.get("guest_request", set())
+    required_tracks = {
+        identity: selected_tracks.get(identity, representatives[identity])
+        for identity in must_identities
+    } if prep else {}
+
+    unresolved_must = [
+        diagnostic.request for diagnostic in resolution_diagnostics
+        if diagnostic.category == "must_play"
+        and (diagnostic.status != "matched"
+             or diagnostic.identity not in must_identities
+             or diagnostic.identity in excluded)
+    ]
     cue_identities = _cue_identities(context, phase)
     cue_identities.difference_update(excluded)
     fillers = _normal_identity_set(context.dj_memory_floor_fillers)
@@ -241,7 +412,7 @@ def _rank(
     for identity, representative in representatives.items():
         if identity in excluded:
             continue
-        selected = required_tracks.get(identity, representative) if prep else representative
+        selected = selected_tracks.get(identity, representative)
         score, reasons = score_candidate(
             identity,
             selected,
@@ -273,11 +444,25 @@ def _rank(
         if limit is None:
             selected_recommendations = required + other
         else:
-            # A too-small Prep limit expands to preserve every eligible must-play.
             selected_recommendations = required + other[:max(0, limit - len(required))]
     else:
         selected_recommendations = ranked if limit is None else ranked[:limit]
-    return Recommendations(selected_recommendations, unresolved_must, conflicts, phase.name)
+    capacity_overflow = None
+    if (prep and limit is not None and len(selected_recommendations) > limit):
+        capacity_overflow = CapacityOverflow(
+            limit, len(required_tracks), len(selected_recommendations)
+        )
+    return Recommendations(
+        items=selected_recommendations,
+        unresolved_must_play=unresolved_must,
+        conflicting_must_play=must_conflicts,
+        phase=phase.name,
+        resolution_diagnostics=resolution_diagnostics,
+        do_not_play_diagnostics=dnp_diagnostics,
+        conflicting_requests=request_conflicts,
+        version_conflicts=version_conflicts,
+        capacity_overflow=capacity_overflow,
+    )
 
 
 def rank_next_song(
@@ -289,7 +474,7 @@ def rank_next_song(
     at=None,
     limit: int = 10,
 ) -> Recommendations:
-    """Rank the next local-library songs; this function performs no external I/O."""
+    """Rank local songs for Live, including Live-only guest request preferences."""
     return _rank(ctx, library, now_playing, settings or SetlistSettings(), at, limit, prep=False)
 
 
@@ -304,10 +489,10 @@ def rank_prep_crate(
 ) -> Recommendations:
     """Rank Prep candidates, retaining every resolvable, eligible must-play.
 
-    A limit smaller than the number of eligible must-plays expands to the must-play
-    count; additional candidates fill any remaining slots. Duplicate requests for
-    one normalized song identity are represented once, using the first resolved
-    must-play's exact local file/version.
+    A limit smaller than the number of eligible must-play identities expands the
+    result and reports ``capacity_overflow``; remaining slots use ranked candidates.
+    Conflicting versions use the must-play, then play-if-possible priority and
+    lexical selection policy documented with ``VersionConflict``.
     """
     return _rank(ctx, library, now_playing, settings or SetlistSettings(), None,
                  limit, prep=True, phase_override=phase)

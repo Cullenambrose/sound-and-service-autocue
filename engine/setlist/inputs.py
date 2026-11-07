@@ -133,10 +133,11 @@ def context_from_event(
                 song_cue=item.song_cue,
                 metadata=item.metadata,
             ))
-            # songCue carries fade/version/seconds metadata, not a song reference.
-            if timeline_song and (item.kind or "").strip().casefold() != "songcue":
+            # songCue is metadata separate from kind; only the song object is a cue.
+            if timeline_song:
                 cues.append(SongCue(
-                    moment=item.kind or item.name,
+                    moment=(item.name if (item.kind or "").strip().casefold() == "songcue"
+                            else item.kind or item.name),
                     title=timeline_song.title,
                     artist=timeline_song.artist,
                     version=timeline_song.version,
