@@ -24,7 +24,7 @@ unresolved; an absent artist remains absent and is never fabricated.
   including whether the artist was unspecified. Do-not-play wins must-play and
   guest-request conflicts; `conflicting_requests` and the backwards-compatible
   `conflicting_must_play` report those collisions.
-- Positive must-play, play-if-possible, and Live guest requests are resolved
+- Positive must-play, phase-relevant song-cue, play-if-possible, and Live guest requests are resolved
   only when `library.matcher.match_track()` returns `matched`. Ambiguous and
   missing outcomes are not treated as fulfilled. `resolution_diagnostics`
   retains each matcher status, actual confidence, alternatives, and any
@@ -39,10 +39,22 @@ unresolved; an absent artist remains absent and is never fabricated.
   version; another version remains an ordinary candidate, not fulfillment and
   receives no boost from that request. When same-song requests conflict, the
   selected version comes from the highest-priority category with a confident
-  local match: must-play, then play-if-possible, then (Live only) guest request.
+  local match: must-play, then phase-relevant song cue, then play-if-possible,
+  then (Live only) guest request. The existing lower-priority rules are unchanged.
+  A cue without a version requirement does not override lower-priority version
+  selection or the ordinary representative.
   Within that category, the lexically smallest normalized available version
   wins. `version_conflicts` reports all requested versions and the selection;
   non-selected version requests are reported in `conflicting_requests`.
+- Phase-relevant cues use the same identity-first exact-version resolver as
+  other requests and report the `song_cue` diagnostic category in both APIs.
+  Cue moment and metadata are retained in the diagnostic request. Inactive
+  moments do not select versions. An unavailable cue version retains the
+  confidently resolved identity and reports `version_unavailable`. Its
+  deduplicated timeline boost and `requested` badge describe song-level
+  relevance only, not exact-version fulfillment; no version badge or reason
+  is added. This song-level boost also remains when must-play wins a version
+  conflict, which is reported explicitly. Ambiguous cues remain unresolved.
 - Prep returns every confidently resolved, eligible must-play identity. If
   `limit` is below their count, the result expands and `capacity_overflow`
   explicitly reports the requested limit, required count, and resulting count.
@@ -99,6 +111,10 @@ must-play, play-if-possible, and do-not-play; sending special moments, timeline
 song metadata, guest requests, or DJ-memory data through that route is later
 integration work. Synthetic in-memory tests establish software behavior, not
 musical quality, cue accuracy, or real-world transition quality.
+
+The reported matcher failures `mp-4`, `g-3`, and `g-9` remain a separate matcher
+task, not successes established by these cue-version regressions. No matcher
+implementation, configuration thresholds, or existing expectations were changed.
 
 The recommendation result keeps its original `items`,
 `unresolved_must_play`, `conflicting_must_play`, and `phase` fields, and adds

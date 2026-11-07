@@ -174,14 +174,13 @@ def _moment_key(value: Optional[str]) -> str:
     return " ".join((value or "").casefold().replace("_", " ").replace("-", " ").split())
 
 
-def _cue_identities(context: SetlistContext, phase: PhaseState):
-    relevant = set()
+def _cue_requests(context: SetlistContext, phase: PhaseState):
     moments = {_moment_key(moment) for moment in phase.cue_moments}
-    for cue in context.song_cues:
-        identity = song_identity(cue.title, cue.artist)
-        if identity and _moment_key(cue.moment) in moments:
-            relevant.add(identity)
-    return relevant
+    return tuple(
+        SongRequest(title=cue.title, artist=cue.artist, version=cue.version,
+                    moment=cue.moment, metadata=cue.metadata)
+        for cue in context.song_cues if _moment_key(cue.moment) in moments
+    )
 
 
 def _normal_identity_set(values) -> frozenset:
@@ -268,6 +267,7 @@ def _rank(
 
     positive_requests = [
         ("must_play", context.must_play),
+        ("song_cue", _cue_requests(context, phase)),
         ("play_if_possible", context.play_if_possible),
     ]
     if not prep:
@@ -312,7 +312,7 @@ def _rank(
     version_requests = positive_version_groups()
     selected_tracks = {}
     selected_versions = {}
-    categories = ("must_play", "play_if_possible", "guest_request")
+    categories = ("must_play", "song_cue", "play_if_possible", "guest_request")
     for identity in representatives:
         if identity in excluded:
             continue
@@ -321,6 +321,8 @@ def _rank(
                 continue
             entries = [entry for entry in resolved_by_category.get(category, ())
                        if entry[1] == identity]
+            if category == "song_cue":
+                entries = [entry for entry in entries if entry[3]]
             if not entries:
                 continue
             versioned_entries = [entry for entry in entries if entry[3]]
@@ -394,8 +396,13 @@ def _rank(
              or diagnostic.identity not in must_identities
              or diagnostic.identity in excluded)
     ]
-    cue_identities = _cue_identities(context, phase)
-    cue_identities.difference_update(excluded)
+    # Timeline relevance is song-level, even when its exact version is unavailable
+    # or loses to a higher-priority request. Diagnostics report version fulfillment.
+    cue_identities = {
+        diagnostic.identity for diagnostic in resolution_diagnostics
+        if diagnostic.category == "song_cue" and diagnostic.match_status == "matched"
+        and diagnostic.identity and diagnostic.identity not in excluded
+    }
     fillers = _normal_identity_set(context.dj_memory_floor_fillers)
     crate_identities = _normal_identity_set(context.crate_identities)
 
