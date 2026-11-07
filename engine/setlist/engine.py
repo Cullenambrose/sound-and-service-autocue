@@ -112,40 +112,7 @@ def _candidate_identity(track):
 
 
 def _resolve_request(request: SongRequest, category: str, library_records):
-    """Keep matcher evidence intact and require a confident exact-version match when requested."""
-    version = _request_version(request)
-    if version:
-        version_records = [
-            record for record in library_records if _version_label(record[1]) == version
-        ]
-        if not version_records:
-            base = _match(request, library_records)
-            identity = (_candidate_identity(base.matched_track)
-                        if base.status == "matched" and base.matched_track else None)
-            version_found_song = base.status in {"matched", "ambiguous"} and bool(base.candidates)
-            return None, RequestDiagnostic(
-                category, request,
-                "version_unavailable" if version_found_song else "missing",
-                base.confidence,
-                tuple(dict(item) for item in base.candidates),
-                identity,
-                (f"Requested version {version!r} is not available in the local library."
-                 if version_found_song else base.reason),
-                base.status,
-            )
-        matched = _match(request, version_records)
-        alternatives = tuple(dict(item) for item in matched.candidates)
-        if matched.status != "matched" or not matched.matched_track:
-            return None, RequestDiagnostic(
-                category, request, matched.status, matched.confidence, alternatives,
-                reason=matched.reason, match_status=matched.status,
-            )
-        selected = _clean_match_track(matched.matched_track)
-        identity = _candidate_identity(selected)
-        diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
-                                       alternatives, identity, matched.reason, matched.status)
-        return ((identity, selected, version), diagnostic) if identity else (None, diagnostic)
-
+    """Resolve song identity first, then select an exact local playback version."""
     matched = _match(request, library_records)
     alternatives = tuple(dict(item) for item in matched.candidates)
     if matched.status != "matched" or not matched.matched_track:
@@ -153,11 +120,36 @@ def _resolve_request(request: SongRequest, category: str, library_records):
             category, request, matched.status, matched.confidence, alternatives,
             reason=matched.reason, match_status=matched.status,
         )
+
     selected = _clean_match_track(matched.matched_track)
     identity = _candidate_identity(selected)
+    if identity is None:
+        return None, RequestDiagnostic(
+            category, request, matched.status, matched.confidence, alternatives,
+            reason=matched.reason, match_status=matched.status,
+        )
+
+    version = _request_version(request)
+    if version:
+        matching_versions = [
+            track for candidate_identity, track in library_records
+            if candidate_identity == identity and _version_label(track) == version
+        ]
+        if not matching_versions:
+            return None, RequestDiagnostic(
+                category, request, "version_unavailable", matched.confidence,
+                alternatives, identity,
+                f"Requested version {version!r} is not available for the resolved song.",
+                matched.status,
+            )
+        selected = min(matching_versions, key=_file_key)
+        diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
+                                       alternatives, identity, matched.reason, matched.status)
+        return (identity, selected, version), diagnostic
+
     diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
                                    alternatives, identity, matched.reason, matched.status)
-    return ((identity, selected, ""), diagnostic) if identity else (None, diagnostic)
+    return (identity, selected, "",), diagnostic
 
 
 def _representatives(library_records):
@@ -292,7 +284,8 @@ def _rank(
     must_conflicts = []
     for diagnostic in resolution_diagnostics:
         candidate_identities = (
-            {diagnostic.identity} if diagnostic.status == "matched" and diagnostic.identity
+            {diagnostic.identity}
+            if diagnostic.match_status == "matched" and diagnostic.identity
             else _diagnostic_alternative_identities(diagnostic)
         )
         for identity in sorted(candidate_identities.intersection(excluded)):

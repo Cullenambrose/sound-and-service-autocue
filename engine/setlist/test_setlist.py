@@ -244,6 +244,129 @@ class SetlistEngineTests(unittest.TestCase):
         self.assertIn(result.resolution_diagnostics[0].match_status, {"matched", "ambiguous"})
         self.assertFalse(result.unresolved_must_play == [])
 
+    def test_unavailable_version_resolution_is_independent_of_unrelated_version_files(self):
+        request = SongRequest("Radio Song", "Singer", version="Radio Edit")
+        context = SetlistContext(must_play=(request,))
+        original = [track("Radio Song (Clean)", "Singer", file_id="clean")]
+        augmented = original + [
+            track("Completely Different (Radio Edit)", "Other Artist", file_id="unrelated")
+        ]
+        base = rank_prep_crate(context, original)
+        added = rank_prep_crate(context, augmented)
+        base_diag = base.resolution_diagnostics[0]
+        added_diag = next(diagnostic for diagnostic in added.resolution_diagnostics
+                          if diagnostic.request == request)
+        self.assertEqual((base_diag.status, base_diag.identity),
+                         ("version_unavailable", song_identity("Radio Song", "Singer")))
+        self.assertEqual((added_diag.status, added_diag.identity),
+                         (base_diag.status, base_diag.identity))
+        self.assertFalse(any("Must-play request" in reason
+                             for recommendation in added
+                             for reason in recommendation.reasons))
+        self.assertFalse(any("requested" in recommendation.badges
+                             for recommendation in added))
+
+    def test_other_song_version_cannot_fulfill_or_boost_requested_identity(self):
+        request = SongRequest("Blue Monday", "New Order", version="Radio Edit")
+        library = [
+            track("Blue Monday (Clean)", "New Order", file_id="clean"),
+            track("Blue Monday Again (Radio Edit)", "New Order", file_id="other-radio"),
+        ]
+        for ranker, category in (
+            (rank_next_song, "must_play"),
+            (rank_next_song, "play_if_possible"),
+            (rank_prep_crate, "must_play"),
+            (rank_prep_crate, "play_if_possible"),
+        ):
+            context = SetlistContext(**{category: (request,)})
+            result = ranker(context, library)
+            diagnostic = result.resolution_diagnostics[0]
+            self.assertEqual((diagnostic.status, diagnostic.identity),
+                             ("version_unavailable", song_identity("Blue Monday", "New Order")))
+            self.assertTrue(any(item.song_identity == song_identity(
+                "Blue Monday Again", "New Order") for item in result))
+            for item in result:
+                self.assertNotIn("Must-play request", item.reasons)
+                self.assertNotIn("Play-if-possible request", item.reasons)
+                self.assertNotIn("requested", item.badges)
+
+        guest_context = SetlistContext(guest_requests=(request,))
+        guest_result = rank_next_song(guest_context, library)
+        self.assertEqual(guest_result.resolution_diagnostics[0].status, "version_unavailable")
+        self.assertFalse(any("Live guest request" in item.reasons
+                             or "customer" in item.badges for item in guest_result))
+
+    def test_unavailable_version_conflict_uses_resolved_song_not_match_alternatives(self):
+        context = SetlistContext(
+            must_play=(SongRequest("Blue Monday", "New Order", version="Radio Edit"),),
+            do_not_play=(SongRequest("Blue Monday Again", "New Order"),),
+        )
+        result = rank_next_song(context, [
+            track("Blue Monday (Clean)", "New Order", file_id="original"),
+            track("Blue Monday Again (Radio Edit)", "New Order", file_id="alternate"),
+        ])
+        diagnostic = result.resolution_diagnostics[0]
+        self.assertEqual(diagnostic.status, "version_unavailable")
+        self.assertEqual(diagnostic.identity, song_identity("Blue Monday", "New Order"))
+        self.assertFalse(result.conflicting_requests)
+        self.assertFalse(any(item.song_identity == song_identity(
+            "Blue Monday Again", "New Order") for item in result))
+
+    def test_ambiguous_song_identity_stays_ambiguous_with_one_requested_version_candidate(self):
+        request = SongRequest("Shared Song", version="Extended Mix")
+        library = [
+            track("Shared Song", "Artist A", file_id="extended", version="Extended Mix"),
+            track("Shared Song", "Artist B", file_id="plain", version="Clean"),
+        ]
+        for ranker, context in (
+            (rank_prep_crate, SetlistContext(must_play=(request,))),
+            (rank_next_song, SetlistContext(must_play=(request,))),
+            (rank_next_song, SetlistContext(guest_requests=(request,))),
+        ):
+            result = ranker(context, library)
+            diagnostic = next(item for item in result.resolution_diagnostics
+                              if item.request == request)
+            self.assertEqual(diagnostic.status, "ambiguous")
+            self.assertEqual(diagnostic.match_status, "ambiguous")
+            self.assertIsNotNone(diagnostic.confidence)
+            self.assertGreaterEqual(len(diagnostic.alternatives), 2)
+            self.assertIsNone(diagnostic.identity)
+            self.assertNotIn("Live guest request",
+                             tuple(reason for item in result for reason in item.reasons))
+
+    def test_version_resolution_is_stable_across_order_and_categories(self):
+        clean = track("Dance (Clean)", "Singer", file_id="clean")
+        extended = track("Dance (Extended Mix)", "Singer", file_id="extended")
+        unrelated = track("Other (Radio Edit)", "Another", file_id="other")
+        for category, version, expected in (
+            ("must_play", "Clean", "clean"),
+            ("play_if_possible", "Extended Mix", "extended"),
+        ):
+            request = SongRequest("Dance", "Singer", version=version)
+            context = SetlistContext(**{category: (request,)})
+            results = [
+                rank_next_song(context, tracks)
+                for tracks in ([clean, extended, unrelated],
+                               [unrelated, extended, clean],
+                               [extended, clean, unrelated])
+            ]
+            selected = next(item for item in results[0]
+                            if item.song_identity == song_identity("Dance", "Singer"))
+            self.assertEqual(selected.track["file_id"], expected)
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[0], results[2])
+
+        live_guest = SetlistContext(guest_requests=(
+            SongRequest("Dance", "Singer", version="Extended Mix"),
+        ))
+        guest_results = [rank_next_song(live_guest, tracks)
+                         for tracks in ([clean, extended], [extended, clean])]
+        self.assertEqual(guest_results[0], guest_results[1])
+        selected_guest = next(item for item in guest_results[0]
+                              if item.song_identity == song_identity("Dance", "Singer"))
+        self.assertEqual(selected_guest.track["file_id"], "extended")
+        self.assertIn("customer", selected_guest.badges)
+
     def test_conflicting_versions_have_stable_selection_and_diagnostic(self):
         requests = (
             SongRequest("Dance", "Singer", version="Clean"),

@@ -30,6 +30,11 @@ unresolved; an absent artist remains absent and is never fabricated.
   retains each matcher status, actual confidence, alternatives, and any
   requested-version failure. `unresolved_must_play` remains available for
   callers that used the earlier result shape.
+- Song identity is resolved against the complete supplied library before
+  checking playback versions. A confident identity with no requested local
+  version reports `version_unavailable` consistently, retains the identity and
+  matcher evidence, and receives no request-derived fulfillment. Other songs'
+  files cannot satisfy that requested version.
 - Versioned positive requests must resolve to that exact normalized local
   version; another version remains an ordinary candidate, not fulfillment and
   receives no boost from that request. When same-song requests conflict, the
@@ -44,11 +49,11 @@ unresolved; an absent artist remains absent and is never fabricated.
   Remaining slots are filled by rank. Multiple requests for one identity
   produce one recommendation, using the selected version policy above.
 - When files duplicate one song, the existing matcher chooses the ordinary
-  song representative using its configured version preferences. Exact-version
-  requests first restrict matching to that version. Matcher ties and fallback
-  file selection use a stable key of library/file IDs, path, version, then the
-  complete sorted metadata record. This chooses one intact source record; it
-  never combines metadata from files.
+  song representative using its configured version preferences. After identity
+  resolution, exact-version selection is restricted to that song identity.
+  Matcher ties and fallback file selection use a stable key of library/file
+  IDs, path, version, then the complete sorted metadata record. This chooses
+  one intact source record; it never combines metadata from files.
 - Guest requests, their customer badges, boosts, reasons, and diagnostics are
   Live-only. Changing `guest_requests` does not change `rank_prep_crate()`.
 - Scoring is additive and deterministic. `SetlistSettings` exposes weights for
