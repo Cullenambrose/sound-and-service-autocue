@@ -7,12 +7,15 @@ import sys
 import tempfile
 
 import autocue_worker
+import setlist
 
 
 def main():
     checkout = Path(__file__).resolve().parents[1]
     if Path(autocue_worker.__file__).resolve().is_relative_to(checkout):
         raise RuntimeError("Verify a non-editable wheel installation, not checkout/PYTHONPATH imports.")
+    if Path(setlist.__file__).resolve().is_relative_to(checkout):
+        raise RuntimeError("The installed wheel must include the setlist package.")
     command = Path(sys.executable).parent / "autocue-worker"
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(("AUTOCUE_", "GEMINI_", "GEM_")) and key != "PYTHONPATH"}
