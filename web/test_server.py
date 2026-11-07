@@ -25,6 +25,21 @@ from pathlib import Path
 from web import fixtures, server
 
 
+def _invalid_waveform_points_url(url):
+    return url.replace("&points=512", "&points=invalid", 1)
+
+
+class WaveformURLTests(unittest.TestCase):
+    def test_invalid_points_preserves_host_port_path_and_other_query_values(self):
+        url = "http://127.0.0.1:51234/api/waveform/512?detail=1&start=1.25&end=3.5&points=512"
+        invalid_url = _invalid_waveform_points_url(url)
+        self.assertEqual(
+            invalid_url,
+            "http://127.0.0.1:51234/api/waveform/512?detail=1&start=1.25&end=3.5&points=invalid",
+        )
+        self.assertEqual(urllib.parse.urlsplit(invalid_url).netloc, "127.0.0.1:51234")
+
+
 class WebServerTests(unittest.TestCase):
     def saved_export_fixture(self):
         source, decision, body, request = self.export_fixture(duplicates=True)
@@ -1283,7 +1298,7 @@ class WebServerTests(unittest.TestCase):
             urllib.request.urlopen(url.replace(file_hash, "unknown"))
         self.assertEqual(error.exception.code, 404)
         with self.assertRaises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(url.replace("512", "invalid"))
+            urllib.request.urlopen(_invalid_waveform_points_url(url))
         self.assertEqual(error.exception.code, 400)
         with patch.object(waveform, "query", side_effect=RuntimeError("Waveform generation requires ffmpeg.")):
             with self.assertRaises(urllib.error.HTTPError) as error:
