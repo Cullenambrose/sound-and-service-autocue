@@ -403,6 +403,11 @@ def _rank(
         if diagnostic.category == "song_cue" and diagnostic.match_status == "matched"
         and diagnostic.identity and diagnostic.identity not in excluded
     }
+    cue_label_identities = {
+        diagnostic.identity for diagnostic in resolution_diagnostics
+        if diagnostic.category == "song_cue" and diagnostic.status == "matched"
+        and diagnostic.identity and diagnostic.identity not in excluded
+    }
     fillers = _normal_identity_set(context.dj_memory_floor_fillers)
     crate_identities = _normal_identity_set(context.crate_identities)
 
@@ -424,11 +429,13 @@ def _rank(
             must_play=identity in must_identities,
             play_if_possible=identity in play_if_identities,
             relevant_song_cue=identity in cue_identities,
+            explain_song_cue=identity in cue_label_identities,
             guest_requested=identity in guest_identities,
             floor_filler=identity in fillers,
         )
         badges = []
-        if identity in must_identities or identity in play_if_identities or identity in cue_identities:
+        if (identity in must_identities or identity in play_if_identities
+                or identity in cue_label_identities):
             badges.append("requested")
         if identity in guest_identities:
             badges.append("customer")

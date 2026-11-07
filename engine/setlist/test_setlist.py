@@ -346,14 +346,55 @@ class SetlistEngineTests(unittest.TestCase):
             self.assertIsNotNone(diagnostic.confidence)
             self.assertTrue(diagnostic.alternatives)
             selected = next(item for item in result if item.song_identity == identity)
-            self.assertEqual(selected.reasons, ("Song cue fits first dance",))
-            self.assertEqual(selected.badges, ("requested",))
+            self.assertEqual(selected.reasons, ("Eligible local-library track for first dance phase",))
+            self.assertEqual(selected.badges, ())
             self.assertEqual(selected.score, SetlistSettings().song_cue_weight)
             baseline = ranker(SetlistContext(explicit_phase="first_dance"), library)
             self.assertEqual(selected.track, next(
                 item.track for item in baseline if item.song_identity == identity))
             for shuffled in permutations(library):
                 self.assertEqual(ranker(context, shuffled), result)
+
+    def test_unavailable_cue_preserves_labels_independently_earned_by_valid_requests(self):
+        identity = song_identity("Our Dance", "Singer")
+        for ranker, field, reason, badge in (
+            (rank_prep_crate, "must_play", "Must-play request", "requested"),
+            (rank_next_song, "must_play", "Must-play request", "requested"),
+            (rank_prep_crate, "play_if_possible", "Play-if-possible request", "requested"),
+            (rank_next_song, "play_if_possible", "Play-if-possible request", "requested"),
+            (rank_next_song, "guest_requests", "Live guest request", "customer"),
+        ):
+            context, library = self.cue_version_fixture(
+                version="Radio Edit",
+                **{field: (SongRequest("Our Dance", "Singer", version="Clean"),)},
+            )
+            result = ranker(context, library)
+            selected = next(item for item in result if item.song_identity == identity)
+            self.assertEqual(selected.track["file_id"], "trk-005")
+            self.assertEqual(selected.reasons, (reason,))
+            self.assertEqual(selected.badges, (badge,))
+            context.song_cues = ()
+            baseline = next(item for item in ranker(context, library)
+                            if item.song_identity == identity)
+            self.assertEqual(selected.score - baseline.score, SetlistSettings().song_cue_weight)
+            self.assertEqual(selected.reasons, baseline.reasons)
+            self.assertEqual(selected.badges, baseline.badges)
+
+    def test_available_cue_labels_survive_an_unavailable_cue_for_the_same_song(self):
+        context, library = self.cue_version_fixture()
+        identity = song_identity("Our Dance", "Singer")
+        for ranker in (rank_prep_crate, rank_next_song):
+            baseline = ranker(context, library)
+            context.song_cues += (SongCue("First Dance", "Our Dance", "Singer", "Radio Edit"),)
+            result = ranker(context, library)
+            selected = next(item for item in result if item.song_identity == identity)
+            self.assertEqual(result.items, baseline.items)
+            self.assertEqual(selected.track["file_id"], "trk-004")
+            self.assertEqual(selected.reasons, ("Song cue fits first dance",))
+            self.assertEqual(selected.badges, ("requested",))
+            self.assertEqual(selected.score, SetlistSettings().song_cue_weight)
+            self.assertEqual(result.resolution_diagnostics[-1].status, "version_unavailable")
+            context.song_cues = context.song_cues[:1]
 
     def test_cue_resolution_retains_ambiguity_and_inactive_cues_do_not_select_versions(self):
         context, library = self.cue_version_fixture()

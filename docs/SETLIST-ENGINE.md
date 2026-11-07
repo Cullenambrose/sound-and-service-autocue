@@ -51,9 +51,10 @@ unresolved; an absent artist remains absent and is never fabricated.
   Cue moment and metadata are retained in the diagnostic request. Inactive
   moments do not select versions. An unavailable cue version retains the
   confidently resolved identity and reports `version_unavailable`. Its
-  deduplicated timeline boost and `requested` badge describe song-level
-  relevance only, not exact-version fulfillment; no version badge or reason
-  is added. This song-level boost also remains when must-play wins a version
+  deduplicated timeline boost remains, but the unavailable cue adds no
+  `requested` badge or cue-derived recommendation reason. Labels independently
+  earned by valid requests or available cues remain intact. This song-level
+  boost also remains when must-play wins a version
   conflict, which is reported explicitly. Ambiguous cues remain unresolved.
 - Prep returns every confidently resolved, eligible must-play identity. If
   `limit` is below their count, the result expands and `capacity_overflow`
