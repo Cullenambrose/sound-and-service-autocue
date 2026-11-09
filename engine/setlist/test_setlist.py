@@ -406,7 +406,7 @@ class SetlistEngineTests(unittest.TestCase):
             context.explicit_phase = "first_dance"
             ambiguous = ranker(context, [
                 track("Our Dance", "Singer", file_id="a", version="Short Edit"),
-                track("Our Dance", "Singer", file_id="b", version="Clean"),
+                track("Our Dance", "Singers", file_id="b", version="Clean"),
             ])
             diagnostic = ambiguous.resolution_diagnostics[0]
             self.assertEqual((diagnostic.status, diagnostic.match_status), ("ambiguous", "ambiguous"))

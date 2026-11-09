@@ -113,9 +113,20 @@ song metadata, guest requests, or DJ-memory data through that route is later
 integration work. Synthetic in-memory tests establish software behavior, not
 musical quality, cue accuracy, or real-world transition quality.
 
-The reported matcher failures `mp-4`, `g-3`, and `g-9` remain a separate matcher
-task, not successes established by these cue-version regressions. No matcher
-implementation, configuration thresholds, or existing expectations were changed.
+The shared matcher now scores normalized song identities without playback-version
+text or preference bonuses. Confidence remains 60% title similarity plus 40%
+primary-artist similarity; the setlist cutoff is still inclusive at 0.6.
+Ambiguity compares distinct song identities within the existing five-point
+window, not duplicate files of one identity. Clean/Intro/Short Edit preferences
+only order files inside an identity, with deterministic metadata tie-breaking.
+Weak identity evidence stays missing regardless of version preference.
+
+The original synthetic Desktop demo is preserved byte-for-byte in
+`engine/setlist/fixtures/`, including its historical README observations.
+`engine/setlist/test_demo.py` exercises all 18 original expectations, including
+`mp-4` -> `trk-038`, `g-3` -> `trk-014`, and ambiguous `g-9`/`g-10` at exactly
+0.6 without fulfillment. Run it against checkout modules with
+`PYTHONPATH=engine .venv/bin/python -m unittest setlist.test_demo -v`.
 
 The recommendation result keeps its original `items`,
 `unresolved_must_play`, `conflicting_must_play`, and `phase` fields, and adds

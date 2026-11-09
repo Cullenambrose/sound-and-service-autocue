@@ -1,6 +1,7 @@
 """Track matching for requested songs against library database."""
 import re
 import unicodedata
+import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 from difflib import SequenceMatcher
@@ -179,6 +180,33 @@ def compute_similarity(s1: str, s2: str) -> float:
     return SequenceMatcher(None, s1, s2).ratio()
 
 
+def _identity_fields(track: Dict[str, Any]) -> Tuple[str, str]:
+    title, _ = extract_version_tags(track.get("title") or "")
+    title, _ = extract_featuring(title)
+    artist, _ = extract_featuring(track.get("artist") or "")
+    return artist, normalize_text(title)
+
+
+def _version_preference(track: Dict[str, Any], config: MatchConfig) -> float:
+    _, version = extract_version_tags(
+        (track.get("title") or "") + " " + str(track.get("version") or "")
+    )
+    return (
+        10 * (config.prefer_clean and version.is_clean)
+        + 8 * (config.prefer_intro and version.is_intro)
+        + 5 * version.is_chorus_intro
+        + 7 * (config.prefer_short_edit and version.is_short_edit)
+        - 5 * (config.prefer_clean and version.is_dirty)
+    )
+
+
+def _file_tie_key(track: Dict[str, Any]) -> str:
+    return json.dumps(
+        {key: value for key, value in track.items() if not key.startswith("_")},
+        sort_keys=True, ensure_ascii=False, default=str,
+    )
+
+
 def rank_candidates(
     candidates: List[Dict[str, Any]],
     request_artist: str,
@@ -186,8 +214,8 @@ def rank_candidates(
     config: MatchConfig
 ) -> List[Tuple[Dict[str, Any], float]]:
     """
-    Rank candidate tracks by preference and similarity.
-    Returns list of (track, score) tuples sorted by score descending.
+    Rank identities by similarity, using version preferences only within an identity.
+    Returned scores are identity evidence only, never preference bonuses.
     """
     scored = []
     
@@ -195,8 +223,7 @@ def rank_candidates(
         score = 0.0
         
         # Base similarity score
-        track_artist = normalize_text(track.get("artist") or "")
-        track_title = normalize_text(track.get("title") or "")
+        track_artist, track_title = _identity_fields(track)
         
         artist_sim = compute_similarity(request_artist, track_artist)
         title_sim = compute_similarity(request_title, track_title)
@@ -205,27 +232,13 @@ def rank_candidates(
         similarity = (title_sim * 0.6) + (artist_sim * 0.4)
         score += similarity * 100
         
-        # Version preference bonuses
-        track_title_raw = track.get("title") or ""
-        _, version = extract_version_tags(track_title_raw)
-        
-        if config.prefer_clean and version.is_clean:
-            score += 10
-        if config.prefer_intro and version.is_intro:
-            score += 8
-        if version.is_chorus_intro:
-            score += 5
-        if config.prefer_short_edit and version.is_short_edit:
-            score += 7
-        
-        # Penalize dirty if we prefer clean
-        if config.prefer_clean and version.is_dirty:
-            score -= 5
-        
         scored.append((track, score))
     
     # Sort by score descending
-    scored.sort(key=lambda x: x[1], reverse=True)
+    scored.sort(key=lambda item: (
+        -item[1], _identity_fields(item[0]),
+        -_version_preference(item[0], config), _file_tie_key(item[0]),
+    ))
     
     return scored
 
@@ -250,9 +263,7 @@ def match_track(
     request_title = request.get("title", "")
     
     # Normalize and extract features
-    norm_artist, featured_artists = extract_featuring(request_artist)
-    norm_title, _ = extract_featuring(request_title)
-    norm_title, _ = extract_version_tags(norm_title)
+    norm_artist, norm_title = _identity_fields({"artist": request_artist, "title": request_title})
     
     # Find candidates by fuzzy matching
     candidates = []
@@ -270,10 +281,6 @@ def match_track(
         # Compute similarity
         artist_sim = compute_similarity(norm_artist, track_artist_main)
         title_sim = compute_similarity(norm_title, track_title_main)
-        
-        # Check if featuring artists match (bonus, not required)
-        all_request_featured = featured_artists
-        all_track_featured = track_featured + track_title_featured
         
         # At least one must match well
         if artist_sim >= config.fuzzy_threshold or title_sim >= config.fuzzy_threshold:
@@ -303,14 +310,17 @@ def match_track(
     ranked = rank_candidates(candidates, norm_artist, norm_title, config)
     
     best_track, best_score = ranked[0]
+    best_identity = _identity_fields(best_track)
     
     # Compute confidence (normalize score to 0-1 range)
     confidence = min(best_score / 100, 1.0)
     
     # Check if ambiguous (multiple similar matches)
     is_ambiguous = False
-    if len(ranked) > 1:
-        second_score = ranked[1][1]
+    other_identity = next((item for item in ranked
+                           if _identity_fields(item[0]) != best_identity), None)
+    if other_identity is not None:
+        second_score = other_identity[1]
         # If second best is within 5 points and both are high confidence, it's ambiguous
         if abs(best_score - second_score) < 5 and confidence >= config.min_confidence:
             is_ambiguous = True
@@ -331,7 +341,7 @@ def match_track(
             confidence=confidence,
             matched_track=best_track,
             candidates=[t for t, _ in ranked[:5]],
-            reason=f"Multiple similar matches found"
+            reason="Multiple song identities have similar identity scores"
         )
     
     return MatchResult(
@@ -339,7 +349,8 @@ def match_track(
         status="matched",
         confidence=confidence,
         matched_track=best_track,
-        candidates=[t for t, _ in ranked[:5]]
+        candidates=[t for t, _ in ranked[:5]],
+        reason=f"Song identity matched at confidence {confidence:.2f}; version preference applied within identity"
     )
 
 

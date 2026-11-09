@@ -1,6 +1,7 @@
 """Tests for track matching functionality."""
 import json
 import tempfile
+from itertools import permutations
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,56 @@ def test_compute_similarity():
 # ============================================================================
 # Matching Tests
 # ============================================================================
+
+def test_identity_confidence_boundary_is_inclusive_and_unrelated_clean_stays_missing():
+    config = MatchConfig(min_confidence=0.6)
+    exact_title = {"id": "exact", "title": "Moon Harbor", "artist": "Iris Dunn"}
+    boundary = match_track({"title": "Moon Harbor"}, [exact_title], config)
+    assert (boundary.status, boundary.confidence) == ("matched", 0.6)
+    weak = match_track(
+        {"title": "ZZZZ", "artist": "Singer"},
+        [{"id": "weak", "title": "AAAA (Clean)", "artist": "Singer"}], config,
+    )
+    assert (weak.status, weak.confidence) == ("missing", 0.4)
+    assert weak.matched_track is None
+    assert weak.candidates[0]["_artist_sim"] == 1
+    assert weak.candidates[0]["_title_sim"] == 0
+    assert "below threshold 0.6" in weak.reason
+
+
+def test_version_preferences_never_change_identity_confidence_or_ambiguity():
+    library = [
+        {"id": "exact-dirty", "artist": "Singer", "title": "Blue Moon (Dirty)"},
+        {"id": "exact-intro", "artist": "Singer", "title": "Blue Moon (Intro)"},
+        {"id": "other-clean", "artist": "Singer", "title": "Blue Moon Again (Clean Intro)"},
+    ]
+    for config in (MatchConfig(), MatchConfig(prefer_clean=False, prefer_intro=False),
+                   MatchConfig(prefer_short_edit=True)):
+        for tracks in permutations(library):
+            result = match_track({"artist": "Singer", "title": "Blue Moon"}, tracks, config)
+            assert (result.status, result.confidence) == ("matched", 1.0)
+            assert result.matched_track["id"] in {"exact-dirty", "exact-intro"}
+
+    tied = [
+        {"id": "a", "artist": "Artist A", "title": "Night Drive (Dirty)"},
+        {"id": "b", "artist": "Artist B", "title": "Night Drive (Clean Intro)"},
+    ]
+    for tracks in permutations(tied):
+        result = match_track({"title": "Night Drive"}, tracks, MatchConfig(min_confidence=0.6))
+        assert (result.status, result.confidence) == ("ambiguous", 0.6)
+        assert len(result.candidates) == 2
+
+
+def test_same_identity_versions_are_not_identity_ambiguity_and_choose_intact_file():
+    library = [
+        {"id": "a", "title": "Song", "artist": "Artist", "version": "Dirty", "bpm": 90},
+        {"id": "b", "title": "Song", "artist": "Artist", "version": "Clean", "bpm": 120},
+    ]
+    for tracks in permutations(library):
+        result = match_track({"title": "Song", "artist": "Artist"}, tracks, MatchConfig())
+        assert (result.status, result.confidence) == ("matched", 1.0)
+        assert result.matched_track["id"] == "b"
+        assert result.matched_track["bpm"] == 120
 
 
 def test_exact_match(library_tracks):
