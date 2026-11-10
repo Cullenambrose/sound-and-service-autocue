@@ -18,8 +18,15 @@ import zipfile
 import base64
 import glob
 import math
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+if __package__:
+    from . import catalog, scan_jobs, personal_crates
+else:
+    import catalog
+    import scan_jobs
+    import personal_crates
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "engine") not in sys.path:
@@ -31,9 +38,16 @@ from serato_tags import (
 )
 import serato_tags
 import serato_writer
+import review_store
+if __package__:
+    from . import playlist_export
+else:
+    import playlist_export
+import autocue_worker
+from project_config import project_path
 
 WEB = Path(__file__).resolve().parent
-DATA = Path(os.environ.get("AUTOCUE_WEB_DATA", ROOT / "web-data")).expanduser().resolve()
+DATA = project_path("data_dir", "AUTOCUE_WEB_DATA", ROOT / "web-data")
 UPLOADS = DATA / "audio"
 DB_PATH = DATA / "library.sqlite3"
 ALLOWED = {".wav", ".mp3", ".m4a", ".flac", ".aiff", ".aif", ".ogg", ".opus"}
@@ -54,6 +68,11 @@ paused_jobs = set()
 cancelled_jobs = set()
 write_lock = threading.Lock()
 SESSION_TOKEN = ""
+
+
+class LocalHTTPServer(ThreadingHTTPServer):
+    # The catalog adds static/API requests to the existing parallel startup burst.
+    request_queue_size = 32
 
 
 def connect():
@@ -186,6 +205,11 @@ def initialize():
         ):
             if name not in columns:
                 db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {declaration}")
+        db.commit()
+        review_store.initialize(db, DATA / "corrections.json")
+        catalog.initialize(db)
+        scan_jobs.initialize(db)
+        personal_crates.initialize(db)
         db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status IN ('running','paused')", (time.time(),))
         for row in db.execute("SELECT hash,audio_path,error FROM tracks").fetchall():
             previous = "\n".join(line for line in (row["error"] or "").splitlines()
@@ -214,6 +238,7 @@ def track_record(row):
     names = _slot_names(plan.get("map_type", "VOCAL"))
     return {
         "hash": row["hash"],
+        "review_revision": row["review_revision"],
         "name": row["name"],
         "relative_path": row["relative_path"],
         "source_available": bool(row["source_path"] and Path(row["source_path"]).is_file()),
@@ -1014,7 +1039,8 @@ def _restore_backup_entry(archive, entry):
         raise
 
 
-def copy_import(source, name, relative_path="", source_path=""):
+@contextmanager
+def prepared_import(source, name, *, expected_hash=None):
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED:
         raise ValueError("Unsupported audio file type: " + (suffix or "(no extension)"))
@@ -1029,38 +1055,127 @@ def copy_import(source, name, relative_path="", source_path=""):
                     break
                 digest.update(block)
                 staged.write(block)
+            staged.flush()
+            os.fsync(staged.fileno())
         file_hash = digest.hexdigest()
+        if expected_hash is not None and file_hash != expected_hash:
+            raise catalog.Conflict("Source bytes no longer match the reviewed file; rescan and review again.")
         destination = staged_audio_path(
             {"hash": file_hash, "audio_path": "audio/" + file_hash + suffix}, missing_ok=True)
-        if destination.exists():
-            temporary.unlink()
-        else:
-            os.replace(temporary, destination)
-    except Exception:
+        if expected_hash is not None and destination.exists() and _sha256(destination) != expected_hash:
+            raise RuntimeError("Existing staged audio failed hash verification; nothing was overwritten.")
+        yield file_hash, temporary, destination
+    finally:
         temporary.unlink(missing_ok=True)
-        raise
+
+
+def record_import(db, file_hash, destination, name, relative_path="", source_path="", *, preserve_existing=False):
+    existing = db.execute("SELECT hash FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+    if existing:
+        if source_path and not preserve_existing:
+            stat = Path(source_path).stat()
+            db.execute("UPDATE tracks SET source_path=?,source_size=?,source_mtime=? WHERE hash=?",
+                       (source_path, stat.st_size, stat.st_mtime, file_hash))
+        return False
+    stat = Path(source_path).stat() if source_path and Path(source_path).is_file() else None
+    db.execute(
+        "INSERT INTO tracks(hash,name,relative_path,audio_path,source_path,source_size,source_mtime,imported_at) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (file_hash, Path(name).name, relative_path, destination.relative_to(DATA.resolve()).as_posix(), source_path,
+         stat.st_size if stat else 0, stat.st_mtime if stat else 0, time.time()),
+    )
+    return True
+
+
+def copy_import(source, name, relative_path="", source_path=""):
+    with prepared_import(source, name) as (file_hash, temporary, destination):
+        if not destination.exists():
+            os.replace(temporary, destination)
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            added = record_import(db, file_hash, destination, name, relative_path, source_path)
+    return file_hash, added
+
+
+def stage_catalog_match(body):
+    if not isinstance(body, dict) or set(body) != {
+            "request_id", "dataset_id", "snapshot_id", "song_id", "decision_revision", "file_id", "content_hash"}:
+        raise ValueError("Staging requires request/dataset/snapshot/song IDs, decision_revision, file_id and content_hash.")
+    for key in ("request_id", "dataset_id", "snapshot_id", "song_id", "file_id", "content_hash"):
+        catalog.text(body[key], key, required=True)
+    if type(body["decision_revision"]) is not int or body["decision_revision"] < 1:
+        raise ValueError("decision_revision must be a positive integer.")
+    encoded = catalog.canonical(body)
+
+    def replay(db):
+        if body["dataset_id"] != review_store.dataset_id(db):
+            raise catalog.Conflict("Staging belongs to a different dataset; reload the app.")
+        prior = db.execute("SELECT * FROM catalog_staging_receipts WHERE request_id=?",
+                           (body["request_id"],)).fetchone()
+        if prior:
+            if prior["body_json"] != encoded:
+                raise catalog.Conflict("Staging request ID was already used with different content.")
+            return json.loads(prior["receipt_json"])
+        return None
+
     with connect() as db:
-        existing = db.execute("SELECT hash FROM tracks WHERE hash=?", (file_hash,)).fetchone()
-        if existing:
-            if source_path:
-                stat = Path(source_path).stat()
-                db.execute("UPDATE tracks SET source_path=?,source_size=?,source_mtime=? WHERE hash=?",
-                           (source_path, stat.st_size, stat.st_mtime, file_hash))
-            return file_hash, False
-        stat = Path(source_path).stat() if source_path and Path(source_path).is_file() else None
-        try:
-            db.execute(
-                "INSERT INTO tracks(hash,name,relative_path,audio_path,source_path,source_size,source_mtime,imported_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (file_hash, Path(name).name, relative_path, destination.relative_to(DATA.resolve()).as_posix(), source_path,
-                 stat.st_size if stat else 0, stat.st_mtime if stat else 0, time.time()),
-            )
-        except sqlite3.IntegrityError:
-            if source_path and stat:
-                db.execute("UPDATE tracks SET source_path=?,source_size=?,source_mtime=? WHERE hash=?",
-                           (source_path, stat.st_size, stat.st_mtime, file_hash))
-            return file_hash, False
-    return file_hash, True
+        receipt = replay(db)
+        if receipt:
+            return receipt
+        file, _ = catalog.reviewed_file(db, body)
+    source = Path(file["path"])
+    with prepared_import(source, source.name, expected_hash=body["content_hash"]) as (
+            file_hash, temporary, destination):
+        with connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            receipt = replay(db)
+            if receipt:
+                return receipt
+            current, decision = catalog.reviewed_file(db, body)
+            if current["path"] != file["path"]:
+                raise catalog.Conflict("Reviewed source location changed while staging.")
+            if destination.exists():
+                if _sha256(destination) != file_hash:
+                    raise RuntimeError("Existing staged audio failed hash verification; nothing was overwritten.")
+            else:
+                os.replace(temporary, destination)
+            added = record_import(db, file_hash, destination, source.name, file["relative_path"],
+                                  preserve_existing=True)
+            provenance = {"dataset_id": body["dataset_id"], "snapshot_id": body["snapshot_id"],
+                          "song_id": body["song_id"], "decision": decision,
+                          "file_id": file["id"], "source_path": file["path"], "track_hash": file_hash}
+            db.execute("""
+                INSERT INTO catalog_staged_tracks VALUES(?,?,?,?,?,?)
+                ON CONFLICT(snapshot_id,song_id,decision_revision) DO NOTHING
+            """, (body["snapshot_id"], body["song_id"], body["decision_revision"], file_hash,
+                  catalog.canonical(provenance), time.time()))
+            receipt = {"ok": True, **body, "track_hash": file_hash, "added": added}
+            db.execute("INSERT INTO catalog_staging_receipts VALUES(?,?,?)",
+                       (body["request_id"], encoded, catalog.canonical(receipt)))
+    return receipt
+
+
+def catalog_songs(db, snapshot_id, crate_id):
+    songs = catalog.songs(db, snapshot_id, crate_id)
+    for item in songs:
+        link = db.execute("""
+            SELECT s.track_hash,t.status,t.plan_json,t.reviewed,t.error FROM catalog_staged_tracks s
+            LEFT JOIN tracks t ON t.hash=s.track_hash
+            WHERE s.snapshot_id=? AND s.song_id=? AND s.decision_revision=?
+        """, (snapshot_id, item["song"]["id"], item["revision"])).fetchone()
+        item["staged_track"] = None
+        if link:
+            state = "removed" if link["status"] is None else "available"
+            if state == "available":
+                track = db.execute("SELECT hash,audio_path FROM tracks WHERE hash=?", (link["track_hash"],)).fetchone()
+                try:
+                    staged_audio_path(track)
+                except (OSError, ValueError):
+                    state = "unavailable"
+            item["staged_track"] = {"hash": link["track_hash"], "state": state,
+                                    "status": link["status"], "has_plan": bool(link["plan_json"]),
+                                    "reviewed": bool(link["reviewed"]), "error": link["error"]}
+    return songs
 
 
 def create_job(hashes, force=False):
@@ -1145,8 +1260,7 @@ def waveform_peaks(file_hash, points=900):
     return {"peaks": [round(float(value) / top, 3) for value in trimmed], "duration": len(peak) / 50}
 
 
-def process_builtin(row, settings, map_override=None):
-    analyze = _analysis_import()
+def process_builtin(row, settings, map_override=None, cancelled=None):
     _live_reset(row)
     audio_path = str(staged_audio_path(row))
     artist, title, genre = _tags(audio_path)
@@ -1156,13 +1270,20 @@ def process_builtin(row, settings, map_override=None):
     if map_override in ("DROP", "VOCAL"):
         cue_maps["mode"] = map_override
 
-    def progress(step, state, detail):
-        LIVE["steps"][step] = state
-        LIVE["detail"] = detail or LIVE["detail"]
+    def progress(message):
+        if message["kind"] == "progress":
+            event = message["data"]
+            LIVE["steps"][event["step"]] = message["status"]
+            LIVE["detail"] = event["detail"] or LIVE["detail"]
 
-    plan = analyze.analyze(audio_path, artist, title, genre, progress, cue_maps=cue_maps,
-                           experiments=_enabled_experiments(settings),
-                           gemini=settings.get("gemini") == "true")
+    result = autocue_worker.run({
+        "schema_version": 1, "job_id": str(uuid.uuid4()), "profile": "local",
+        "source": audio_path, "track_hash": row["hash"],
+        "artist": artist, "title": title, "genre": genre, "cue_maps": cue_maps,
+        "experiments": _enabled_experiments(settings), "allow_lyrics": True,
+        "gemini": settings.get("gemini") == "true",
+    }, progress, cancelled)
+    plan = result["plan"]
     LIVE["cues_found"] = [slot for slot, cue in plan["cues"].items() if cue.get("bar") is not None]
     return plan
 
@@ -1171,7 +1292,9 @@ def _store_plan(file_hash, plan, status):
     """Save a new plan. A reviewed song keeps its reviewed cues as the answer key for scoring."""
     experiments = _experiments_module()
     plan["variants"] = experiments.scoring_variants(plan)
+    plan["analysis_id"] = review_store.analysis_id(file_hash, plan)
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         old = db.execute("SELECT plan_json,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         if old and old["plan_json"]:
             previous = json.loads(old["plan_json"])
@@ -1184,7 +1307,7 @@ def _store_plan(file_hash, plan, status):
                    (json.dumps(plan, ensure_ascii=False), status, file_hash))
 
 
-def process_track(file_hash):
+def process_track(file_hash, cancelled=None):
     with connect() as db:
         row = db.execute("SELECT * FROM tracks WHERE hash=?", (file_hash,)).fetchone()
         settings = {item["key"]: item["value"] for item in db.execute("SELECT * FROM settings")}
@@ -1195,7 +1318,7 @@ def process_track(file_hash):
         try:
             previous = json.loads(row["plan_json"]) if row["plan_json"] else {}
             override = previous.get("map_override")
-            plan = process_builtin(row, settings, override)
+            plan = process_builtin(row, settings, override, cancelled)
             if override:
                 plan["map_override"] = override
         except Exception as error:
@@ -1205,6 +1328,8 @@ def process_track(file_hash):
         threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
             settings.get("strictness", "standard"), 0.6)
         low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
+        if cancelled and cancelled():
+            raise autocue_worker.analyze.AnalysisCancelled("Analysis cancelled before saving the plan.")
         _store_plan(file_hash, plan, "Needs a look" if low else "Cues ready")
         return
     import shlex
@@ -1234,6 +1359,8 @@ def process_track(file_hash):
         plan = json.load(stream)
     if not isinstance(plan.get("cues"), dict):
         raise RuntimeError("Processor output must contain a cues object.")
+    if cancelled and cancelled():
+        raise autocue_worker.analyze.AnalysisCancelled("Cancelled before storing external processor output.")
     threshold = {"relaxed": 0.45, "standard": 0.6, "strict": 0.8}.get(
         settings.get("strictness", "standard"), 0.6)
     low = any((cue.get("confidence") or 0) < threshold for cue in plan["cues"].values())
@@ -1284,7 +1411,11 @@ def worker():
                     _update_job(job_id, status="cancelled", completed=done, message="Cancelled")
                     break
                 try:
-                    process_track(file_hash)
+                    process_track(file_hash, cancelled=lambda: job_id in cancelled_jobs)
+                except autocue_worker.analyze.AnalysisCancelled:
+                    _update_job(job_id, status="cancelled", completed=done,
+                                message="Cancelled; the active track was not saved")
+                    break
                 except Exception as error:
                     with connect() as db:
                         db.execute("UPDATE tracks SET error=? WHERE hash=?", (str(error), file_hash))
@@ -1348,10 +1479,46 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local_request():
             return self.send_error(403)
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/api/catalog/personal/exports", "/api/catalog/personal/exports/download"):
+            if not self._valid_origin() or self.headers.get("Sec-Fetch-Site") == "cross-site":
+                return json_response(self, {"error": "Request rejected: local origin required."}, 403)
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                with connect() as db:
+                    dataset = review_store.dataset_id(db)
+                if parsed.path.endswith("/download"):
+                    if query.get("dataset_id") != [dataset]:
+                        raise catalog.Conflict("Export belongs to another dataset; reload the app.")
+                    data, _, _ = playlist_export.saved_bundle(
+                        DATA / "exports", query.get("export_id", [""])[0], dataset)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Disposition", f'attachment; filename="{query["export_id"][0]}.zip"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                result = playlist_export.saved_exports(DATA / "exports", dataset,
+                                                       int(query.get("offset", ["0"])[0]))
+                return json_response(self, result)
+            except catalog.Conflict as error:
+                return json_response(self, {"error": str(error)}, 409)
+            except FileNotFoundError as error:
+                return json_response(self, {"error": "Saved export not found; refresh history. " + str(error)}, 404)
+            except ValueError as error:
+                return json_response(self, {"error": str(error)}, 400)
+            except (OSError, sqlite3.Error) as error:
+                self.log_error("Saved export read failed: %s", error)
+                return json_response(self, {"error": "Saved export could not be read: " + str(error)}, 503)
         if parsed.path == "/api/session":
             if not self._valid_origin():
                 return json_response(self, {"error": "Request rejected: local origin required."}, 403)
-            return json_response(self, {"token": SESSION_TOKEN})
+            with connect() as db:
+                identity = review_store.dataset_id(db)
+            return json_response(self, {"token": SESSION_TOKEN, "dataset_id": identity})
         if parsed.path == "/api/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1381,14 +1548,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(WEB / "index.html", "text/html; charset=utf-8")
         if parsed.path == "/app.js":
             return self._static(WEB / "app.js", "text/javascript; charset=utf-8")
+        if parsed.path in ("/catalog.js", "/catalog-state.js"):
+            return self._static(WEB / parsed.path.removeprefix("/"), "text/javascript; charset=utf-8")
         if parsed.path == "/timing.js":
             return self._static(WEB / "timing.js", "text/javascript; charset=utf-8")
+        if parsed.path == "/review-state.js":
+            return self._static(WEB / "review-state.js", "text/javascript; charset=utf-8")
         if parsed.path == "/style.css":
             return self._static(WEB / "style.css", "text/css; charset=utf-8")
         if parsed.path == "/api/library":
             with connect() as db:
                 rows = db.execute("SELECT * FROM tracks ORDER BY imported_at DESC").fetchall()
-            return json_response(self, {"tracks": [track_record(row) for row in rows]})
+                sources = {}
+                for link in db.execute("SELECT track_hash,provenance_json FROM catalog_staged_tracks ORDER BY created_at"):
+                    sources.setdefault(link["track_hash"], []).append(json.loads(link["provenance_json"]))
+            return json_response(self, {"tracks": [
+                {**track_record(row), "catalog_sources": sources.get(row["hash"], [])} for row in rows]})
+        if parsed.path == "/api/corrections":
+            with connect() as db:
+                return json_response(self, review_store.export_events(db))
         if parsed.path.startswith("/api/tracks/") and parsed.path.endswith("/event-review"):
             file_hash = parsed.path.split("/")[-2]
             if not _valid_track_hash(file_hash):
@@ -1513,6 +1691,45 @@ class Handler(BaseHTTPRequestHandler):
             except ImportError:
                 found = None
             return json_response(self, found or {"peaks": [], "duration": 0})
+        if parsed.path == "/personal.js":
+            return self._static(WEB / "personal.js", "text/javascript; charset=utf-8")
+        if parsed.path.startswith("/api/catalog/"):
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                with connect() as db:
+                    if parsed.path == "/api/catalog/snapshots":
+                        result = {"snapshots": catalog.snapshots(db)}
+                    elif parsed.path == "/api/catalog/crates":
+                        result = {"crates": catalog.crates(db, query.get("snapshot_id", [""])[0],
+                                                         query.get("q", [""])[0])}
+                    elif parsed.path == "/api/catalog/songs":
+                        result = {"songs": catalog_songs(db, query.get("snapshot_id", [""])[0],
+                                                        query.get("crate_id", [""])[0])}
+                    elif parsed.path == "/api/catalog/roots":
+                        result = {"roots": catalog.roots(db)}
+                    elif parsed.path == "/api/catalog/scans":
+                        result = {"jobs": scan_jobs.jobs(db)}
+                    elif parsed.path == "/api/catalog/personal":
+                        result = {"crates": personal_crates.listing(db)}
+                    elif parsed.path == "/api/catalog/personal/detail":
+                        result = personal_crates.detail(db, query.get("crate_id", [""])[0])
+                    elif parsed.path == "/api/catalog/files":
+                        files = catalog.file_records(db)
+                        search = query.get("q", [""])[0].casefold()
+                        files = [file for file in files if search in
+                                 (file["path"] + " " + json.dumps(file["metadata"], ensure_ascii=False)).casefold()]
+                        offset = int(query.get("offset", ["0"])[0])
+                        if offset < 0:
+                            raise ValueError("File offset must be nonnegative.")
+                        result = {"files": files[offset:offset + 100], "total": len(files), "offset": offset}
+                    else:
+                        return json_response(self, {"error": "Catalog endpoint not found."}, 404)
+                return json_response(self, result)
+            except ValueError as error:
+                return json_response(self, {"error": str(error)}, 400)
+            except (OSError, sqlite3.Error) as error:
+                self.log_error("Catalog read failed: %s", error)
+                return json_response(self, {"error": str(error)}, 503)
         if parsed.path == "/api/crates":
             return json_response(self, {"crates": list_crates()})
         if parsed.path == "/api/crates/detail":
@@ -1560,6 +1777,40 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if parsed.path in ("/api/catalog/personal/export/preview", "/api/catalog/personal/export/download"):
+                try:
+                    result = playlist_export.prepare(connect, DATA / "exports", self._body_json(),
+                                                     download=parsed.path.endswith("/download"))
+                except OSError as error:
+                    self.log_error("Playlist verification/publication failed: %s", error)
+                    return json_response(self, {"error": "Export was not completed: " + str(error)}, 503)
+                return json_response(self, result)
+            if parsed.path == "/api/catalog/personal/save":
+                body = self._body_json()
+                with connect() as db:
+                    result = personal_crates.save(db, body, review_store.dataset_id(db))
+                return json_response(self, result)
+            if parsed.path == "/api/catalog/stage":
+                return json_response(self, stage_catalog_match(self._body_json()))
+            if parsed.path in ("/api/catalog/scan", "/api/catalog/scans/cancel"):
+                body = self._body_json()
+                with connect() as db:
+                    dataset = review_store.dataset_id(db)
+                    result = (scan_jobs.submit(db, body, dataset) if parsed.path.endswith("/scan")
+                              else scan_jobs.cancel(db, body, dataset))
+                return json_response(self, result, 202 if parsed.path.endswith("/scan") else 200)
+            if parsed.path in ("/api/catalog/import", "/api/catalog/decide"):
+                body = self._body_json(max_length=64 * 1024 * 1024 if parsed.path.endswith("/import") else 1024 * 1024)
+                if not isinstance(body, dict):
+                    raise ValueError("Catalog request must be an object.")
+                with connect() as db:
+                    if parsed.path.endswith("/import"):
+                        result = catalog.import_snapshot(db, body)
+                    else:
+                        if body.get("dataset_id") != review_store.dataset_id(db):
+                            raise catalog.Conflict("Match belongs to a different dataset; reload the app.")
+                        result = catalog.decide(db, body)
+                return json_response(self, result)
             if parsed.path.startswith("/api/event-reviews/"):
                 file_hash = parsed.path.removeprefix("/api/event-reviews/")
                 if not _valid_track_hash(file_hash):
@@ -1777,6 +2028,7 @@ class Handler(BaseHTTPRequestHandler):
                 if choice not in ("AUTO", "DROP", "VOCAL"):
                     raise ValueError("Map must be Auto, Drop, or Vocal.")
                 with connect() as db:
+                    db.execute("BEGIN IMMEDIATE")
                     row = db.execute("SELECT plan_json FROM tracks WHERE hash=?", (file_hash,)).fetchone()
                     if not row:
                         raise ValueError("Track not found.")
@@ -1839,6 +2091,11 @@ class Handler(BaseHTTPRequestHandler):
                                    (json.dumps(normalized_cue_maps),))
                 return json_response(self, {"ok": True})
             self.send_error(404)
+        except catalog.Conflict as error:
+            return json_response(self, {"error": str(error)}, 409)
+        except sqlite3.Error as error:
+            self.log_error("Local transaction failed: %s", error)
+            return json_response(self, {"error": "Operation was not saved: " + str(error)}, 503)
         except (ValueError, OSError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError) as error:
             return json_response(self, {"error": str(error)}, 400)
 
@@ -1851,13 +2108,31 @@ class Handler(BaseHTTPRequestHandler):
         file_hash = parsed.path.rsplit("/", 1)[-1]
         try:
             body = self._body_json()
+            if not isinstance(body, dict) or not isinstance(body.get("cues"), dict) or not body["cues"]:
+                raise ValueError("Review must contain a nonempty cues object.")
+            request_id = body.get("request_id")
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+                raise ValueError("Invalid review request ID.")
+            request = {"track_hash": file_hash, "body": body}
             with connect() as db:
-                row = db.execute("SELECT plan_json,audio_path,reviewed FROM tracks WHERE hash=?", (file_hash,)).fetchone()
+                db.execute("BEGIN IMMEDIATE")
+                if body.get("dataset_id") != review_store.dataset_id(db):
+                    raise review_store.ReviewConflict("Dataset changed. Your draft has not been applied.")
+                if type(body.get("base_revision")) is not int or body["base_revision"] < 0:
+                    raise ValueError("A nonnegative integer base_revision is required.")
+                receipt = review_store.replay(db, request_id, request)
+                if receipt:
+                    return json_response(self, receipt)
+                row = db.execute("SELECT plan_json,audio_path,reviewed,review_revision FROM tracks WHERE hash=?", (file_hash,)).fetchone()
                 if not row:
                     return json_response(self, {"error": "Track not found"}, 404)
+                if body["base_revision"] != row["review_revision"]:
+                    raise review_store.ReviewConflict(
+                        "Review changed on the server. Keep this draft and reopen the track to compare before saving.")
                 plan = json.loads(row["plan_json"]) if row["plan_json"] else {
                     "map_type": body.get("map_type", "VOCAL"), "cues": {},
                 }
+                plan.setdefault("analysis_id", review_store.analysis_id(file_hash, plan))
                 fallback_names = _slot_names(plan.get("map_type", "VOCAL"))
                 grid = plan.get("grid", {})
                 if grid.get("t1") is None or not grid.get("bar_s"):
@@ -1873,13 +2148,15 @@ class Handler(BaseHTTPRequestHandler):
                 events = []
                 t1, bar_s = grid.get("t1"), grid.get("bar_s")
                 for slot, edit in body.get("cues", {}).items():
-                    if slot not in "ABCDEFGH":
+                    if slot not in set("ABCDEFGH") or not isinstance(edit, dict):
                         raise ValueError("Unknown cue slot: " + slot)
                     cue = plan.setdefault("cues", {}).setdefault(slot, {})
                     old_name, old_bar = cue.get("name"), cue.get("bar")
                     old_time = None if old_bar is None else serato_writer.cue_time_s(cue, grid)
                     new_name = _cue_name(edit.get("name", fallback_names[slot]), slot, fallback_names,
                                          preserve_custom=bool(plan.get("cue_map")))[:80]
+                    if isinstance(edit.get("bar"), bool):
+                        raise ValueError("Cue bar must be a number, not a boolean.")
                     new_bar = float(edit["bar"]) if edit.get("bar") not in (None, "") else None
                     earliest = min(0, math.ceil(time_to_bar(0, grid) - 1e-6))
                     if new_bar is not None and (not math.isfinite(new_bar) or new_bar < earliest):
@@ -1900,6 +2177,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
                     events.append({
                         "track": file_hash, "track_hash": file_hash,
+                        "analysis_id": plan["analysis_id"],
                         "file": Path(row["audio_path"]).name, "cue": slot,
                         "name": new_name,
                         "action": "clear" if new_bar is None else
@@ -1923,22 +2201,19 @@ class Handler(BaseHTTPRequestHandler):
                 status = "Edited by you" if changed else "Cues ready"
                 db.execute("UPDATE tracks SET plan_json=?,status=?,edited=?,reviewed=1 WHERE hash=?",
                            (json.dumps(plan, ensure_ascii=False), status, int(changed), file_hash))
-                correction_path = DATA / "corrections.json"
-                corrections = []
-                if correction_path.is_file():
-                    with open(correction_path, encoding="utf-8") as source:
-                        corrections = json.load(source)
-                corrections.extend(events)
-                temporary = correction_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(corrections, ensure_ascii=False, indent=2), encoding="utf-8")
-                os.replace(temporary, correction_path)
-            return json_response(self, {"ok": True})
+                receipt = review_store.acknowledge(db, request_id, request, file_hash, events)
+            return json_response(self, receipt)
+        except review_store.ReviewConflict as error:
+            return json_response(self, {"error": str(error)}, 409)
+        except sqlite3.Error as error:
+            self.log_error("Review transaction failed: %s", error)
+            return json_response(self, {"error": "Review was not saved: " + str(error)}, 503)
         except (ValueError, TypeError, OSError, json.JSONDecodeError) as error:
             return json_response(self, {"error": str(error)}, 400)
 
-    def _body_json(self):
+    def _body_json(self, max_length=1024 * 1024):
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 1024 * 1024:
+        if length < 0 or length > max_length:
             raise ValueError("Request body is too large.")
         return json.loads(self.rfile.read(length) or b"{}")
 
@@ -1961,12 +2236,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     initialize()
+    server = LocalHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
     with connect() as db:
+        scan_jobs.recover(db)
         queued = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at").fetchall()
     for row in queued:
         worker_queue.put(row["id"])
     threading.Thread(target=worker, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
+    scan_stop = threading.Event()
+    scan_thread = threading.Thread(target=scan_jobs.worker, args=(connect, scan_stop), daemon=True)
+    scan_thread.start()
     print("AutoCue web app: http://127.0.0.1:%d" % server.server_address[1], flush=True)
     try:
         server.serve_forever()
@@ -1974,6 +2253,10 @@ def main():
         pass
     finally:
         server.server_close()
+        scan_stop.set()
+        scan_thread.join(timeout=5)
+        if scan_thread.is_alive():
+            print("Catalog scan still inside filesystem/metadata I/O; startup will mark it interrupted.", file=sys.stderr)
 
 
 if __name__ == "__main__":

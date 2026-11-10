@@ -5,10 +5,8 @@ R = "/workspace/research/dj-auto-cues/proof/real"; sys.path.insert(0, f"{R}/tool
 import warnings; warnings.filterwarnings("ignore")
 ev = []
 for f in sorted(glob.glob(f"{R}/corrections/corrections*.json")): ev += json.load(open(f))
-last = {}
-for e in ev:
-    if e.get("cue") in list("ABCDGH") and e["action"] in ("correct", "set_here") and e.get("to_beat") is not None: last[(e["track"], e["cue"])] = e["to_beat"]
-    if e["action"] == "clear": last.pop((e["track"], e.get("cue")), None)
+import marks
+last = {key: beat for key, beat in marks.truth_beats(ev).items() if key[1] in "ABCDGH"}
 ns = {}; exec(open(f"{R}/tools/gemini_v2.py").read().split("def call(")[0], ns); BT = ns["bars_of_truth"]
 def sc(plans):
     m = collections.defaultdict(lambda: [0, 0]); t = collections.defaultdict(lambda: [0, 0])

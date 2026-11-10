@@ -1,5 +1,52 @@
 # Sound & Service AutoCue
 
+**Personal DJ app foundation (November 4, 2026):** the supported app is
+`web/server.py` with the Python `engine/analyze.py` worker, launched by `./run.sh`.
+Cue review saves now use a transactional SQLite journal, idempotent receipts,
+revision conflicts and recoverable browser drafts. Start with the
+[foundation handoff](docs/FOUNDATION.md) for configuration, migration, tests,
+known limits and the next milestone. Historical `review-ui/` is not a supported
+way to collect new corrections.
+
+The supported worker now has an installable Python package and versioned JSONL
+job contract. Run a generated, offline fixture without model packages:
+
+```bash
+python3 -m venv /path/to/disposable-worker-env
+/path/to/disposable-worker-env/bin/python -m pip install .
+/path/to/disposable-worker-env/bin/autocue-worker check
+/path/to/disposable-worker-env/bin/autocue-worker fixture --out /tmp/autocue-fixture-result.json
+```
+
+This fixture uses declared beat observations, **not model inference or musical
+accuracy evidence**. See the [worker handoff](docs/WORKER.md) for request/result
+schemas, optional analyzers, cache isolation, cancellation and verification.
+The wheel packages the worker, not the web app or historical research tools.
+
+The web app now also has a catalog snapshot browser, selected-folder read-only
+index and explicitly reviewed exact-file matches. Start with the
+[catalog demo and handoff](docs/CATALOG.md). This first slice accepts a documented
+JSON schema; the original vendor CSV adapter and real-export reconciliation
+remain unverified. Nothing is auto-matched, copied or analyzed by indexing.
+Reviewed matches can now be explicitly staged as hash-verified app-local copies,
+then sent to the existing analysis and cue editor. Staging has durable retry
+receipts, preserves catalog provenance and does not enable original-file writes.
+Folder indexing now runs as durable background jobs with progress, cooperative
+cancellation and reload/restart recovery. Interrupted scans preserve the previous
+index and require an explicit new scan; queued scans resume when the server starts.
+Offline indexed folders can now be explicitly reassociated to a moved/remounted
+location after full relative-path/hash verification, preserving file IDs and
+reviewed matches without moving original-file Serato write links.
+The **Arrange your set** section now supports ordered personal crates: create,
+rename, add catalog songs, reorder and remove individual memberships. Changes
+have revision checks and durable retry recovery. Explicit export previews verify
+reviewed source bytes; download rechecks revisions and hashes before atomically
+saving an app-local ZIP containing ordered UTF-8 M3U8, CSV and a manifest.
+Missing or unreviewed entries block the entire export; no original tags change.
+Saved-export history now offers integrity-checked historical ZIP downloads after
+reload or a lost response, even if source audio is offline. Recovery does not
+reverify current files; use a new preview when preparing a current set.
+
 Current review candidate: **v7**. Real-library evidence is preliminary; automatic cues
 still require listening review. See [the v7 completion plan](docs/v7-completion-plan.md)
 for the measured sample, remaining gates, and local review instructions.
@@ -109,6 +156,11 @@ config/           Learned profiles + genre bucket params (no keys)
 ```
 
 Open `http://127.0.0.1:8770`. The app keeps its SQLite library, staged audio copies, jobs, and corrections in the ignored `web-data/` directory. It binds only to loopback. Music is not uploaded; dragged/picked files are copied to the local app for analysis and their originals are left in place. Paste a local folder path or use the crate picker to link originals for Finder access and Serato writes.
+
+Before the first updated launch, stop the server and back up the whole data
+directory. Existing correction JSON is imported once and left unchanged; new
+corrections live in SQLite and can be retrieved from `/api/corrections`.
+See the [save and recovery contract](docs/FOUNDATION.md#save-and-recovery-contract).
 
 To move the local library, stop the server and copy the **whole** `web-data/` directory,
 then set `AUTOCUE_WEB_DATA` to its new location before restarting. Staged audio is stored as

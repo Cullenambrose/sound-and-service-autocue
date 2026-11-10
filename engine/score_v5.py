@@ -3,10 +3,9 @@ The Serato cues in truth_tags.json are Mixed In Key's: reported only as 'vs Mixe
 import json, os, sys, collections, shutil, tempfile
 R = "/workspace/research/dj-auto-cues/proof/real"; sys.path.insert(0, f"{R}/tools"); import rules_v5 as V
 import warnings; warnings.filterwarnings("ignore")
-ev = json.load(open(f"{R}/corrections/corrections.json")); last = {}
-for e in ev:
-    if e["cue"] in "ABCDGH" and e["action"] in ("correct", "set_here") and e.get("to_beat") is not None: last[(e["track"], e["cue"])] = e["to_beat"]
-    if e["action"] == "clear": last.pop((e["track"], e["cue"]), None)
+import marks
+last = {key: beat for key, beat in marks.truth_beats(
+    marks.events([f"{R}/corrections/corrections.json"])).items() if key[1] in "ABCDGH"}
 ns = {}; exec(open(f"{R}/tools/gemini_v2.py").read().split("def call(")[0], ns); BT = ns["bars_of_truth"]
 def beats(plan): return {L: (None if plan["cues"].get(L, {}).get("bar") is None else plan["cues"][L]["bar"] * 4) for L in "ABCDGH"}
 def score(plans):

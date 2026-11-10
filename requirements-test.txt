@@ -1,0 +1,3 @@
+# Core package only; no optional models or AI requests.
+-e .
+pytest>=7.0

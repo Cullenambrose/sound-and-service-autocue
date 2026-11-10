@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from timing import bar_to_time
 from cue_maps import phrasing_report
+from marks import latest_events
 
 SLOTS = "ABCDEFGH"
 
@@ -19,15 +20,11 @@ class ReviewMark:
     beat_s: float | None = None
 
 
-def load_marks(path):
+def load_marks(path, dataset_id=None):
     with open(path, encoding="utf-8") as source:
         events = json.load(source)
     last = {}
-    for event in sorted(events, key=lambda item: item.get("saved_at", "")):
-        slot = event.get("cue")
-        track = str(event.get("track", "")).zfill(2)
-        if slot not in SLOTS:
-            continue
+    for (track, slot), event in latest_events(events, dataset_id).items():
         key = (track, slot)
         if event.get("action") in ("correct", "set_here") and event.get("to_beat") is not None:
             beat = float(event["to_beat"])

@@ -138,4 +138,13 @@
 .event-review-controls{padding-top:10px;border-top:1px solid #202b30}
 .event-review-controls select{min-width:132px}
 .event-review-controls #event-review-status{flex:1;min-width:180px;font:9px var(--mono)}
+.catalog-song{padding:18px 0;border-top:1px solid var(--line)}
+.catalog-song h4{margin:0;font-size:15px}
+.catalog-song select,#catalog-snapshot{max-width:100%;width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);padding:9px;border-radius:7px}
+.catalog-song .path-row{flex-wrap:wrap}
+.catalog-song .path-row input{min-width:180px}
+.catalog-pending{padding:16px;border:1px solid var(--red);margin:14px 0}
+.catalog-pending strong{display:block;margin-bottom:12px}
+#catalog-section .catalog-error{color:var(--red)}
+#catalog-section[aria-busy="true"] button,#catalog-section[aria-busy="true"] input,#catalog-section[aria-busy="true"] select{pointer-events:none;opacity:.65}
 @media(max-width:600px){.event-label-panel{padding:10px}.event-label-heading{align-items:flex-start}.event-label-heading .button{padding:7px;font-size:10px}.event-label-row{grid-template-columns:100px 1fr auto}.event-label-provenance{grid-column:1/-1}.event-label-controls .button,.event-review-controls .button{flex:1}}

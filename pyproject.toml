@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sound-service-autocue"
+version = "0.1.0"
+description = "Local-first AutoCue Python analysis worker"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24,<2.3",
+  "scipy>=1.10,<1.15",
+  "mutagen>=1.47,<2",
+]
+
+[project.optional-dependencies]
+beats = ["beat-this==1.1.0"]
+stems = ["demucs>=4,<5", "soundfile>=0.12,<1"]
+words = ["whisperx==3.3.1"]
+sections = ["allin1==1.1.0"]
+
+[project.scripts]
+autocue-worker = "autocue_worker:main"
+
+[tool.setuptools]
+packages = ["autocue_config"]
+package-dir = {"" = "engine", autocue_config = "config"}
+py-modules = [
+  "analyze", "autocue_worker", "cue_maps", "experiments", "gemini_assist",
+  "gemini_config", "gemini_v6", "lrclib_synced", "pop_cues", "project_config",
+  "rules_v6", "serato_grid", "serato_tags", "synced_lyrics", "timing",
+  "waveform", "worker_fixture", "wx_one",
+]
+
+[tool.setuptools.package-data]
+autocue_config = ["genre_params_v6.json"]

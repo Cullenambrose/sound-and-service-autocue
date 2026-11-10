@@ -11,6 +11,8 @@ plan is flagged, and confidence is capped so the track lands in "Needs a look". 
     python3 engine/analyze.py song.mp3 --artist "A" --title "T" --genre House
 """
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -22,6 +24,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
+from project_config import engine_config, project_path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -51,11 +54,33 @@ class AnalyzerMissing(RuntimeError):
         super().__init__(f"{name} is not installed. Install it with: {INSTALL.get(name, 'see README')}")
 
 
+class AnalysisCancelled(RuntimeError):
+    """Cancellation requested; no completed plan should be stored."""
+
+
+@contextmanager
+def track_workspace(paths, cancelled):
+    with (paths.root / "analysis.lock").open("a") as lock:
+        while True:
+            if cancelled and cancelled():
+                raise AnalysisCancelled("Analysis cancelled while waiting for the track cache.")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(0.05)
+        try:
+            with tempfile.TemporaryDirectory(prefix="job-", dir=paths.root) as work:
+                paths.work = Path(work)
+                paths.vocal_wav = paths.root / "vocals16k.wav"
+                yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def cache_root():
-    override = os.environ.get("AUTOCUE_CACHE_DIR")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / "AutoCue" / "cache"
+    return project_path("cache_dir", "AUTOCUE_CACHE_DIR",
+                        Path.home() / "Library" / "Application Support" / "AutoCue" / "cache")
 
 
 def file_hash(path):
@@ -107,6 +132,20 @@ def _read_json(path):
         return None
 
 
+def _write_npz(path, **arrays):
+    import numpy as np
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            np.savez_compressed(output, **arrays)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 class Paths:
     """v5 cache layout under <cache>/<hash>/ with the single track id 00."""
 
@@ -130,6 +169,15 @@ def decode_wav(source, target, rate=44100, channels=2):
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(source), "-vn", "-ac", str(channels),
                     "-ar", str(rate), "-acodec", "pcm_s16le", str(target)], check=True)
+
+
+def prepared_pcm(source):
+    try:
+        with wave.open(str(source), "rb") as stream:
+            return (stream.getframerate() == 44100 and stream.getsampwidth() == 2
+                    and stream.getcomptype() == "NONE" and stream.getnchannels() in (1, 2))
+    except (wave.Error, EOFError):
+        return False
 
 
 def read_mono(path):
@@ -176,9 +224,8 @@ def compute_features(wav_path, out_path):
         lo[start:end] = power[:, freqs < 200].sum(1)
         mi[start:end] = power[:, (freqs >= 200) & (freqs < 2500)].sum(1)
         hi[start:end] = power[:, freqs >= 2500].sum(1)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_path, fps=FPS, peak=peak.astype(np.float32), rms=rms.astype(np.float32),
-                        lo=lo, mi=mi, hi=hi, dur=len(x) / rate)
+    _write_npz(out_path, fps=FPS, peak=peak.astype(np.float32), rms=rms.astype(np.float32),
+               lo=lo, mi=mi, hi=hi, dur=len(x) / rate)
     return len(x) / rate
 
 
@@ -269,11 +316,12 @@ def _run_demucs(source_wav, paths):
         tail = x[count * STEM_HOP:]
         if len(tail):
             env[name] = np.append(env[name], np.sqrt((tail ** 2).mean()))
-    paths.stems_env.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(paths.stems_env, hop_s=np.float32(STEM_HOP / 44100), **env)
+    _write_npz(paths.stems_env, hop_s=np.float32(STEM_HOP / 44100), **env)
     if shutil.which("ffmpeg"):
+        vocal = paths.work / "vocals16k.wav"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(stem_dir / "vocals.wav"), "-ac", "1",
-                        "-ar", "16000", str(paths.vocal_wav)], check=True)
+                        "-ar", "16000", str(vocal)], check=True)
+        os.replace(vocal, paths.vocal_wav)
 
 
 def read_stem(path):
@@ -439,19 +487,45 @@ def _run_lyrics(paths, artist, title):
 
 
 def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None, config_path=None,
-            switches=None, cue_maps=None, experiments=None, gemini=False):
+            switches=None, cue_maps=None, experiments=None, gemini=False, *,
+            enabled_analyzers=None, allow_lyrics=True, beats_record=None, cancelled=None, config_data=None):
     """Return a v7 review-candidate plan dict. `progress(step, state, detail)` is optional.
 
     state is one of running, done, skipped, failed. Raises AnalyzerMissing only for analyzers with no fallback.
     """
     source = Path(source)
-    report = progress or (lambda *_args: None)
-    for needed in ("numpy", "ffmpeg"):
+    if enabled_analyzers is not None and not set(enabled_analyzers) <= {"vocals", "sections", "words"}:
+        raise ValueError("Unknown optional analyzer.")
+    needed_tools = ("numpy",) if beats_record is not None and prepared_pcm(source) else ("numpy", "ffmpeg")
+    for needed in needed_tools:
         if (needed == "ffmpeg" and not shutil.which("ffmpeg")) or (needed == "numpy" and not available("numpy")):
             raise AnalyzerMissing(needed)
     digest = file_hash(source)
     paths = Paths((Path(cache_dir) if cache_dir else cache_root()) / digest)
     paths.root.mkdir(parents=True, exist_ok=True)
+    with track_workspace(paths, cancelled):
+        plan = _analyze_locked(source, artist, title, genre, progress, config_path,
+                               switches, cue_maps, experiments, gemini, paths, digest,
+                               enabled_analyzers, allow_lyrics, beats_record, cancelled, config_data)
+        if cancelled and cancelled():
+            raise AnalysisCancelled("Analysis cancelled before completion.")
+        if file_hash(source) != digest:
+            raise RuntimeError("Audio changed during analysis; no completed plan was returned.")
+        return plan
+
+
+def _analyze_locked(source, artist, title, genre, progress, config_path, switches,
+                    cue_maps, experiments, gemini, paths, digest, enabled_analyzers,
+                    allow_lyrics, beats_record, cancelled, config_data):
+    def report(*event):
+        if cancelled and cancelled():
+            raise AnalysisCancelled("Analysis cancelled between analyzer steps.")
+        if progress:
+            progress(*event)
+
+    def enabled(name):
+        return enabled_analyzers is None or name in enabled_analyzers
+
     notes, started = [], time.time()
     timings = {}
 
@@ -460,6 +534,8 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
         begin = time.time()
         try:
             value = function()
+        except AnalysisCancelled:
+            raise
         except AnalyzerMissing as error:
             notes.append(str(error))
             report(name, "skipped", str(error))
@@ -474,54 +550,74 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
 
     decoded = paths.work / "decoded.wav"
     if not paths.features.exists() or not decoded.exists():
-        decode_wav(source, decoded)
+        if beats_record is not None and prepared_pcm(source):
+            shutil.copyfile(source, decoded)
+        else:
+            decode_wav(source, decoded)
     if not paths.features.exists():
         compute_features(decoded, paths.features)
     import numpy as np
     feature = np.load(paths.features)
     duration = float(feature["dur"])
+    if beats_record is not None and any(times[-1] >= duration for times in
+                                        (beats_record["beats"], beats_record["downbeats"])):
+        raise ValueError("Prepared beat observations must be inside the audio duration.")
 
-    beats = step("beats", lambda: _run_beats(decoded, paths))
+    beats = step("beats", lambda: beats_record if beats_record is not None else _run_beats(decoded, paths))
     if not beats:
         raise RuntimeError("Beat grid unavailable: " + "; ".join(notes))
     grid = fit_grid(beats["downbeats"])
+    if beats_record is not None:
+        grid["source"] = "prepared_downbeats"
     import serato_grid
     markers = serato_grid.read_beatgrid(source, on_diagnostic=lambda note: notes.append("beatgrid: " + note))
     if markers:
         grid, grid_note = serato_grid.reconcile(grid, markers)
         notes.append("beatgrid: " + grid_note)
 
-    step("vocals", lambda: _run_demucs(decoded, paths))
-    segments_record = step("sections", lambda: _run_sections(decoded, paths))
+    if enabled("vocals"):
+        step("vocals", lambda: _run_demucs(decoded, paths))
+    else:
+        report("vocals", "skipped", "Disabled by worker profile.")
+    if enabled("sections"):
+        segments_record = step("sections", lambda: _run_sections(decoded, paths))
+    else:
+        segments_record = None
+        report("sections", "skipped", "Disabled by worker profile.")
     segments = (segments_record or {}).get("segments", [])
     analysis = {"segments": segments, "grid": grid, "beats": beats["beats"], "downbeats": beats["downbeats"],
                 "serato_markers": markers}
     if segments:
         _write_json(paths.sections, {**analysis, "engine": segments_record.get("engine")})
 
-    onsets = vocal_onsets(paths) if paths.stems_env.exists() else []
-    words_record = step("lyrics", lambda: _run_words(paths)) if paths.vocal_wav.exists() else None
-    if not paths.vocal_wav.exists():
+    stems_available = enabled("vocals") and paths.stems_env.exists()
+    vocal_available = enabled("vocals") and paths.vocal_wav.exists()
+    onsets = vocal_onsets(paths) if stems_available else []
+    words_record = step("lyrics", lambda: _run_words(paths)) if vocal_available and enabled("words") else None
+    if not vocal_available or not enabled("words"):
         notes.append("lyrics: no vocal stem, so word timing was skipped")
-    lyrics_record = _run_lyrics(paths, artist, title)
+        report("lyrics", "skipped", "No enabled vocal/word analyzer.")
+    lyrics_record = _run_lyrics(paths, artist, title) if allow_lyrics else None
+    if not allow_lyrics:
+        notes.append("LRCLIB text lookup disabled by worker profile.")
 
     stems = None
     hop = 0.05
-    if paths.stems_env.exists():
+    if stems_available:
         env = np.load(paths.stems_env)
         stems = {key: env[key].tolist() for key in ("drums", "bass", "vocals") if key in env}
         hop = float(env["hop_s"])
     report("drops", "running", "")
     import rules_v6
     import experiments as experiments_module
-    config = rules_v6._load_json(str(config_path or HERE.parent / "config" / "genre_params_v6.json"),
-                                 rules_v6.DEFAULT_CONFIG)
+    config = config_data if config_data is not None else rules_v6._load_json(
+        str(config_path or engine_config()), rules_v6.DEFAULT_CONFIG)
     if switches:
         config["switches"] = {**rules_v6.DEFAULT_CONFIG["switches"], **config.get("switches", {}), **switches}
     low_raw = feature["lo"].tolist()
     low_stem_step = experiments_module._resample(low_raw, 1 / float(feature["fps"]), hop).tolist()
     onset_env, onset_hop = None, None
-    if paths.vocal_wav.exists():
+    if vocal_available:
         try:
             onset_env, onset_hop = fine_vocal_envelope(paths.vocal_wav)
         except (EOFError, wave.Error, ValueError) as error:
@@ -582,12 +678,12 @@ def analyze(source, artist="", title="", genre="", progress=None, cache_dir=None
         for cue in plan.get("cues", {}).values():
             if cue.get("confidence") is not None:
                 cue["confidence"] = round(min(float(cue["confidence"]), 0.9), 3)
-    plan["pipeline"] = {"hash": digest, "device": (beats or {}).get("device", torch_device()),
+    plan["pipeline"] = {"hash": digest, "device": "prepared" if beats_record is not None else
+                        beats.get("device") or torch_device(),
                         "vocal_onsets": onsets[:50],
                         "step_seconds": timings, "notes": notes, "total_s": round(time.time() - started, 2),
                         "analyzers": environment_report()}
     _write_json(paths.meta, plan["pipeline"])
-    shutil.rmtree(paths.work / "demix", ignore_errors=True)
     report("cues", "done", "")
     return plan
 

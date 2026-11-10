@@ -1,6 +1,11 @@
 import rules_v2 as r
+import unittest
 r.PROFILE["use_lyrics"] = False  # unit tests run on synthetic grids only
 G = {"t1": 0.0, "bar_s": 2.0, "offset_ms": 0}
+def load_tests(loader, tests, pattern):
+    return unittest.TestSuite(unittest.FunctionTestCase(value)
+                              for name, value in sorted(globals().items())
+                              if name.startswith("test_") and callable(value))
 flat = lambda j: -5.0
 def mk(B=8, D=40, conf=0.95, ch=(8, 16, 32)):
     segs = [{"cls": "intro", "j0": 0, "j1": B}] + [{"cls": "chorus", "j0": j, "j1": j + 8} for j in ch]

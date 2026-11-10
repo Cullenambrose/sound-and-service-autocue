@@ -146,7 +146,10 @@ def verify_markers_lockstep(path: str) -> bool:
         markers_v1 = serato_tags.decode_markers_v1(markers_v1_data)
         
         markers2_cues = {c["index"]: c for c in markers2["cues"] if c["index"] < 5}
-        markers_v1_entries = {e["slot"]: e for e in markers_v1["entries"] if e["slot"] < 5}
+        markers_v1_entries = {
+            entry["slot"]: entry for entry in markers_v1["entries"]
+            if entry["slot"] < 5 and entry["position_ms"] is not None
+        }
         
         # Check that positions match for first 5 cues
         for idx in range(5):

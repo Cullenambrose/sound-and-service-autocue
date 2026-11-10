@@ -1,0 +1,22 @@
+{
+  "baseline_commit": "cf38ec3",
+  "recipe": {
+    "pos0": 0.125, "bpm": 120, "onset_s": 15.25,
+    "chorus1": [24, 32], "chorus2": [48, 56],
+    "vocal_end_bar": 84, "end_bar": 92, "tail_s": 1
+  },
+  "expected": {
+    "cue_spec": "v6.1-pop-vocal",
+    "grid": {"t1": 0.125, "bar_s": 2.0, "source": "serato_beatgrid", "bpm": 120.0, "offset_ms": 0.0, "first_bar": 0},
+    "cues": {
+      "A": {"name": "Intro 8 bars (32 beats)", "bar": 0, "time_s": 0.125, "color": "#CC0000", "unsnapped": null},
+      "B": {"name": "START", "bar": 8, "time_s": 15.25, "color": "#CC8800", "unsnapped": true},
+      "C": {"name": "EXIT -32", "bar": null, "time_s": null, "color": "#0088CC", "unsnapped": null},
+      "D": {"name": "GO 8 bars (32 beats) > EXIT", "bar": 24, "time_s": 48.125, "color": "#CCCC00", "unsnapped": null},
+      "E": {"name": "Mix 4 bars (16 beats) > EXIT", "bar": 28, "time_s": 56.125, "color": "#CC00CC", "unsnapped": null},
+      "F": {"name": "EXIT 1st Chorus", "bar": 32, "time_s": 64.125, "color": "#00CC00", "unsnapped": null},
+      "G": {"name": "GO 8 bars (32 beats) > OUT", "bar": 84, "time_s": 168.125, "color": "#00CCCC", "unsnapped": null},
+      "H": {"name": "OUT", "bar": 92, "time_s": 184.125, "color": "#8800CC", "unsnapped": null}
+    }
+  }
+}

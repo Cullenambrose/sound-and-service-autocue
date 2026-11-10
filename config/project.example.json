@@ -1,0 +1,5 @@
+{
+  "data_dir": "../web-data",
+  "cache_dir": "../cache",
+  "research_root": "../research-data"
+}

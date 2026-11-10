@@ -2,9 +2,9 @@
 (last 'correct' / 'set_here' per track+cue in corrections/corrections.json). Match = within 1 beat. Also old Serato truth for comparison."""
 import json, os, collections
 R = "/workspace/research/dj-auto-cues/proof/real"
-ev = json.load(open(f"{R}/corrections/corrections.json")); last = {}
-for e in ev:
-    if e["cue"] in "ABCDGH" and e["action"] in ("correct", "set_here") and e.get("to_beat") is not None: last[(e["track"], e["cue"])] = e["to_beat"]
+import marks
+last = {key: beat for key, beat in marks.truth_beats(
+    marks.events([f"{R}/corrections/corrections.json"])).items() if key[1] in "ABCDGH"}
 ns = {}; exec(open(f"{R}/tools/gemini_v2.py").read().split("def call(")[0], ns); BT = ns["bars_of_truth"]
 def eng(nn): c = json.load(open(f"{R}/cues_v2/allin1/v4_go32/{nn}.json"))["cues"]; return {L: (None if c.get(L, {}).get("bar") is None else c[L]["bar"] * 4) for L in "ABCDGH"}
 def gem(nn):

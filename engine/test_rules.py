@@ -68,3 +68,4 @@ g,_=run(tr); check("loop falls back to outro", g, {"E":("set","loop",48)})
 # 13 F always empty
 check("F empty", g, {"F":("empty",)})
 print(f"{ok} passed, {len(fails)} failed"); [print(" FAIL", f) for f in fails]
+assert not fails, "\n".join(fails)
