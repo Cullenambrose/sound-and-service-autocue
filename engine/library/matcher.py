@@ -12,6 +12,7 @@ VERSION_TAGS = [
     "Dirty",
     "Explicit",
     "Intro",
+    "Intro Edit",
     "Re-Drum",
     "Re Drum",
     "ReDrum",
@@ -187,6 +188,11 @@ def _identity_fields(track: Dict[str, Any]) -> Tuple[str, str]:
     return artist, normalize_text(title)
 
 
+def _version_key(track: Dict[str, Any]) -> Tuple[str, ...]:
+    _, version = extract_version_tags(str(track.get("version") or track.get("title") or ""))
+    return tuple(sorted(version.tags))
+
+
 def _version_preference(track: Dict[str, Any], config: MatchConfig) -> float:
     _, version = extract_version_tags(
         (track.get("title") or "") + " " + str(track.get("version") or "")
@@ -211,12 +217,19 @@ def rank_candidates(
     candidates: List[Dict[str, Any]],
     request_artist: str,
     request_title: str,
-    config: MatchConfig
+    config: MatchConfig,
+    request_version: str = "",
 ) -> List[Tuple[Dict[str, Any], float]]:
     """
     Rank identities by similarity, using version preferences only within an identity.
     Returned scores are identity evidence only, never preference bonuses.
     """
+    norm_artist, norm_title = _identity_fields(
+        {"artist": request_artist, "title": request_title}
+    )
+    requested_version = _version_key(
+        {"title": request_title, "version": request_version}
+    )
     scored = []
     
     for track in candidates:
@@ -225,8 +238,8 @@ def rank_candidates(
         # Base similarity score
         track_artist, track_title = _identity_fields(track)
         
-        artist_sim = compute_similarity(request_artist, track_artist)
-        title_sim = compute_similarity(request_title, track_title)
+        artist_sim = compute_similarity(norm_artist, track_artist)
+        title_sim = compute_similarity(norm_title, track_title)
         
         # Weighted average (title more important)
         similarity = (title_sim * 0.6) + (artist_sim * 0.4)
@@ -237,7 +250,11 @@ def rank_candidates(
     # Sort by score descending
     scored.sort(key=lambda item: (
         -item[1], _identity_fields(item[0]),
-        -_version_preference(item[0], config), _file_tie_key(item[0]),
+        -bool(requested_version and requested_version == _version_key(item[0])),
+        -_version_preference(item[0], config),
+        -bool(item[0].get("title") == request_title
+              and item[0].get("artist", "") == request_artist),
+        _file_tie_key(item[0]),
     ))
     
     return scored
@@ -281,6 +298,10 @@ def match_track(
         # Compute similarity
         artist_sim = compute_similarity(norm_artist, track_artist_main)
         title_sim = compute_similarity(norm_title, track_title_main)
+
+        # A similar or incomplete title is not evidence for the requested whole song.
+        if not norm_title or norm_title != track_title_main:
+            continue
         
         # At least one must match well
         if artist_sim >= config.fuzzy_threshold or title_sim >= config.fuzzy_threshold:
@@ -307,7 +328,9 @@ def match_track(
         )
     
     # Rank candidates
-    ranked = rank_candidates(candidates, norm_artist, norm_title, config)
+    ranked = rank_candidates(
+        candidates, request_artist, request_title, config, request.get("version") or ""
+    )
     
     best_track, best_score = ranked[0]
     best_identity = _identity_fields(best_track)

@@ -1,0 +1,85 @@
+{
+  "_note": "Synthetic follow-up cases only; no real files. Original six fixture files are unchanged.",
+  "cases": [
+    {
+      "case": 19,
+      "name": "Corazon must not resolve to Horizon",
+      "event": {
+        "music_lists": {
+          "must_play": [
+            {"id": "followup-19", "title": "Corazon", "artist": "Demo Artist 15"}
+          ]
+        }
+      },
+      "library": [
+        {
+          "id": "followup-horizon",
+          "title": "Horizon (Clean)",
+          "artist": "Demo Artist 32",
+          "version": "Clean",
+          "path": "/Demo/Followup/Horizon (Clean).mp3"
+        }
+      ],
+      "expected": {"status": "missing", "selected_track_id": null}
+    },
+    {
+      "case": 20,
+      "name": "Title-only Shine On must not resolve to Shine On Me",
+      "event": {
+        "music_lists": {
+          "must_play": [
+            {"id": "followup-20", "title": "Shine On"}
+          ]
+        }
+      },
+      "library": [
+        {
+          "id": "followup-shine-on-me",
+          "title": "Shine On Me",
+          "artist": "Velvet Coast",
+          "path": "/Demo/Followup/Shine On Me.mp3"
+        }
+      ],
+      "expected": {"status": "missing", "selected_track_id": null}
+    },
+    {
+      "case": 21,
+      "name": "Summer Dirty song cue selects Dirty over Clean and Clean Intro",
+      "event": {
+        "event_timelines": {
+          "items": [
+            {
+              "name": "First Dance",
+              "kind": "songCue",
+              "song": {"title": "Summer (Dirty)", "artist": "Demo Artist"}
+            }
+          ]
+        }
+      },
+      "library": [
+        {
+          "id": "followup-summer-clean",
+          "title": "Summer (Clean)",
+          "artist": "Demo Artist",
+          "version": "Clean",
+          "path": "/Demo/Followup/Summer (Clean).mp3"
+        },
+        {
+          "id": "followup-summer-dirty",
+          "title": "Summer (Dirty)",
+          "artist": "Demo Artist",
+          "version": "Dirty",
+          "path": "/Demo/Followup/Summer (Dirty).mp3"
+        },
+        {
+          "id": "followup-summer-clean-intro",
+          "title": "Summer (Clean Intro)",
+          "artist": "Demo Artist",
+          "version": "Clean Intro",
+          "path": "/Demo/Followup/Summer (Clean Intro).mp3"
+        }
+      ],
+      "expected": {"status": "matched", "selected_track_id": "followup-summer-dirty"}
+    }
+  ]
+}

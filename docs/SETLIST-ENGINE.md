@@ -64,9 +64,13 @@ unresolved; an absent artist remains absent and is never fabricated.
 - When files duplicate one song, the existing matcher chooses the ordinary
   song representative using its configured version preferences. After identity
   resolution, exact-version selection is restricted to that song identity.
-  Matcher ties and fallback file selection use a stable key of library/file
-  IDs, path, version, then the complete sorted metadata record. This chooses
-  one intact source record; it never combines metadata from files.
+  An available version named in a matcher request takes precedence over those
+  preferences; absent or unavailable versions fall back to the preferences.
+  Prep/Live still report unavailable requested versions rather than fulfilling
+  them with a fallback. Within tied same-song files, an exact raw title and
+  artist pair wins before the matcher's existing sorted metadata order.
+  Prep/Live fallback selection retains its stable file key (path, IDs, version,
+  then complete metadata). Selection always keeps one intact source record.
 - Guest requests, their customer badges, boosts, reasons, and diagnostics are
   Live-only. Changing `guest_requests` does not change `rank_prep_crate()`.
 - Scoring is additive and deterministic. `SetlistSettings` exposes weights for
@@ -116,16 +120,25 @@ musical quality, cue accuracy, or real-world transition quality.
 The shared matcher now scores normalized song identities without playback-version
 text or preference bonuses. Confidence remains 60% title similarity plus 40%
 primary-artist similarity; the setlist cutoff is still inclusive at 0.6.
+Candidates must have the same whole normalized title after version and featuring
+removal, regardless of whether the artist matches or is absent. Case and
+punctuation differences are accepted; similar or incomplete titles are not.
+`Intro Edit` is stripped as a complete version tag, not as `Intro` plus a
+leftover song-title word.
 Ambiguity compares distinct song identities within the existing five-point
 window, not duplicate files of one identity. Clean/Intro/Short Edit preferences
-only order files inside an identity, with deterministic metadata tie-breaking.
+only order files inside an identity, after an available requested version and
+before raw-title/artist and deterministic metadata tie-breaking.
 Weak identity evidence stays missing regardless of version preference.
 
 The original synthetic Desktop demo is preserved byte-for-byte in
 `engine/setlist/fixtures/`, including its historical README observations.
 `engine/setlist/test_demo.py` exercises all 18 original expectations, including
 `mp-4` -> `trk-038`, `g-3` -> `trk-014`, and ambiguous `g-9`/`g-10` at exactly
-0.6 without fulfillment. Run it against checkout modules with
+0.6 without fulfillment. The separate `fixtures/followup-cases.json` adds
+cases 19-21: Corazon is not Horizon, Shine On is not Shine On Me, and a
+Summer (Dirty) cue picks Dirty over Clean and Clean Intro. All 21 cases cover
+Prep/Live and shuffled library input. Run them against checkout modules with
 `PYTHONPATH=engine .venv/bin/python -m unittest setlist.test_demo -v`.
 
 The recommendation result keeps its original `items`,

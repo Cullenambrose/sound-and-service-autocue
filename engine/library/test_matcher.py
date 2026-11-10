@@ -154,6 +154,11 @@ def test_extract_version_tags():
     text, version = extract_version_tags("Song (Short Edit)")
     assert version.is_short_edit
 
+    text, version = extract_version_tags("Summer (Intro Edit)")
+    assert text == "Summer"
+    assert version.tags == ["intro edit"]
+    assert version.is_intro
+
 
 def test_compute_similarity():
     """Test similarity computation."""
@@ -186,11 +191,13 @@ def test_identity_confidence_boundary_is_inclusive_and_unrelated_clean_stays_mis
         {"title": "ZZZZ", "artist": "Singer"},
         [{"id": "weak", "title": "AAAA (Clean)", "artist": "Singer"}], config,
     )
-    assert (weak.status, weak.confidence) == ("missing", 0.4)
+    assert (weak.status, weak.confidence) == ("missing", 0.0)
     assert weak.matched_track is None
-    assert weak.candidates[0]["_artist_sim"] == 1
-    assert weak.candidates[0]["_title_sim"] == 0
-    assert "below threshold 0.6" in weak.reason
+    assert weak.candidates == []
+    assert weak.reason == "No matching tracks found in library"
+    below_cutoff = match_track({"title": "Moon Harbor"}, [exact_title], MatchConfig())
+    assert (below_cutoff.status, below_cutoff.confidence) == ("missing", 0.6)
+    assert "below threshold 0.7" in below_cutoff.reason
 
 
 def test_version_preferences_never_change_identity_confidence_or_ambiguity():
@@ -226,6 +233,113 @@ def test_same_identity_versions_are_not_identity_ambiguity_and_choose_intact_fil
         assert (result.status, result.confidence) == ("matched", 1.0)
         assert result.matched_track["id"] == "b"
         assert result.matched_track["bpm"] == 120
+
+
+@pytest.mark.parametrize("song_request,track", [
+    ({"title": "Corazon", "artist": "Demo Artist 15"},
+     {"title": "Horizon (Clean)", "artist": "Demo Artist 32"}),
+    ({"title": "Shine On"}, {"title": "Shine On Me", "artist": "Velvet Coast"}),
+    ({"title": "Shine On", "artist": "Velvet Coast"},
+     {"title": "Shine On Me", "artist": "Velvet Coast"}),
+    ({"title": "Shine On", "artist": "Different Artist"},
+     {"title": "Shine On Me", "artist": "Velvet Coast"}),
+])
+def test_different_whole_song_stays_missing_regardless_of_artist(song_request, track):
+    for config in (MatchConfig(min_confidence=0.6), MatchConfig(prefer_clean=False)):
+        result = match_track(song_request, [track], config)
+        assert result.status == "missing"
+        assert result.matched_track is None
+        assert result.candidates == []
+
+
+@pytest.mark.parametrize("song_request,track", [
+    ({"title": "CIRCLES!", "artist": "Different Artist"},
+     {"title": "Circles", "artist": "Post-Malone"}),
+    ({"title": "bad guy"}, {"title": "BAD GUY", "artist": "Billie Eilish"}),
+    ({"title": "bad-guy!"}, {"title": "bad guy (Clean)", "artist": "Billie Eilish"}),
+])
+def test_whole_title_gate_preserves_case_and_punctuation(song_request, track):
+    result = match_track(song_request, [track], MatchConfig(min_confidence=0.6))
+    assert result.status == "matched"
+    assert result.matched_track["title"] == track["title"]
+    assert result.confidence >= 0.6
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("Dirty", "dirty"), ("Clean", "clean"), ("Clean Intro", "clean-intro"),
+    ("", "clean-intro"), ("Radio Edit", "clean-intro"),
+])
+@pytest.mark.parametrize("version_field", [False, True])
+@pytest.mark.parametrize("library_version_field", [False, True])
+def test_requested_summer_version_precedes_preferences(
+    version, expected, version_field, library_version_field,
+):
+    library = [
+        {"id": "clean", "artist": "Demo Artist", "title": "Summer (Clean)"},
+        {"id": "dirty", "artist": "Demo Artist", "title": "Summer (Dirty)"},
+        {"id": "clean-intro", "artist": "Demo Artist", "title": "Summer (Clean Intro)"},
+    ]
+    if library_version_field:
+        for track in library:
+            track["version"] = extract_version_tags(track["title"])[1].tags[0]
+    request = {"artist": "Demo Artist", "title": "Summer"}
+    if version_field:
+        request["version"] = version
+    elif version:
+        request["title"] += f" ({version})"
+    for tracks in permutations(library):
+        result = match_track(request, tracks, MatchConfig())
+        assert (result.status, result.confidence) == ("matched", 1.0)
+        assert result.matched_track["id"] == expected
+
+
+@pytest.mark.parametrize("title,artist,expected_id", [
+    ("In My Feelings", "Drake", 7),
+    ("In My Feelings", "Drake feat. City Girls", 8),
+    ("In My Feelings (feat. City Girls)", "Drake", 9),
+    ("bad guy", "Billie Eilish", 17),
+    ("BAD GUY", "BILLIE EILISH", 18),
+    ("Circles", "Post Malone", 15),
+])
+def test_raw_title_and_artist_break_same_song_file_ties(library_tracks, title, artist, expected_id):
+    request = {"title": title, "artist": artist}
+    forward = match_track(request, library_tracks, MatchConfig())
+    reverse = match_track(request, list(reversed(library_tracks)), MatchConfig())
+    assert forward == reverse
+    assert forward.status == "matched"
+    assert forward.matched_track["id"] == expected_id
+
+
+def test_metadata_order_breaks_remaining_exact_file_tie():
+    request = {"title": "bad guy", "artist": "Demo Artist"}
+    library = [{"id": id, **request} for id in (2, 1)]
+    for tracks in permutations(library):
+        result = match_track(request, tracks, MatchConfig())
+        assert result.matched_track["id"] == 1
+
+
+def test_intro_edit_remains_a_version_of_the_whole_song():
+    result = match_track(
+        {"title": "Summer", "artist": "Demo Artist"},
+        [{"id": "intro", "title": "Summer (Intro Edit)", "artist": "Demo Artist"}],
+        MatchConfig(),
+    )
+    assert (result.status, result.confidence) == ("matched", 1.0)
+    assert result.matched_track["id"] == "intro"
+
+
+def test_exact_whole_title_beside_versioned_decoy_is_deterministic():
+    library = [
+        {"id": "decoy", "title": "Paper Moons (Clean)", "artist": "Demo Artist"},
+        {"id": "exact", "title": "Paper Moon", "artist": "Demo Artist"},
+    ]
+    for artist in ("", "Demo Artist", "Different Artist"):
+        for title, expected in (("Paper Moon", "exact"), ("Paper Moons (Clean)", "decoy")):
+            for tracks in permutations(library):
+                result = match_track({"title": title, "artist": artist}, tracks,
+                                     MatchConfig(min_confidence=0.6))
+                assert result.status == "matched"
+                assert result.matched_track["id"] == expected
 
 
 def test_exact_match(library_tracks):
@@ -327,18 +441,16 @@ def test_version_tags_all_types(library_tracks):
     assert len(result.candidates) >= 3
 
 
-def test_ambiguous_match(library_tracks):
-    """Test detection of ambiguous matches."""
+def test_incomplete_title_stays_missing_even_with_matching_artist(library_tracks):
+    """A primary artist match cannot fulfill an incomplete song title."""
     # Taylor Swift has two similar titles: "Shake It Off" and "Shake It Up"
     request = {"artist": "Taylor Swift", "title": "Shake It"}
     config = MatchConfig(min_confidence=0.6)
     
     result = match_track(request, library_tracks, config)
     
-    # Could be matched or ambiguous depending on scoring
-    assert result.status in ("matched", "ambiguous")
-    if result.status == "ambiguous":
-        assert len(result.candidates) >= 2
+    assert result.status == "missing"
+    assert result.matched_track is None
 
 
 def test_missing_track(library_tracks):

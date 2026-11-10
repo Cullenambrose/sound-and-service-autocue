@@ -4,7 +4,9 @@ from collections.abc import Mapping
 import json
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from library.matcher import MatchConfig, extract_version_tags, match_track, normalize_text
+from library.matcher import (
+    MatchConfig, extract_version_tags, match_track, normalize_text, rank_candidates,
+)
 from library.model import Track
 
 from .inputs import song_identity
@@ -101,7 +103,8 @@ def _sorted_library(library: Iterable[Any]):
 
 def _match(request: SongRequest, records):
     return match_track(
-        {"artist": request.artist or "", "title": request.title or ""},
+        {"artist": request.artist or "", "title": request.title or "",
+         "version": request.version or ""},
         [track for _, track in records],
         _MATCH_CONFIG,
     )
@@ -142,7 +145,10 @@ def _resolve_request(request: SongRequest, category: str, library_records):
                 f"Requested version {version!r} is not available for the resolved song.",
                 matched.status,
             )
-        selected = min(matching_versions, key=_file_key)
+        selected = rank_candidates(
+            matching_versions, request.artist or "", request.title or "",
+            _MATCH_CONFIG, request.version or "",
+        )[0][0]
         diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
                                        alternatives, identity, matched.reason, matched.status)
         return (identity, selected, version), diagnostic
@@ -160,8 +166,10 @@ def _representatives(library_records):
     for identity, tracks in groups.items():
         tracks.sort(key=_file_key)
         source = tracks[0]
+        # A library representative's title must not act as a requested playback version.
+        title, _ = extract_version_tags(source.get("title") or "")
         result = match_track(
-            {"artist": source.get("artist") or "", "title": source.get("title") or ""},
+            {"artist": source.get("artist") or "", "title": title},
             tracks,
             _MATCH_CONFIG,
         )

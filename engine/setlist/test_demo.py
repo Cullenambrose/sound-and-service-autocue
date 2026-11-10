@@ -1,5 +1,6 @@
-"""Acceptance checks for the unchanged original Desktop demo payloads."""
+"""Acceptance checks for the unchanged Desktop demo and synthetic follow-up cases."""
 import copy
+from itertools import permutations
 import json
 from pathlib import Path
 import sys
@@ -23,6 +24,10 @@ class DemoAcceptanceTests(unittest.TestCase):
         cls.event = json.loads((FIXTURES / "mock-wedding-event.json").read_text())
         cls.no_guests = json.loads((FIXTURES / "mock-event-no-guests.json").read_text())
         cls.guests = cls.event["_demo_live_inputs"]["guest_requests"]
+        cls.followup_cases = {
+            case["case"]: case
+            for case in json.loads((FIXTURES / "followup-cases.json").read_text())["cases"]
+        }
 
     def context(self, guests=None):
         return context_from_event(self.event, guest_requests=self.guests if guests is None else guests,
@@ -198,6 +203,42 @@ class DemoAcceptanceTests(unittest.TestCase):
 
     def test_18_bare_title_ambiguity(self):
         self.assert_ambiguous_without_fulfillment("g-10", ("trk-063", "trk-064"))
+
+    def assert_followup_case(self, number):
+        case = self.followup_cases[number]
+        context = context_from_event(case["event"], phase="first_dance")
+        for ranker in (rank_prep_crate, rank_next_song):
+            result = ranker(context, case["library"], limit=len(case["library"]))
+            for library in permutations(case["library"]):
+                self.assertEqual(result, ranker(context, library, limit=len(library)))
+            self.assertEqual(len(result.resolution_diagnostics), 1)
+            diagnostic = result.resolution_diagnostics[0]
+            self.assertEqual(diagnostic.status, case["expected"]["status"])
+            if case["expected"]["status"] == "missing":
+                self.assertIsNone(diagnostic.identity)
+                self.assertEqual(result.unresolved_must_play, list(context.must_play))
+                baseline = ranker(context_from_event({}, phase="first_dance"),
+                                  case["library"], limit=len(case["library"]))
+                self.assertEqual(result.items, baseline.items)
+                for item in result:
+                    self.assertNotIn("requested", item.badges)
+                    self.assertNotIn("customer", item.badges)
+                    self.assertNotIn("Must-play request", item.reasons)
+                    self.assertNotIn("Live guest request", item.reasons)
+            else:
+                self.assertEqual([item.track["id"] for item in result],
+                                 [case["expected"]["selected_track_id"]])
+                self.assertIn("Song cue fits first dance", result[0].reasons)
+                self.assertIn("requested", result[0].badges)
+
+    def test_19_corazon_is_not_horizon(self):
+        self.assert_followup_case(19)
+
+    def test_20_shine_on_is_not_shine_on_me(self):
+        self.assert_followup_case(20)
+
+    def test_21_summer_dirty_cue(self):
+        self.assert_followup_case(21)
 
 
 if __name__ == "__main__":

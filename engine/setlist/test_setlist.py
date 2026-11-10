@@ -39,6 +39,63 @@ def identities(recommendations):
 
 
 class SetlistEngineTests(unittest.TestCase):
+    def test_different_whole_song_cannot_fulfill_any_positive_request(self):
+        cases = (
+            (SongRequest("Corazon", "Demo Artist 15"),
+             track("Horizon (Clean)", "Demo Artist 32")),
+            (SongRequest("Shine On"), track("Shine On Me", "Velvet Coast")),
+            (SongRequest("Shine On", "Velvet Coast"),
+             track("Shine On Me", "Velvet Coast")),
+        )
+        for request, decoy in cases:
+            library = [decoy, track("Other Song", "Other Artist")]
+            for category in ("must_play", "play_if_possible", "guest_requests", "song_cues"):
+                value = (SongCue("first_dance", request.title, request.artist)
+                         if category == "song_cues" else request)
+                context = SetlistContext(**{category: (value,)}, explicit_phase="first_dance")
+                for ranker in (rank_prep_crate, rank_next_song):
+                    with self.subTest(request=request, category=category, ranker=ranker.__name__):
+                        result = ranker(context, library)
+                        baseline = ranker(SetlistContext(explicit_phase="first_dance"), library)
+                        self.assertEqual(result.items, baseline.items)
+                        self.assertEqual(result, ranker(context, list(reversed(library))))
+                        if category == "guest_requests" and ranker is rank_prep_crate:
+                            self.assertEqual(result, baseline)
+                        else:
+                            diagnostic = result.resolution_diagnostics[0]
+                            self.assertEqual(diagnostic.status, "missing")
+                            self.assertIsNone(diagnostic.identity)
+                        for item in result:
+                            self.assertNotIn("requested", item.badges)
+                            self.assertNotIn("customer", item.badges)
+
+    def test_versioned_request_uses_raw_title_and_artist_tie_break(self):
+        library = [
+            track("SUMMER (CLEAN)", "DEMO ARTIST", file_id="a"),
+            track("Summer (Clean)", "Demo Artist", file_id="z"),
+        ]
+        request = SongRequest("Summer (Clean)", "Demo Artist")
+        for category in ("must_play", "play_if_possible", "guest_requests", "song_cues"):
+            value = (SongCue("first_dance", request.title, request.artist)
+                     if category == "song_cues" else request)
+            context = SetlistContext(**{category: (value,)}, explicit_phase="first_dance")
+            for ranker in (rank_prep_crate, rank_next_song):
+                if category == "guest_requests" and ranker is rank_prep_crate:
+                    continue
+                result = ranker(context, library)
+                self.assertEqual(result[0].track["file_id"], "z")
+                self.assertEqual(result, ranker(context, list(reversed(library))))
+
+    def test_ordinary_representative_uses_preferences_not_incidental_source_version(self):
+        library = [
+            track("Summer (Clean)", "Demo Artist", file_id="a"),
+            track("Summer (Dirty)", "Demo Artist", file_id="b"),
+            track("Summer (Clean Intro)", "Demo Artist", file_id="c"),
+        ]
+        for ranker in (rank_prep_crate, rank_next_song):
+            for tracks in permutations(library):
+                self.assertEqual(ranker(SetlistContext(), tracks)[0].track["file_id"], "c")
+
     def test_identity_reuses_matcher_normalization_and_ignores_version_and_feature(self):
         self.assertEqual(
             song_identity("  Le Freak (Radio Edit) feat. Nile Rodgers! ", "Chic ft. Guest"),
@@ -863,6 +920,16 @@ class SetlistEngineTests(unittest.TestCase):
                              side_effect=AssertionError("pad write")):
             self.assertEqual(len(rank_next_song(context, library)), 1)
             self.assertEqual(len(rank_prep_crate(context, library)), 1)
+
+    def test_event_sync_retains_its_separate_point_seven_crate_cutoff(self):
+        event = parse_event({"music_lists": {"must_play": [{"title": "Synthetic Song"}]}})
+        library = [track("Synthetic Song", "Demo Artist")]
+        config = event_sync.MatchConfig()
+        self.assertEqual(config.min_confidence, 0.7)
+        must_play, _, _ = event_sync.process_event(event, library, config)
+        self.assertEqual((must_play[0].status, must_play[0].confidence), ("missing", 0.6))
+        prep = rank_prep_crate(context_from_event(event), library)
+        self.assertEqual(prep.resolution_diagnostics[0].status, "matched")
 
 
 if __name__ == "__main__":
