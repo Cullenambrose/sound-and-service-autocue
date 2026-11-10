@@ -24,7 +24,7 @@
     },
     {
       "case": 20,
-      "name": "Title-only Shine On must not resolve to Shine On Me",
+      "name": "Title-only Shine On lists Shine On Me as ambiguous without fulfillment",
       "event": {
         "music_lists": {
           "must_play": [
@@ -40,7 +40,7 @@
           "path": "/Demo/Followup/Shine On Me.mp3"
         }
       ],
-      "expected": {"status": "missing", "selected_track_id": null}
+      "expected": {"status": "ambiguous", "selected_track_id": null}
     },
     {
       "case": 21,

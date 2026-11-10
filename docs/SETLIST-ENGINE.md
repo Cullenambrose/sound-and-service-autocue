@@ -120,23 +120,33 @@ musical quality, cue accuracy, or real-world transition quality.
 The shared matcher now scores normalized song identities without playback-version
 text or preference bonuses. Confidence remains 60% title similarity plus 40%
 primary-artist similarity; the setlist cutoff is still inclusive at 0.6.
-Candidates must have the same whole normalized title after version and featuring
-removal, regardless of whether the artist matches or is absent. Case and
-punctuation differences are accepted; similar or incomplete titles are not.
+Confident matches require the same whole normalized title after version and
+featuring removal, comparing with whitespace removed so apostrophes and dotted
+initialisms remain punctuation-equivalent (`Dont Stop Believin` and `YMCA`).
+Punctuation-equivalent titles receive exact title similarity, including when
+the artist is absent. If no exact title exists, same-primary-artist or artist-free
+requests expose whole-word title prefixes and title similarity at or above the
+configured cutoff (0.6 in Prep/Live) as `ambiguous` review candidates. These
+suggestions never select a file or earn a boost, badge, or fulfillment, even for
+a single candidate. Their confidence retains the weighted title/artist evidence;
+a partial title without an artist can therefore be ambiguous below 0.6 without
+lowering the confident-match cutoff. Exact titles always win over suggestions.
 `Intro Edit` is stripped as a complete version tag, not as `Intro` plus a
 leftover song-title word.
 Ambiguity compares distinct song identities within the existing five-point
 window, not duplicate files of one identity. Clean/Intro/Short Edit preferences
 only order files inside an identity, after an available requested version and
 before raw-title/artist and deterministic metadata tie-breaking.
-Weak identity evidence stays missing regardless of version preference.
+Unrelated titles and non-exact suggestions from a different artist stay missing
+regardless of version preference.
 
 The original synthetic Desktop demo is preserved byte-for-byte in
 `engine/setlist/fixtures/`, including its historical README observations.
 `engine/setlist/test_demo.py` exercises all 18 original expectations, including
 `mp-4` -> `trk-038`, `g-3` -> `trk-014`, and ambiguous `g-9`/`g-10` at exactly
 0.6 without fulfillment. The separate `fixtures/followup-cases.json` adds
-cases 19-21: Corazon is not Horizon, Shine On is not Shine On Me, and a
+cases 19-21: Corazon is missing against Horizon, Shine On lists Shine On Me as
+ambiguous without fulfillment, and a
 Summer (Dirty) cue picks Dirty over Clean and Clean Intro. All 21 cases cover
 Prep/Live and shuffled library input. Run them against checkout modules with
 `PYTHONPATH=engine .venv/bin/python -m unittest setlist.test_demo -v`.

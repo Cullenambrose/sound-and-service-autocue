@@ -188,6 +188,16 @@ def _identity_fields(track: Dict[str, Any]) -> Tuple[str, str]:
     return artist, normalize_text(title)
 
 
+def _title_key(title: str) -> str:
+    return "".join(title.split())
+
+
+def _title_similarity(request_title: str, track_title: str) -> float:
+    if _title_key(request_title) == _title_key(track_title) and request_title:
+        return 1.0
+    return compute_similarity(request_title, track_title)
+
+
 def _version_key(track: Dict[str, Any]) -> Tuple[str, ...]:
     _, version = extract_version_tags(str(track.get("version") or track.get("title") or ""))
     return tuple(sorted(version.tags))
@@ -239,7 +249,7 @@ def rank_candidates(
         track_artist, track_title = _identity_fields(track)
         
         artist_sim = compute_similarity(norm_artist, track_artist)
-        title_sim = compute_similarity(norm_title, track_title)
+        title_sim = _title_similarity(norm_title, track_title)
         
         # Weighted average (title more important)
         similarity = (title_sim * 0.6) + (artist_sim * 0.4)
@@ -282,43 +292,45 @@ def match_track(
     # Normalize and extract features
     norm_artist, norm_title = _identity_fields({"artist": request_artist, "title": request_title})
     
-    # Find candidates by fuzzy matching
+    # Exact titles can resolve; partial or fuzzy titles are review-only suggestions.
     candidates = []
+    suggestions = []
     
     for track in library_tracks:
-        track_artist = normalize_text(track.get("artist") or "")
-        track_title_raw = track.get("title") or ""
-        track_title, track_version = extract_version_tags(track_title_raw)
-        track_title = normalize_text(track_title)
-        
-        # Extract featuring from track
-        track_artist_main, track_featured = extract_featuring(track_artist)
-        track_title_main, track_title_featured = extract_featuring(track_title)
+        track_artist_main, track_title_main = _identity_fields(track)
+        _, track_version = extract_version_tags(track.get("title") or "")
         
         # Compute similarity
         artist_sim = compute_similarity(norm_artist, track_artist_main)
-        title_sim = compute_similarity(norm_title, track_title_main)
-
-        # A similar or incomplete title is not evidence for the requested whole song.
-        if not norm_title or norm_title != track_title_main:
+        title_sim = _title_similarity(norm_title, track_title_main)
+        if not norm_title:
             continue
-        
-        # At least one must match well
-        if artist_sim >= config.fuzzy_threshold or title_sim >= config.fuzzy_threshold:
-            candidates.append({
-                **track,
-                "_artist_sim": artist_sim,
-                "_title_sim": title_sim,
-                "_version": track_version,
-            })
-        elif artist_sim >= 0.6 and title_sim >= 0.6:
-            # Both are decent
-            candidates.append({
-                **track,
-                "_artist_sim": artist_sim,
-                "_title_sim": title_sim,
-                "_version": track_version,
-            })
+
+        candidate = {
+            **track,
+            "_artist_sim": artist_sim,
+            "_title_sim": title_sim,
+            "_version": track_version,
+        }
+        if _title_key(norm_title) == _title_key(track_title_main):
+            candidates.append(candidate)
+        elif (not norm_artist or norm_artist == track_artist_main) and (
+            track_title_main.startswith(norm_title + " ")
+            or title_sim >= config.min_confidence
+        ):
+            suggestions.append(candidate)
+
+    if not candidates and suggestions:
+        ranked_suggestions = rank_candidates(
+            suggestions, request_artist, request_title, config, request.get("version") or ""
+        )
+        return MatchResult(
+            request=request,
+            status="ambiguous",
+            confidence=min(ranked_suggestions[0][1] / 100, 1.0),
+            candidates=[track for track, _ in ranked_suggestions[:5]],
+            reason="Only partial or similar song titles found; review required",
+        )
     
     if not candidates:
         return MatchResult(

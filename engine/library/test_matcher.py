@@ -238,9 +238,6 @@ def test_same_identity_versions_are_not_identity_ambiguity_and_choose_intact_fil
 @pytest.mark.parametrize("song_request,track", [
     ({"title": "Corazon", "artist": "Demo Artist 15"},
      {"title": "Horizon (Clean)", "artist": "Demo Artist 32"}),
-    ({"title": "Shine On"}, {"title": "Shine On Me", "artist": "Velvet Coast"}),
-    ({"title": "Shine On", "artist": "Velvet Coast"},
-     {"title": "Shine On Me", "artist": "Velvet Coast"}),
     ({"title": "Shine On", "artist": "Different Artist"},
      {"title": "Shine On Me", "artist": "Velvet Coast"}),
 ])
@@ -257,12 +254,78 @@ def test_different_whole_song_stays_missing_regardless_of_artist(song_request, t
      {"title": "Circles", "artist": "Post-Malone"}),
     ({"title": "bad guy"}, {"title": "BAD GUY", "artist": "Billie Eilish"}),
     ({"title": "bad-guy!"}, {"title": "bad guy (Clean)", "artist": "Billie Eilish"}),
+    ({"title": "Dont Stop Believin", "artist": "Journey"},
+     {"title": "Don't Stop Believin'", "artist": "Journey"}),
+    ({"title": "YMCA", "artist": "Village People"},
+     {"title": "Y.M.C.A.", "artist": "Village People"}),
+    ({"title": "Dont Stop Believin"}, {"title": "Don't Stop Believin'", "artist": "Journey"}),
+    ({"title": "YMCA"}, {"title": "Y.M.C.A.", "artist": "Village People"}),
+    ({"title": "Mr Brightside", "artist": "The Killers"},
+     {"title": "Mr. Brightside", "artist": "The Killers"}),
+    ({"title": "Uptown Funk", "artist": "Mark Ronson"},
+     {"title": "Uptown Funk (feat. Bruno Mars)", "artist": "Mark Ronson"}),
+    ({"title": "Uptown Funk", "artist": "Mark Ronson"},
+     {"title": "Uptown Funk", "artist": "Mark Ronson feat. Bruno Mars"}),
 ])
 def test_whole_title_gate_preserves_case_and_punctuation(song_request, track):
     result = match_track(song_request, [track], MatchConfig(min_confidence=0.6))
     assert result.status == "matched"
     assert result.matched_track["title"] == track["title"]
     assert result.confidence >= 0.6
+
+
+@pytest.mark.parametrize("artist", ["Velvet Coast", ""])
+def test_single_partial_title_is_ambiguous_without_a_selected_file(artist):
+    library = [{"id": "longer", "title": "Shine On Me", "artist": "Velvet Coast"}]
+    result = match_track({"title": "Shine On", "artist": artist}, library,
+                         MatchConfig(min_confidence=0.6))
+    assert result.status == "ambiguous"
+    assert result.matched_track is None
+    assert [track["id"] for track in result.candidates] == ["longer"]
+
+
+@pytest.mark.parametrize("artist", ["Earth, Wind & Fire", ""])
+def test_full_title_typo_is_ambiguous_with_candidate(artist):
+    library = [{"id": "september", "title": "September", "artist": "Earth, Wind & Fire"}]
+    result = match_track({"title": "Septemer", "artist": artist}, library,
+                         MatchConfig(min_confidence=0.6))
+    assert result.status == "ambiguous"
+    assert result.matched_track is None
+    assert [track["title"] for track in result.candidates] == ["September"]
+
+
+@pytest.mark.parametrize("artist", ["Demo Artist", ""])
+def test_typo_title_similarity_cutoff_is_inclusive(artist):
+    library = [{"id": "candidate", "title": "abXYe", "artist": "Demo Artist"}]
+    at_cutoff = match_track({"title": "abcde", "artist": artist}, library,
+                            MatchConfig(min_confidence=0.6))
+    below_cutoff = match_track({"title": "abcdf", "artist": artist}, library,
+                               MatchConfig(min_confidence=0.6))
+    assert at_cutoff.status == "ambiguous"
+    assert at_cutoff.candidates[0]["_title_sim"] == 0.6
+    assert below_cutoff.status == "missing"
+
+
+def test_partial_word_is_not_a_title_prefix():
+    result = match_track(
+        {"title": "Shine", "artist": "Demo Artist"},
+        [{"title": "Shinelessly Everlasting", "artist": "Demo Artist"}],
+        MatchConfig(min_confidence=0.6),
+    )
+    assert result.status == "missing"
+
+
+def test_exact_title_wins_over_review_only_candidates():
+    library = [
+        {"id": "partial", "title": "Shine On Me", "artist": "Velvet Coast"},
+        {"id": "exact", "title": "Shine On", "artist": "Velvet Coast"},
+        {"id": "typo", "title": "Shine Om", "artist": "Velvet Coast"},
+    ]
+    for tracks in permutations(library):
+        result = match_track({"title": "Shine On"}, tracks, MatchConfig(min_confidence=0.6))
+        assert (result.status, result.confidence) == ("matched", 0.6)
+        assert result.matched_track["id"] == "exact"
+        assert [track["id"] for track in result.candidates] == ["exact"]
 
 
 @pytest.mark.parametrize("version,expected", [
@@ -441,16 +504,18 @@ def test_version_tags_all_types(library_tracks):
     assert len(result.candidates) >= 3
 
 
-def test_incomplete_title_stays_missing_even_with_matching_artist(library_tracks):
+@pytest.mark.parametrize("artist", ["Taylor Swift", ""])
+def test_incomplete_title_lists_both_songs_as_ambiguous(library_tracks, artist):
     """A primary artist match cannot fulfill an incomplete song title."""
     # Taylor Swift has two similar titles: "Shake It Off" and "Shake It Up"
-    request = {"artist": "Taylor Swift", "title": "Shake It"}
+    request = {"artist": artist, "title": "Shake It"}
     config = MatchConfig(min_confidence=0.6)
     
     result = match_track(request, library_tracks, config)
     
-    assert result.status == "missing"
+    assert result.status == "ambiguous"
     assert result.matched_track is None
+    assert {track["title"] for track in result.candidates} == {"Shake It Off", "Shake It Up"}
 
 
 def test_missing_track(library_tracks):

@@ -42,13 +42,21 @@ class SetlistEngineTests(unittest.TestCase):
     def test_different_whole_song_cannot_fulfill_any_positive_request(self):
         cases = (
             (SongRequest("Corazon", "Demo Artist 15"),
-             track("Horizon (Clean)", "Demo Artist 32")),
-            (SongRequest("Shine On"), track("Shine On Me", "Velvet Coast")),
+             [track("Horizon (Clean)", "Demo Artist 32")], "missing"),
+            (SongRequest("Shine On"), [track("Shine On Me", "Velvet Coast")], "ambiguous"),
             (SongRequest("Shine On", "Velvet Coast"),
-             track("Shine On Me", "Velvet Coast")),
+             [track("Shine On Me", "Velvet Coast")], "ambiguous"),
+            (SongRequest("Shake It", "Taylor Swift"),
+             [track("Shake It Off", "Taylor Swift"), track("Shake It Up", "Taylor Swift")],
+             "ambiguous"),
+            (SongRequest("Shake It"),
+             [track("Shake It Off", "Taylor Swift"), track("Shake It Up", "Taylor Swift")],
+             "ambiguous"),
+            (SongRequest("Septemer", "Earth, Wind & Fire"),
+             [track("September", "Earth, Wind & Fire")], "ambiguous"),
         )
-        for request, decoy in cases:
-            library = [decoy, track("Other Song", "Other Artist")]
+        for request, candidates, status in cases:
+            library = candidates + [track("Other Song", "Other Artist")]
             for category in ("must_play", "play_if_possible", "guest_requests", "song_cues"):
                 value = (SongCue("first_dance", request.title, request.artist)
                          if category == "song_cues" else request)
@@ -63,11 +71,38 @@ class SetlistEngineTests(unittest.TestCase):
                             self.assertEqual(result, baseline)
                         else:
                             diagnostic = result.resolution_diagnostics[0]
-                            self.assertEqual(diagnostic.status, "missing")
+                            self.assertEqual(diagnostic.status, status)
                             self.assertIsNone(diagnostic.identity)
+                            if status == "ambiguous":
+                                self.assertEqual(
+                                    {item["title"] for item in diagnostic.alternatives},
+                                    {item["title"] for item in candidates},
+                                )
+                            if category == "must_play":
+                                self.assertEqual(result.unresolved_must_play, [request])
                         for item in result:
                             self.assertNotIn("requested", item.badges)
                             self.assertNotIn("customer", item.badges)
+
+    def test_punctuation_and_featuring_controls_fulfill_in_both_apis(self):
+        cases = (
+            ("Dont Stop Believin", "Don't Stop Believin'", "Journey"),
+            ("YMCA", "Y.M.C.A.", "Village People"),
+            ("Mr Brightside", "Mr. Brightside", "The Killers"),
+            ("Uptown Funk", "Uptown Funk (feat. Bruno Mars)", "Mark Ronson"),
+        )
+        for requested, available, artist in cases:
+            for request_artist in (artist, None):
+                context = SetlistContext(must_play=(SongRequest(requested, request_artist),))
+                library = [track(available, artist)]
+                for ranker in (rank_prep_crate, rank_next_song):
+                    with self.subTest(title=requested, artist=request_artist,
+                                      ranker=ranker.__name__):
+                        result = ranker(context, library)
+                        self.assertEqual(result.resolution_diagnostics[0].status, "matched")
+                        self.assertEqual(result.unresolved_must_play, [])
+                        self.assertIn("Must-play request", result[0].reasons)
+                        self.assertIn("requested", result[0].badges)
 
     def test_versioned_request_uses_raw_title_and_artist_tie_break(self):
         library = [

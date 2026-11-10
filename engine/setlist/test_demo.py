@@ -214,8 +214,11 @@ class DemoAcceptanceTests(unittest.TestCase):
             self.assertEqual(len(result.resolution_diagnostics), 1)
             diagnostic = result.resolution_diagnostics[0]
             self.assertEqual(diagnostic.status, case["expected"]["status"])
-            if case["expected"]["status"] == "missing":
+            if case["expected"]["status"] in {"missing", "ambiguous"}:
                 self.assertIsNone(diagnostic.identity)
+                if diagnostic.status == "ambiguous":
+                    self.assertEqual([track["id"] for track in diagnostic.alternatives],
+                                     [track["id"] for track in case["library"]])
                 self.assertEqual(result.unresolved_must_play, list(context.must_play))
                 baseline = ranker(context_from_event({}, phase="first_dance"),
                                   case["library"], limit=len(case["library"]))
