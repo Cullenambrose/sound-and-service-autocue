@@ -23,7 +23,7 @@ sections = ["allin1==1.1.0"]
 autocue-worker = "autocue_worker:main"
 
 [tool.setuptools]
-packages = ["autocue_config"]
+packages = ["autocue_config", "library", "library.adapters", "setlist"]
 package-dir = {"" = "engine", autocue_config = "config"}
 py-modules = [
   "analyze", "autocue_worker", "cue_maps", "experiments", "gemini_assist",
