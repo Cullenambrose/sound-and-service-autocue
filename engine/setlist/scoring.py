@@ -183,6 +183,7 @@ def score_candidate(
     relevant_song_cue: bool,
     guest_requested: bool,
     floor_filler: bool,
+    explain_song_cue: bool = True,
 ) -> Tuple[float, Tuple[str, ...]]:
     """Score one eligible track and explain every applied rule term."""
     score = 0.0
@@ -190,14 +191,16 @@ def score_candidate(
     boosts = (
         (must_play, settings.must_play_weight, "Must-play request"),
         (play_if_possible, settings.play_if_possible_weight, "Play-if-possible request"),
-        (relevant_song_cue, settings.song_cue_weight, f"Song cue fits {phase.name.replace('_', ' ')}"),
+        (relevant_song_cue, settings.song_cue_weight,
+         f"Song cue fits {phase.name.replace('_', ' ')}" if explain_song_cue else None),
         (guest_requested, settings.guest_request_weight, "Live guest request"),
         (floor_filler, settings.floor_filler_weight, "DJ-memory floor-filler"),
     )
     for enabled, weight, reason in boosts:
         if enabled:
             score += weight
-            reasons.append(reason)
+            if reason is not None:
+                reasons.append(reason)
 
     if now_playing is not None:
         transition_probability = _markov_probability(identity, playing_identity, context)

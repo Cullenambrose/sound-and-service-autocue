@@ -1,0 +1,284 @@
+{
+  "inquiry_id": "DEMO-INQ-0001",
+  "event_date": "2026-06-20",
+  "event_name": "Demo Wedding — Synthetic Fixture",
+  "client_name": "Demo Couple (synthetic)",
+  "venue": "Demo Barn Venue (fictional)",
+  "locked": false,
+  "planner": {
+    "status": "draft",
+    "song_cues": []
+  },
+  "event_timelines": {
+    "items": [
+      {
+        "name": "Processional",
+        "kind": "processional",
+        "start_time": "16:00",
+        "end_time": "16:05",
+        "duration_minutes": 5,
+        "song": {
+          "id": "tl-1",
+          "title": "Golden Aisle",
+          "artist": "The Lantern Strings",
+          "version": "Intro"
+        }
+      },
+      {
+        "name": "Grand Entrance",
+        "kind": "entrance",
+        "start_time": "17:30",
+        "duration_minutes": 3,
+        "song": {
+          "id": "tl-2",
+          "title": "Here We Come",
+          "artist": "Neon Parade",
+          "version": "Clean"
+        }
+      },
+      {
+        "name": "First Dance",
+        "kind": "songCue",
+        "start_time": "17:35",
+        "duration_minutes": 4,
+        "song": {
+          "id": "tl-3",
+          "title": "Slow Orbit",
+          "artist": "Maya Vale",
+          "version": "Short Edit"
+        },
+        "songCue": {
+          "fade": 8,
+          "seconds": 150
+        }
+      },
+      {
+        "name": "Fade Note",
+        "kind": "songCue",
+        "songCue": {
+          "version": "Extended",
+          "seconds": 12
+        }
+      },
+      {
+        "name": "Father-Daughter Dance",
+        "kind": "parent_dance",
+        "start_time": "17:45",
+        "duration_minutes": 4,
+        "song": {
+          "id": "tl-4",
+          "title": "Porch Light",
+          "artist": "Dusty Rivers",
+          "version": null
+        }
+      },
+      {
+        "name": "Mother-Son Dance",
+        "kind": "parent_dance",
+        "start_time": "17:50",
+        "duration_minutes": 4,
+        "song": {
+          "id": "tl-5",
+          "title": "Mama's Waltz",
+          "artist": "Rosa Linden",
+          "version": null
+        }
+      },
+      {
+        "name": "Cake Cutting",
+        "kind": "cake",
+        "start_time": "19:00",
+        "duration_minutes": 5,
+        "song": {
+          "id": "tl-6",
+          "title": "Sugar Frosting",
+          "artist": "The Bakers Club",
+          "version": null
+        }
+      },
+      {
+        "name": "Last Dance",
+        "kind": "last_dance",
+        "start_time": "22:55",
+        "duration_minutes": 5,
+        "song": {
+          "id": "tl-7",
+          "title": "Last Call Lullaby",
+          "artist": "Echo Harbor",
+          "version": "Extended Mix"
+        }
+      }
+    ]
+  },
+  "music_lists": {
+    "must_play": [
+      {
+        "id": "mp-1",
+        "title": "Velocity",
+        "artist": "Demo Artist 01",
+        "version": null
+      },
+      {
+        "id": "mp-2",
+        "title": "Paper Moons",
+        "artist": "Demo Artist 02",
+        "version": "Clean"
+      },
+      {
+        "id": "mp-3",
+        "title": "Hands Up",
+        "artist": "Demo Artist 10",
+        "version": null
+      },
+      {
+        "id": "mp-4",
+        "title": "Corazon",
+        "artist": "Demo Artist 15",
+        "version": null
+      },
+      {
+        "id": "mp-5",
+        "title": "Two Step",
+        "artist": "Demo Artist 16",
+        "version": null
+      },
+      {
+        "id": "mp-6",
+        "title": "Mixtape 98",
+        "artist": "Demo Artist 17",
+        "version": null
+      },
+      {
+        "id": "mp-7",
+        "title": "Chicken Shuffle",
+        "artist": "Barnyard Brass",
+        "version": null
+      },
+      {
+        "id": "mp-8",
+        "title": "Shine On",
+        "artist": "Velvet Coast",
+        "version": "Clean"
+      }
+    ],
+    "play_if_possible": [
+      {
+        "id": "pip-1",
+        "title": "Rooftop Fever",
+        "artist": "DJ Solano",
+        "version": "Extended Mix"
+      },
+      {
+        "id": "pip-2",
+        "title": "Mirror Ball",
+        "artist": "Demo Artist 22",
+        "version": null
+      },
+      {
+        "id": "pip-3",
+        "title": "Roller Rink",
+        "artist": "Demo Artist 25",
+        "version": null
+      },
+      {
+        "id": "pip-4",
+        "title": "Bailando Hoy",
+        "artist": "Demo Artist 28",
+        "version": null
+      },
+      {
+        "id": "pip-5",
+        "title": "Not In Library",
+        "artist": "Ghost Band",
+        "version": null
+      }
+    ],
+    "do_not_play": [
+      {
+        "id": "dnp-1",
+        "title": "Hello"
+      },
+      {
+        "id": "dnp-2",
+        "title": "Chicken Shuffle",
+        "artist": "Barnyard Brass",
+        "version": null
+      },
+      {
+        "id": "dnp-3",
+        "title": "Cha Cha Line",
+        "artist": "Floor Captains",
+        "version": null
+      },
+      {
+        "id": "dnp-4",
+        "title": "Loud Ex",
+        "artist": "Grudge Machine",
+        "version": null
+      }
+    ],
+    "special_moments": []
+  },
+  "_demo_live_inputs": {
+    "_note": "Live-only; pass as context_from_event(event, guest_requests=...). Parser ignores this key.",
+    "guest_requests": [
+      {
+        "id": "g-1",
+        "title": "Midnight Signal",
+        "artist": "Kilo Avenue",
+        "version": "Radio Edit"
+      },
+      {
+        "id": "g-2",
+        "title": "Rooftop Fever",
+        "artist": "DJ Solano",
+        "version": "Clean"
+      },
+      {
+        "id": "g-3",
+        "title": "Shine On Me",
+        "artist": "Velvet Coast",
+        "version": null
+      },
+      {
+        "id": "g-4",
+        "title": "Hello",
+        "artist": "Ada Moon",
+        "version": null
+      },
+      {
+        "id": "g-5",
+        "title": "Hello Again",
+        "artist": "Ada Moon",
+        "version": null
+      },
+      {
+        "id": "g-6",
+        "title": "Arcade Love",
+        "artist": "Demo Artist 09",
+        "version": null
+      },
+      {
+        "id": "g-7",
+        "title": "Midnight Signal",
+        "artist": "Kilo Avenue",
+        "version": "Clean"
+      },
+      {
+        "id": "g-8",
+        "title": "Cha Cha Line",
+        "artist": "Floor Captains",
+        "version": "Clean"
+      },
+      {
+        "id": "g-9",
+        "title": "Night Drive",
+        "version": "Re-Drum"
+      },
+      {
+        "id": "g-10",
+        "title": "Moon Harbor"
+      }
+    ]
+  }
+}
