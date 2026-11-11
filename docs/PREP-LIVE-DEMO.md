@@ -38,6 +38,16 @@ not files to read or create. Do not use this demo with customer or music data.
   but never bypasses bans, played exclusions or higher-priority versions.
   Confirming a fallback version is an explicit choice, not automatic fulfillment
   of the originally unavailable version.
+- Unavailable-version buttons name the substitution ("Use Clean instead").
+  Matched Live rows show the resolved title, artist, version and exact path
+  alongside the original request, with a distinct success state.
+- Prep review cards use a compact two-column layout on desktop. Live
+  recommendations sit beside the guest form and request queue, rather than
+  below them. Narrow screens retain document/keyboard order and provide a
+  jump link to the scrollable recommendation table.
+- Completion combines Saved, Exported and Verified status beside the actions.
+  Review actions restore keyboard focus after rows change; errors receive
+  focus and pending actions retain the existing explicit retry/reconcile flow.
 - Every Prep review row must be confirmed or dismissed before Save. Save writes
   `05-prep-saved.json`; Export derives `05-prep-export.m3u8` strictly from that
   saved snapshot, never reranking a library. Verify compares exact saved JSON
@@ -49,6 +59,8 @@ not files to read or create. Do not use this demo with customer or music data.
   reconcile. Do not run two server instances against the same output directory.
 - Live guests enter a first name, optional email and a song, including inline
   version text such as `Summer (Dirty)`. No guest account or sign-in is added.
+  "Add guest request" opens the form; a successful submission clears and closes
+  it so the DJ queue remains visible. Failures leave the form and inputs intact.
   Demo guest inputs must also be synthetic. Live commands never write either
   saved Prep artifact; tests hash those files before and after a matched request.
   Mark played excludes every file of that song identity for the event.

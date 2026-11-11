@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -32,6 +32,37 @@ test("missing and unavailable-version rows display backend notes without fulfill
   assert.match(html, /Not in your library/);
   assert.match(html, /Have Clean, not Radio Edit/);
   assert.doesNotMatch(html, />Matched</);
+  assert.match(html, /Use Clean instead/);
+  assert.match(html, /Use Dirty instead/);
+});
+
+test("matched requests show resolved metadata with success styling and preserve typed input", () => {
+  const html = reviewRows([{...row, request:{title:"typed song", metadata:{first_name:"Demo"}},
+    fulfilled:true, status:"matched", needs_review:false, selected_file_id:"exact"}],
+  [{track:{id:"exact", title:"Resolved Song", artist:"Resolved Artist", path:"/Demo/exact.mp3"},
+    version_label:"Short Edit"}]);
+  for (const text of ["typed song", "Resolved Song", "Resolved Artist", "Short Edit", "/Demo/exact.mp3"]) {
+    assert.ok(html.includes(text));
+  }
+  assert.match(html, /badge success/);
+  assert.doesNotMatch(html, /badge review|data-action="confirm"/);
+});
+
+test("Prep completion distinguishes pending decisions, save, export and verification failures", () => {
+  const view = {prep_done:false, saved:null, needs_review:[row], verification:{mismatches:null}};
+  assert.equal(prepProgress(view), "1 decision before saving");
+  assert.equal(prepProgress({...view, needs_review:[]}), "Ready to save");
+  assert.equal(prepProgress({...view, needs_review:[], saved:{}}), "Crate saved · Export to finish");
+  assert.equal(prepProgress({...view, needs_review:[], prep_done:true}),
+    "Saved · Exported · Verified: 0 mismatches");
+  assert.equal(prepProgress({...view, verification:{mismatches:2}}), "Verification failed: 2 mismatches");
+});
+
+test("review actions have distinct accessible names and unavailable alternatives are explicit", () => {
+  const html = reviewRows([{...row, status:"version_unavailable"}]);
+  assert.match(html, /aria-label="Use Clean instead for Shake It &lt;script&gt;"/);
+  assert.match(html, /aria-label="Dismiss request: Shake It &lt;script&gt;"/);
+  assert.match(reviewRows([row]), /aria-label="Confirm Shake It Off by Demo Artist, Clean"/);
 });
 
 test("blocked do-not-play and already-played rows cannot be confirmed", () => {
