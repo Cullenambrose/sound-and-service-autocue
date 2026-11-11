@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 # Common DJ-pool version tags to normalize
 VERSION_TAGS = [
@@ -131,12 +132,8 @@ def extract_featuring(text: str) -> Tuple[str, List[str]]:
     return normalize_text(main_text), [normalize_text(f) for f in featured]
 
 
-def extract_version_tags(text: str) -> Tuple[str, TrackVersion]:
-    """
-    Extract version tags from title/artist.
-    Returns (text_without_tags, TrackVersion)
-    """
-    version = TrackVersion()
+@lru_cache(maxsize=8192)
+def _version_parts(text: str) -> Tuple[str, Tuple[str, ...]]:
     clean_text = text
     
     # Sort tags by length (longest first) to match "Chorus Intro" before "Intro"
@@ -161,7 +158,14 @@ def extract_version_tags(text: str) -> Tuple[str, TrackVersion]:
     clean_text = re.sub(r"\s*[(\[]\s*[)\]]\s*", " ", clean_text)  # Remove empty parens
     clean_text = re.sub(r"\s+", " ", clean_text).strip()
     
-    version.tags = found_tags
+    return clean_text, tuple(found_tags)
+
+
+def extract_version_tags(text: str) -> Tuple[str, TrackVersion]:
+    """Extract version tags, returning independent mutable version metadata."""
+    clean_text, tags = _version_parts(text)
+    found_tags = list(tags)
+    version = TrackVersion(tags=found_tags)
     version.is_clean = any("clean" in t for t in found_tags)
     version.is_dirty = any("dirty" in t or "explicit" in t for t in found_tags)
     version.is_intro = any("intro" in t for t in found_tags) and "chorus intro" not in " ".join(found_tags)
@@ -182,9 +186,14 @@ def compute_similarity(s1: str, s2: str) -> float:
 
 
 def _identity_fields(track: Dict[str, Any]) -> Tuple[str, str]:
-    title, _ = extract_version_tags(track.get("title") or "")
+    return _identity_text(track.get("artist") or "", track.get("title") or "")
+
+
+@lru_cache(maxsize=8192)
+def _identity_text(artist: str, title: str) -> Tuple[str, str]:
+    title, _ = extract_version_tags(title)
     title, _ = extract_featuring(title)
-    artist, _ = extract_featuring(track.get("artist") or "")
+    artist, _ = extract_featuring(artist)
     return artist, normalize_text(title)
 
 
@@ -192,6 +201,7 @@ def _title_key(title: str) -> str:
     return "".join(title.split())
 
 
+@lru_cache(maxsize=8192)
 def _title_similarity(request_title: str, track_title: str) -> float:
     if _title_key(request_title) == _title_key(track_title) and request_title:
         return 1.0
@@ -298,26 +308,26 @@ def match_track(
     
     for track in library_tracks:
         track_artist_main, track_title_main = _identity_fields(track)
-        _, track_version = extract_version_tags(track.get("title") or "")
-        
-        # Compute similarity
-        artist_sim = compute_similarity(norm_artist, track_artist_main)
-        title_sim = _title_similarity(norm_title, track_title_main)
         if not norm_title:
             continue
-
+        exact_title = _title_key(norm_title) == _title_key(track_title_main)
+        if not exact_title and norm_artist and norm_artist != track_artist_main:
+            continue
+        title_sim = _title_similarity(norm_title, track_title_main)
+        if (not exact_title and not track_title_main.startswith(norm_title + " ")
+                and title_sim < config.min_confidence):
+            continue
+        artist_sim = compute_similarity(norm_artist, track_artist_main)
+        _, track_version = extract_version_tags(track.get("title") or "")
         candidate = {
             **track,
             "_artist_sim": artist_sim,
             "_title_sim": title_sim,
             "_version": track_version,
         }
-        if _title_key(norm_title) == _title_key(track_title_main):
+        if exact_title:
             candidates.append(candidate)
-        elif (not norm_artist or norm_artist == track_artist_main) and (
-            track_title_main.startswith(norm_title + " ")
-            or title_sim >= config.min_confidence
-        ):
+        else:
             suggestions.append(candidate)
 
     if not candidates and suggestions:

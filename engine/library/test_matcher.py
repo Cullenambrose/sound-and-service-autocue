@@ -178,6 +178,17 @@ def test_compute_similarity():
     assert compute_similarity("hello", "") == 0.0
 
 
+def test_cached_version_parsing_returns_independent_mutable_metadata():
+    first_title, first = extract_version_tags("Song (Clean Intro)")
+    first.tags.append("dirty")
+    first.is_clean = False
+    second_title, second = extract_version_tags("Song (Clean Intro)")
+    assert first_title == second_title == "Song"
+    assert second.tags == ["clean intro"]
+    assert second.is_clean
+    assert not second.is_dirty
+
+
 # ============================================================================
 # Matching Tests
 # ============================================================================

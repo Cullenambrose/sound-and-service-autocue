@@ -102,6 +102,14 @@ def _sorted_library(library: Iterable[Any]):
 
 
 def _match(request: SongRequest, records):
+    confirmed_file_id = request.metadata.get("confirmed_file_id")
+    if confirmed_file_id:
+        selected = [(identity, track) for identity, track in records
+                    if track.get("id") == confirmed_file_id]
+        if (len(selected) != 1
+                or selected[0][0] != song_identity(request.title, request.artist)):
+            raise ValueError("Confirmed file must uniquely belong to the requested song identity.")
+        records = selected
     return match_track(
         {"artist": request.artist or "", "title": request.title or "",
          "version": request.version or ""},
@@ -133,6 +141,20 @@ def _resolve_request(request: SongRequest, category: str, library_records):
         )
 
     version = _request_version(request)
+    confirmed_file_id = request.metadata.get("confirmed_file_id")
+    if confirmed_file_id:
+        confirmed = [
+            track for candidate_identity, track in library_records
+            if candidate_identity == identity and track.get("id") == confirmed_file_id
+            and (not version or _version_label(track) == version)
+        ]
+        if len(confirmed) != 1:
+            raise ValueError("Confirmed file must uniquely belong to the resolved song and version.")
+        selected = confirmed[0]
+        diagnostic = RequestDiagnostic(category, request, matched.status, matched.confidence,
+                                       alternatives, identity, matched.reason, matched.status)
+        return (identity, selected, version), diagnostic
+
     if version:
         matching_versions = [
             track for candidate_identity, track in library_records
@@ -166,6 +188,9 @@ def _representatives(library_records):
     for identity, tracks in groups.items():
         tracks.sort(key=_file_key)
         source = tracks[0]
+        if len(tracks) == 1:
+            representatives[identity] = source
+            continue
         # A library representative's title must not act as a requested playback version.
         title, _ = extract_version_tags(source.get("title") or "")
         result = match_track(

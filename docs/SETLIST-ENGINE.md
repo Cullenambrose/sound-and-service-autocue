@@ -156,3 +156,10 @@ The recommendation result keeps its original `items`,
 `resolution_diagnostics`, `do_not_play_diagnostics`, `conflicting_requests`,
 `version_conflicts`, and optional `capacity_overflow` for explicit review
 outcomes.
+
+The isolated [synthetic Prep/Live demo](PREP-LIVE-DEMO.md) wires these APIs
+without duplicating matching or ranking in JavaScript. An explicitly confirmed
+request may supply `metadata.confirmed_file_id` with its exact selected
+title/artist/version. The engine validates identity and version membership,
+retains the chosen file, and still applies all hard exclusions and normal
+category/version priorities. Unconfirmed requests keep their existing behavior.

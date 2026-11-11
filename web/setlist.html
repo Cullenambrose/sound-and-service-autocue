@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Booth Buddy · Prep &amp; Live demo</title>
+  <link rel="stylesheet" href="/setlist.css">
+  <script src="/setlist.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="mark">S&amp;S</span><span>Booth Buddy<small>YOUR EVENT. YOUR CALL.</small></span></a>
+    <span class="demo-label">SYNTHETIC DEMO / LOCAL ONLY</span>
+  </header>
+  <main>
+    <div class="event-heading">
+      <div><p class="eyebrow">EVENT WORKSPACE</p><h1 id="event-name">Demo wedding</h1><p class="muted">First dance · Exact local versions · Nothing writes to your music library</p></div>
+      <span class="review-stamp">DESIGN REVIEW PENDING<br><strong>95/100 required before shipping</strong></span>
+    </div>
+    <nav class="tabs" aria-label="Event workspace"><button id="prep-tab" aria-current="page">01 &nbsp; Prep</button><button id="live-tab">02 &nbsp; Live</button></nav>
+    <div id="status" role="status" aria-live="polite"></div>
+    <div id="error" role="alert" hidden></div>
+    <div id="recovery" hidden><button id="retry-pending" class="secondary">Retry exact pending action</button><button id="reconcile" class="dismiss">Reload saved session to reconcile</button></div>
+    <section id="prep-screen" aria-label="Prep">
+      <div class="section-heading"><div><p class="eyebrow">BEFORE THE FIRST TRACK</p><h2>Build a set you can trust.</h2></div><div class="save-actions"><span id="prep-progress"></span><button id="save-prep" class="primary">Save Prep crate</button><button id="export-prep" class="secondary">Export playlist</button><a id="download" href="/api/export" download="05-prep-export.m3u8" hidden>Download saved export</a></div></div>
+      <section class="review-panel" aria-label="Prep needs review">
+        <div class="section-heading"><h3>Needs review <span id="review-count" class="count"></span></h3><span class="muted">Your decisions, never a guess.</span></div>
+        <div id="prep-review"></div>
+      </section>
+      <section class="crate-panel" aria-label="Prep crate">
+        <div class="section-heading"><h3>Event crate <span id="crate-count" class="count"></span></h3><span id="verify" class="muted"></span></div>
+        <p class="muted">Ordered by the shared setlist engine. Every row keeps its original file.</p>
+        <div class="table-wrap"><table><thead><tr><th>#</th><th>SONG / ARTIST</th><th>EXACT VERSION / FILE</th><th>WHY IT'S HERE</th></tr></thead><tbody id="prep-tracks"></tbody></table></div>
+      </section>
+    </section>
+    <section id="live-screen" aria-label="Live" hidden>
+      <div class="section-heading"><div><p class="eyebrow">IN THE BOOTH</p><h2>Requests, without the guesswork.</h2></div><span class="safe-label">Prep stays saved. Live stays separate.</span></div>
+      <div class="live-layout">
+        <section class="guest-panel">
+          <h3>Ask for a song</h3><p class="muted">No account. No sign-in. Just a first name and a song.</p>
+          <form id="guest-form">
+            <label for="guest-name">First name</label><input id="guest-name" name="first_name" required maxlength="80" autocomplete="given-name" placeholder="Demo guest">
+            <label for="guest-email">Email <span class="muted">(optional)</span></label><input id="guest-email" name="email" type="email" maxlength="254" autocomplete="email" placeholder="demo@example.test">
+            <label for="guest-song">Song</label><input id="guest-song" name="song" required maxlength="200" placeholder="e.g. Summer (Dirty)">
+            <button type="submit" class="primary">Check request</button>
+          </form>
+          <p class="boundary-note">This local demo uses invented event data. No audio, cue tags, crates or Serato files are written.</p>
+        </section>
+        <section class="review-panel" aria-label="DJ request list"><div class="section-heading"><h3>DJ request list</h3><span class="count" id="guest-count"></span></div><div id="live-requests"></div></section>
+      </div>
+      <section class="crate-panel" aria-label="Live recommendations"><div class="section-heading"><h3>Up next, your choice</h3><span class="muted">Played songs and do-not-play are excluded.</span></div><div class="table-wrap"><table><thead><tr><th>#</th><th>SONG / ARTIST</th><th>EXACT VERSION / FILE</th><th>WHY IT'S HERE</th><th>PLAYED</th></tr></thead><tbody id="live-tracks"></tbody></table></div></section>
+    </section>
+    <footer>ENGINE-POWERED · HUMAN-CONFIRMED <span>Review candidate only — not approved for production.</span></footer>
+  </main>
+</body>
+</html>
