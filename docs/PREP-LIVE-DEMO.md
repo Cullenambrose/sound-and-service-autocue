@@ -8,7 +8,7 @@ existing library-prep application is unchanged. The screens still need the
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m web.setlist_demo \
-  --output ~/Desktop/MASTER-TODO/outputs/05-flow-demo
+  --output ~/Desktop/MASTER-TODO/outputs/06-flow-demo
 ```
 
 Open the printed `http://127.0.0.1:8767` URL. Stop with Ctrl-C.
@@ -16,7 +16,7 @@ Open the printed `http://127.0.0.1:8767` URL. Stop with Ctrl-C.
 The server loads only the checked-in `mock-wedding-event.json` and one of the
 two demo libraries. It never imports the existing app server, initializes its
 database, scans folders, opens music paths, or calls tag/crate/Serato writers.
-Its CLI accepts only a non-symlink `05-*` directory directly inside the requested
+Its CLI accepts only a non-symlink `05-*` or `06-*` directory directly inside the requested
 Desktop outputs directory. Music paths in the playlist are synthetic references,
 not files to read or create. Do not use this demo with customer or music data.
 
@@ -52,6 +52,9 @@ not files to read or create. Do not use this demo with customer or music data.
   Demo guest inputs must also be synthetic. Live commands never write either
   saved Prep artifact; tests hash those files before and after a matched request.
   Mark played excludes every file of that song identity for the event.
+- New CLI sessions use `06-session.json`, `06-prep-saved.json` and
+  `06-prep-export.m3u8`; explicitly selecting an old `05-*` output directory
+  preserves its existing filenames. No Serato crate or music file is written.
 
 ## Validation
 
@@ -64,19 +67,29 @@ node --test web/test_*.cjs
 ```
 
 The numbered Python tests cover acceptance checks 1-12, including an actual
-loopback HTTP benchmark with 1,000 invented library records and 20 persisted
-guest requests. It includes ranking, session persistence, serialization and
-reading the response. It reports p50/p95, cold/max latency, and whether every
-sample met 200 ms; a missed performance target is reported, not disguised as a
-functional failure.
-Set `SETLIST_BENCHMARK_OUTPUT` to an explicit `05-*.json` path to retain the
-samples. Full-suite pass counts are reported separately from this target.
+loopback HTTP benchmark with 1,000 invented library records. It measures the
+cold first request separately, discards one warm-up, then records 200 persisted
+submissions. The seeded in-memory session is reset outside each timed interval
+so inputs remain comparable and the existing 100-guest limit is unchanged.
+Timing includes ranking, durable session persistence, serialization and reading
+the response. It reports p50/p95/p99/max and cold latency, and fails unless warm
+p95 is strictly below 200 ms. Set `SETLIST_BENCHMARK_OUTPUT` to an explicit
+`06-*.json` path to retain every sample.
 
 Latency improvements cache bounded immutable version/identity/similarity
 parsing in the shared matcher (callers still receive independent mutable
 version objects), avoid irrelevant different-artist fuzzy comparisons, and
 use a single available file directly as a song representative. They do not
 change the inclusive 0.6 setlist or separate 0.7 crate confidence cutoffs.
+The workflow builds a caller-owned `PreparedLibrary` snapshot once per load;
+rebuild that snapshot when library metadata changes. Plain iterable callers
+retain their original uncached behavior. Original typed diagnostics are cached
+per mode until event/guest requests change, rather than reranking for each
+confirmation. Recommendation serialization copies the known result fields
+without recursively converting entire track dictionaries. Both screens are
+warmed before the CLI server starts accepting requests. Guest submission still
+performs exactly one durable session write; retry receipts prevent duplicate
+writes. No matching, scoring, tie-breaking or exclusion rules change.
 
 The six original demo fixture files remain byte-identical. Additional tiny
 synthetic in-memory test records cover Shake It, Septemer, unavailable versions,

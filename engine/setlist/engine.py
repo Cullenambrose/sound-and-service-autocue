@@ -1,6 +1,7 @@
 """Pure shared ranking for Prep and Live; all candidates come from caller input."""
 from collections import defaultdict
 from collections.abc import Mapping
+import copy
 import json
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -203,6 +204,14 @@ def _representatives(library_records):
     return representatives
 
 
+class PreparedLibrary:
+    """Caller-owned library snapshot; rebuild when source metadata changes."""
+
+    def __init__(self, library):
+        self._records = copy.deepcopy(_sorted_library(library))
+        self._representatives = _representatives(self._records)
+
+
 def _moment_key(value: Optional[str]) -> str:
     return " ".join((value or "").casefold().replace("_", " ").replace("-", " ").split())
 
@@ -292,8 +301,12 @@ def _rank(
     if limit is not None and limit < 0:
         raise ValueError("limit must be nonnegative or None.")
     phase = select_phase(context, at, phase_override)
-    library_records = _sorted_library(library)
-    representatives = _representatives(library_records)
+    if isinstance(library, PreparedLibrary):
+        library_records = library._records
+        representatives = library._representatives
+    else:
+        library_records = _sorted_library(library)
+        representatives = _representatives(library_records)
     excluded, do_not_play_identities, already_played, already_placed, dnp_diagnostics = (
         _resolve_hard_excludes(context, library_records)
     )

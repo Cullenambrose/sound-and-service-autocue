@@ -163,3 +163,8 @@ request may supply `metadata.confirmed_file_id` with its exact selected
 title/artist/version. The engine validates identity and version membership,
 retains the chosen file, and still applies all hard exclusions and normal
 category/version priorities. Unconfirmed requests keep their existing behavior.
+
+Repeated callers can construct `PreparedLibrary(library)` once per library load
+and pass that snapshot to either ranker. It precomputes the same sorted identity
+records and representatives used by iterable inputs; rebuild it after metadata
+changes. Ranking results and the inclusive 0.6 cutoff remain unchanged.

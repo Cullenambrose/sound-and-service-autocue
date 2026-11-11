@@ -6,7 +6,7 @@ existing crate planner/writer as a separate step. Tag changes must go through
 ``tag_gate``. Existing dry-run, locked-event, explicit-apply, and Serato-closed
 safeguards remain downstream; this package calls neither crate nor tag writers.
 """
-from .engine import rank_next_song, rank_prep_crate
+from .engine import PreparedLibrary, rank_next_song, rank_prep_crate
 from .inputs import context_from_event, song_identity
 from .scoring import GENRES, SetlistSettings
 from .types import (
@@ -26,6 +26,7 @@ from .types import (
 )
 
 __all__ = [
+    "PreparedLibrary",
     "GENRES",
     "CapacityOverflow",
     "DoNotPlayDiagnostic",

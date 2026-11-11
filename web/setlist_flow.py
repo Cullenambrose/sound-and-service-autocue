@@ -9,7 +9,7 @@ import tempfile
 import threading
 
 from library.matcher import extract_version_tags
-from setlist import context_from_event, rank_next_song, rank_prep_crate, song_identity
+from setlist import PreparedLibrary, context_from_event, rank_next_song, rank_prep_crate, song_identity
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "engine/setlist/fixtures"
@@ -52,16 +52,21 @@ def playlist(entries):
 
 
 class SetlistFlow:
-    def __init__(self, directory, *, event=None, library=None):
+    def __init__(self, directory, *, event=None, library=None, output_prefix="05"):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.directory / "05-session.json"
-        self.saved_path = self.directory / "05-prep-saved.json"
-        self.export_path = self.directory / "05-prep-export.m3u8"
+        if output_prefix not in {"05", "06"}:
+            raise ValueError("Synthetic output prefix must be 05 or 06.")
+        self.output_prefix = output_prefix
+        self.state_path = self.directory / f"{output_prefix}-session.json"
+        self.saved_path = self.directory / f"{output_prefix}-prep-saved.json"
+        self.export_path = self.directory / f"{output_prefix}-prep-export.m3u8"
         self.event = copy.deepcopy(event if event is not None else json.loads(
             (FIXTURES / "mock-wedding-event.json").read_text()))
         self.library = copy.deepcopy(library if library is not None else json.loads(
             (FIXTURES / "mock-library.json").read_text())["tracks"])
+        self.prepared_library = PreparedLibrary(self.library)
+        self._typed_diagnostics = {}
         self.lock = threading.RLock()
         self.state = {
             "revision": 0, "prep_decisions": {}, "live_decisions": {}, "played": [],
@@ -77,7 +82,7 @@ class SetlistFlow:
                 raise ValueError("Unsupported synthetic session; use a new 05- output directory.")
 
     def _write(self, path, data):
-        descriptor, temporary = tempfile.mkstemp(prefix="05-write-", dir=self.directory)
+        descriptor, temporary = tempfile.mkstemp(prefix=f"{self.output_prefix}-write-", dir=self.directory)
         try:
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(data)
@@ -116,17 +121,31 @@ class SetlistFlow:
     def _rank(self, mode, state):
         context = self._context(mode, state)
         ranker = rank_prep_crate if mode == "prep" else rank_next_song
-        return ranker(context, self.library, limit=len(self.library))
+        return ranker(context, self.prepared_library, limit=len(self.library))
 
     def _view(self, mode, state):
         result = self._rank(mode, state)
         # Original diagnostics preserve exactly what was typed after a confirmation.
-        original_state = {**state, mode + "_decisions": {}}
-        original = self._rank(mode, original_state) if state[mode + "_decisions"] else result
-        if len(result.resolution_diagnostics) != len(original.resolution_diagnostics):
+        event_key = canonical(self.event)
+        guest_keys = tuple(canonical(guest) for guest in state["guests"]) if mode == "live" else ()
+        cached = self._typed_diagnostics.get(mode)
+        if cached is not None and cached[:2] == (event_key, guest_keys):
+            typed_diagnostics = cached[2]
+        elif (cached is not None and cached[0] == event_key
+              and guest_keys[:len(cached[1])] == cached[1]):
+            # Guest commands append requests; existing typed diagnostics stay valid.
+            previous = cached[2]
+            typed_diagnostics = previous + result.resolution_diagnostics[len(previous):]
+            self._typed_diagnostics[mode] = (event_key, guest_keys, typed_diagnostics)
+        else:
+            original_state = {**state, mode + "_decisions": {}}
+            original = self._rank(mode, original_state) if state[mode + "_decisions"] else result
+            typed_diagnostics = original.resolution_diagnostics
+            self._typed_diagnostics[mode] = (event_key, guest_keys, typed_diagnostics)
+        if len(result.resolution_diagnostics) != len(typed_diagnostics):
             raise ValueError("Confirmation changed the request list; reload the synthetic session.")
         rows, held, fulfilled = [], set(), set()
-        for diagnostic, typed in zip(result.resolution_diagnostics, original.resolution_diagnostics):
+        for diagnostic, typed in zip(result.resolution_diagnostics, typed_diagnostics):
             key = request_key(typed.category, typed.request)
             decision = state[mode + "_decisions"].get(key)
             conflicts = [conflict.reason for conflict in result.conflicting_requests
@@ -168,7 +187,8 @@ class SetlistFlow:
                 "selected_file_id": selected.get("id") if selected and is_fulfilled else None,
             })
         recommendations = [
-            {**asdict(item), "track": clean_track(item.track),
+            {"song_identity": asdict(item.song_identity), "track": copy.deepcopy(clean_track(item.track)),
+             "score": item.score, "reasons": item.reasons, "badges": item.badges,
              "version_label": version_label(item.track)}
             for item in result if item.song_identity not in held - fulfilled
         ]

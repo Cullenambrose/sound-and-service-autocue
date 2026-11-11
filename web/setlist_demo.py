@@ -94,17 +94,19 @@ def demo_server(flow, port=0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8767)
-    parser.add_argument("--output", type=Path, default=OUTPUTS / "05-flow-demo")
+    parser.add_argument("--output", type=Path, default=OUTPUTS / "06-flow-demo")
     parser.add_argument("--shuffled", action="store_true", help="Use the same demo library in shuffled order.")
     args = parser.parse_args()
     directory = args.output.expanduser().absolute()
-    if (directory.parent.resolve() != OUTPUTS.resolve() or not directory.name.startswith("05-")
+    if (directory.parent.resolve() != OUTPUTS.resolve() or not directory.name.startswith(("05-", "06-"))
             or directory.is_symlink()):
-        parser.error("Output must be a non-symlink 05-* directory directly in ~/Desktop/MASTER-TODO/outputs.")
+        parser.error("Output must be a non-symlink 05-* or 06-* directory directly in ~/Desktop/MASTER-TODO/outputs.")
     library = None
     if args.shuffled:
         library = json.loads((ROOT / "engine/setlist/fixtures/mock-library-shuffled.json").read_text())["tracks"]
-    flow = SetlistFlow(directory, library=library)
+    flow = SetlistFlow(directory, library=library, output_prefix=directory.name[:2])
+    flow.view("prep")
+    flow.view("live")
     server = demo_server(flow, args.port)
     print(f"Synthetic Prep/Live demo: http://127.0.0.1:{server.server_port}", flush=True)
     try:
