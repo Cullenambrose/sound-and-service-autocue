@@ -100,12 +100,18 @@
       <p class="review-note">${escape(labels[row.progress])}</p>
       <label for="lookup-${escape(row.key)}">Search text (select and copy)</label>
       <input id="lookup-${escape(row.key)}" readonly value="${escape(row.query)}">
-      <details><summary>Choose a provider (${row.providers.length})</summary><div class="provider-destinations">${row.providers.map(provider => `<a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${escape(provider.name)} <span class="request-sub">${escape(provider.kind)}</span></a>`).join("")}</div></details>
+      <button class="secondary" data-copy-query="${escape(row.key)}">Copy search text</button>
+      <details><summary>Choose a provider (${row.providers.length})</summary><div class="provider-destinations">${row.providers.map(provider => `<div><a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${provider.link_mode === "search" ? "Search" : "Open"} ${escape(provider.name)} <span class="request-sub">${escape(provider.kind)} / ${provider.link_mode === "search" ? "Direct search" : "Copy text, then search"}</span></a><p class="muted">${escape(provider.note)}</p>${provider.link_mode === "search" ? `<a href="${escape(provider.homepage_url)}" target="_blank" rel="noopener noreferrer">Open ${escape(provider.name)} homepage instead</a>` : ""}</div>`).join("")}</div></details>
+      <p class="muted">Only a link click sends the search text to that provider. No account connection or availability check. Verify the exact version there.</p>
       <div class="seed-actions">${Object.entries(labels).map(([progress, label]) => `<button class="secondary"
         data-action="acquisition_progress" data-key="${escape(row.key)}" data-progress="${progress}"
         aria-pressed="${row.progress === progress}">${escape(label)}</button>`).join("")}</div>
       <p class="muted">Still unresolved. Acquisition progress is not a playable file or fulfillment.</p>
     </article>`).join("") || '<p class="empty">No missing-song lookups waiting.</p>';
+  }
+  async function copySearchText(text, clipboard) {
+    if (!clipboard?.writeText) throw new Error("Clipboard unavailable. Select and copy the search text manually.");
+    await clipboard.writeText(text);
   }
   class FlowClient {
     constructor(fetcher) {
@@ -144,7 +150,7 @@
       return result;
     }
   }
-  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, planningRows, prepProgress, FlowClient};
+  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, copySearchText, planningRows, prepProgress, FlowClient};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   if (!root.document) return;
   const $ = selector => root.document.querySelector(selector);
@@ -527,6 +533,20 @@
     return view;
   }));
   root.document.addEventListener("click", event => {
+    const copy = event.target.closest("[data-copy-query]");
+    if (copy) {
+      const input = root.document.getElementById("lookup-" + copy.dataset.copyQuery);
+      copySearchText(input.value, root.navigator.clipboard).then(() => {
+        $("#error").hidden = true;
+        $("#status").textContent = "Search text copied. Open a provider and paste it into their search.";
+      }).catch(() => {
+        input.focus();
+        input.select();
+        $("#error").textContent = "Could not copy to clipboard. The search text is selected; copy it manually.";
+        $("#error").hidden = false;
+      });
+      return;
+    }
     const button = event.target.closest("[data-action]");
     if (button) run(() => client.command(mode, {action:button.dataset.action,
       key:button.dataset.key, file_id:button.dataset.fileId,

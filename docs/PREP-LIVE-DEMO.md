@@ -197,14 +197,19 @@ others. Those are their capabilities, not this application's integrations.
 [Beatsource](https://www.beatsource.com/) now announces migration to Beatport.
 Store/streaming destinations are distinguished from record pools. Public API
 authorization has not been established; no endpoints or logged-in scraping are
-assumed. This app opens provider homepages only, sends no song text automatically,
-connects no accounts, and performs no purchases or downloads. Provider listings
+assumed. Explicit DJcity and Beatport links now include the URL-encoded query,
+using search URLs reproduced through their normal public browser forms.
+Other destinations remain clearly labeled copy-text/open-site fallbacks.
+Opening Prep makes no provider requests; only clicking a search link sends
+the song query to that provider. No event/guest details or local paths are sent.
+The app connects no accounts and performs no purchases or downloads. Provider listings
 never fulfill requests or become playable files.
 
 The supplied reference UI additionally shows 23 selectable record pools. Those
 names are a research backlog, not verified integrations here; the six manual
 destinations above are not a full feature-parity claim.
 
-Remaining roadmap: real snapshot compatibility approval, phase-based set editing,
-authorized provider search APIs, acquired-file reconciliation, and opt-in history
-learning. Independent design approval is still required.
+See [browser search compatibility](PROVIDER-SEARCH-LINKS.md) for per-provider
+evidence and fallback boundaries. Connected APIs are not required for browser
+search links. Real snapshot/acquired-file verification and independent design
+approval remain gated; optional history is separately scoped.

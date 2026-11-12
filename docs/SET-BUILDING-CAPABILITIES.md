@@ -91,8 +91,8 @@ or a subscription's permission to automate access.
 | [Direct Music Service](https://www.directmusicservice.com/) | Professional-DJ qualification gate | Manual homepage only |
 | [Late Night Record Pool](https://www.latenightrecordpool.com/) | Public application shell; access contract not established | Manual homepage only |
 | [BPM Supreme](https://bpmmusic.io/supreme) | Public site responds; no authorized catalog API verified | Manual homepage only |
-| [DJcity](https://www.djcity.com/) | Public application shell; no authorized catalog API verified | Manual homepage only |
-| [Beatport](https://www.beatport.com/) | Public store/catalog and playlist controls | Manual homepage only |
+| [DJcity](https://www.djcity.com/) | Public search form and direct URL replay verified | Browser search link |
+| [Beatport](https://www.beatport.com/) | Public search form and direct URL replay verified | Browser search link |
 | [Beatport Open Format](https://www.beatport.com/open-format) | Public open-format catalog | Manual homepage only |
 
 The supplied reference screen lists 23 pools. The remaining named destinations
@@ -107,6 +107,9 @@ additional store/streaming destinations, not pools.
 No undocumented endpoints, fabricated provider search URLs, authenticated
 scraping, subscriptions, purchases or direct downloads are implemented.
 Provider listings never count as local fulfillment.
+See [browser search compatibility](PROVIDER-SEARCH-LINKS.md). Ordinary verified
+search links require no API/account connection; the authorization gates below
+apply to connected access, not manually opening these public browser searches.
 
 Spotify's [playlist metadata documentation](https://developer.spotify.com/documentation/web-api/reference/get-playlists-tracks)
 exists, but its [developer policy](https://developer.spotify.com/policy) imposes

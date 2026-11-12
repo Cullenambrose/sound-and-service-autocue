@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, planningRows, prepProgress, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, copySearchText, planningRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -204,6 +204,38 @@ test("acquisition progress stays explicitly separate from playable fulfillment",
   assert.doesNotMatch(html, /data-action="confirm"|class="badge success"/);
   assert.equal(JSON.stringify(rows), before);
   assert.match(acquisitionRows([]), /No missing-song lookups/);
+});
+
+test("provider links distinguish verified searches from copy-and-open fallbacks", () => {
+  const rows = [{key:"missing",title:"Paper Moons",artist:"Demo Artist",version:"Radio Edit",
+    query:"Demo Artist Paper Moons Radio Edit",progress:"not_started",providers:[
+      {name:"DJcity",kind:"Record pool",link_mode:"search",url:"https://www.djcity.com/search-overview?q=Demo%20Artist",
+        homepage_url:"https://www.djcity.com/",note:"Check <exact> version"},
+      {name:"DMS",kind:"Record pool",link_mode:"homepage",url:"https://www.directmusicservice.com/",
+        note:"Copy and search after sign-in"},
+    ]}];
+  const before = JSON.stringify(rows);
+  const html = acquisitionRows(rows);
+  assert.match(html,/Search DJcity/);
+  assert.match(html,/Open DMS/);
+  assert.match(html,/Direct search/);
+  assert.match(html,/Copy text, then search/);
+  assert.match(html,/Check &lt;exact&gt; version/);
+  assert.match(html,/data-copy-query="missing"/);
+  assert.match(html,/Only a link click sends/);
+  assert.match(html,/Open DJcity homepage instead/);
+  assert.equal((html.match(/rel="noopener noreferrer"/g)||[]).length,3);
+  assert.doesNotMatch(html,/data-action="confirm"|data-action="search"|<iframe/);
+  assert.equal(JSON.stringify(rows),before);
+});
+
+test("copying search text is explicit and clipboard failures propagate", async () => {
+  const copied = [];
+  await copySearchText("Demo Artist Paper Moons Radio Edit",{writeText:async text=>copied.push(text)});
+  assert.deepEqual(copied,["Demo Artist Paper Moons Radio Edit"]);
+  await assert.rejects(copySearchText("Synthetic",undefined),/Select and copy/);
+  await assert.rejects(copySearchText("Synthetic",{writeText:async()=>{throw new Error("Permission denied");}}),
+    /Permission denied/);
 });
 
 test("imported recovery shows original and replacement paths and explicit reconnect", () => {
