@@ -104,6 +104,13 @@ a { color: var(--cyan); }
 .eligible-track details { margin-top: 6px; }
 .eligible-track summary { color: var(--cyan); }
 .eligible-track .badge { margin-top: 6px; }
+#acquisition-form select { width: 100%; padding: 10px; background: var(--bg); color: var(--text); border: 1px solid var(--line); font-size: 16px; }
+#acquisition-form button { margin-top: 10px; }
+#acquisition-preview { margin-top: 16px; border-left: 2px solid var(--cyan); padding-left: 10px; }
+#acquisition-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#acquisition-queue [aria-pressed="true"] { border-color: var(--cyan); }
+.provider-destinations { display: grid; gap: 10px; padding: 8px 0; }
+.provider-destinations a { min-height: 44px; }
 @media (max-width: 1200px) {
   .prep-layout { grid-template-columns: 240px minmax(0, 1fr); }
   .decision-column { grid-column: 1 / -1; }

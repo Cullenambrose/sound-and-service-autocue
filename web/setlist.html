@@ -77,10 +77,28 @@
         <div class="section-heading"><h3>Needs review <span id="review-count" class="count"></span></h3><span class="muted">Your decisions, never a guess.</span></div>
         <div id="prep-review" tabindex="-1" aria-label="Remaining Prep decisions"></div>
       </section>
-      <details class="review-panel">
+      <details class="review-panel" id="acquisition-panel">
         <summary>Find missing songs <span id="acquisition-count"></span></summary>
         <p class="muted">Manual lookup only. Copy the search text into your subscribed provider. No accounts are connected, no availability is claimed, and nothing is downloaded or added to your crate.</p>
         <div id="acquisition-queue"></div>
+        <details id="acquisition-intake">
+          <summary>Reconcile synthetic acquired metadata</summary>
+          <p class="muted">Select one invented JSON track record: id, title, artist, path under /Demo/, optional version. No audio is inspected. Preview uses the shared engine; acceptance refreshes only this demo's metadata. Saved Prep is not replaced.</p>
+          <form id="acquisition-form">
+            <label for="acquisition-request">Pending request</label><select id="acquisition-request" required></select>
+            <label for="acquisition-file">Synthetic track JSON</label><input id="acquisition-file" type="file" accept=".json,application/json" required>
+            <button type="submit" class="secondary">Preview selected metadata</button>
+            <button type="button" id="acquisition-sample" class="secondary">Preview invented matching sample</button>
+          </form>
+          <div id="acquisition-preview" tabindex="-1" hidden>
+            <h4>Shared-engine preview</h4>
+            <p id="acquisition-preview-note"></p>
+            <ul id="acquisition-preview-changes"></ul>
+            <pre id="acquisition-preview-track" class="file-path"></pre>
+            <p class="muted">Acceptance does not confirm ambiguous or wrong-version requests. Review those separately. Save again to replace an older saved crate.</p>
+            <button id="acquisition-accept" class="primary">Accept synthetic metadata</button>
+          </div>
+        </details>
         <p class="muted">Provider list based on <a href="https://www.cratehackers.com/" target="_blank" rel="noopener noreferrer">Crate Hackers' published integrations</a>. Their download integrations are not integrations in this app. Beatsource has moved to Beatport.</p>
       </details>
       </aside>

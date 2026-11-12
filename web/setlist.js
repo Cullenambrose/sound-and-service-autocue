@@ -70,6 +70,20 @@
           aria-label="${escape(added ? `Added to set: ${item.track.title}` : `Add to set: ${item.track.title}, ${item.version_label}`)}">${added ? "Added to set" : "Add to set"}</button></article>`;
     }).join("") || '<p class="empty">No eligible tracks contain that text. This filter does not resolve requests or search record pools.</p>'};
   }
+  function acquisitionRows(rows) {
+    const labels = {not_started:"Not started", searching:"Searching", acquired:"Acquired externally; not verified"};
+    return rows.map(row => `<article class="review-row">
+      <h3>${escape(row.title)}</h3><span class="request-sub">${escape(row.artist || "Artist not specified")} ${escape(row.version || "")}</span>
+      <p class="review-note">${escape(labels[row.progress])}</p>
+      <label for="lookup-${escape(row.key)}">Search text (select and copy)</label>
+      <input id="lookup-${escape(row.key)}" readonly value="${escape(row.query)}">
+      <details><summary>Choose a provider (${row.providers.length})</summary><div class="provider-destinations">${row.providers.map(provider => `<a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${escape(provider.name)} <span class="request-sub">${escape(provider.kind)}</span></a>`).join("")}</div></details>
+      <div class="seed-actions">${Object.entries(labels).map(([progress, label]) => `<button class="secondary"
+        data-action="acquisition_progress" data-key="${escape(row.key)}" data-progress="${progress}"
+        aria-pressed="${row.progress === progress}">${escape(label)}</button>`).join("")}</div>
+      <p class="muted">Still unresolved. Acquisition progress is not a playable file or fulfillment.</p>
+    </article>`).join("") || '<p class="empty">No missing-song lookups waiting.</p>';
+  }
   class FlowClient {
     constructor(fetcher) {
       this.fetcher = fetcher;
@@ -106,10 +120,21 @@
       return result;
     }
   }
-  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, prepProgress, FlowClient};
+  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, prepProgress, FlowClient};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   if (!root.document) return;
   const $ = selector => root.document.querySelector(selector);
+  let acquisitionPreview = null;
+  let acquisitionGeneration = 0;
+  function invalidateAcquisition() {
+    acquisitionGeneration++;
+    acquisitionPreview = null;
+    $("#acquisition-preview").hidden = true;
+  }
+  function acquisitionAccepted() {
+    $("#acquisition-form").reset();
+    invalidateAcquisition();
+  }
   const client = new FlowClient(root.fetch.bind(root));
   let mode = "prep", busy = false;
   let importPreview = null;
@@ -167,13 +192,17 @@
       }));
       paintEligible(view);
       $("#acquisition-count").textContent = `(${view.acquisition_queue.length})`;
-      $("#acquisition-queue").innerHTML = view.acquisition_queue.map(row => `<article class="review-row">
-        <h3>${escape(row.title)}</h3><span class="request-sub">${escape(row.artist || "Artist not specified")} ${escape(row.version || "")}</span>
-        <label for="lookup-${escape(row.key)}">Search text (select and copy)</label>
-        <input id="lookup-${escape(row.key)}" readonly value="${escape(row.query)}">
-        <div class="seed-actions">${row.providers.map(provider => `<a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${escape(provider.name)} <span class="request-sub">${escape(provider.kind)}</span></a>`).join("")}</div>
-        <p class="muted">Still unresolved. A provider listing is not a playable library file.</p>
-      </article>`).join("") || '<p class="empty">No missing-song lookups waiting.</p>';
+      $("#acquisition-queue").innerHTML = acquisitionRows(view.acquisition_queue);
+      $("#acquisition-intake").hidden = !view.acquisition_queue.length;
+      const selectedRequest = $("#acquisition-request").value;
+      $("#acquisition-request").replaceChildren(...view.acquisition_queue.map(row => {
+        const option = root.document.createElement("option");
+        option.value = row.key;
+        option.textContent = `${row.title} / ${row.artist || "Artist not specified"} / ${row.version || "Version as requested"}`;
+        return option;
+      }));
+      if (view.acquisition_queue.some(row => row.key === selectedRequest)) $("#acquisition-request").value = selectedRequest;
+      if (acquisitionPreview && acquisitionPreview.base_revision !== view.revision) invalidateAcquisition();
     } else {
       const guests = view.requests.filter(row => row.category === "guest_request");
       $("#live-requests").innerHTML = reviewRows(guests, view.recommendations);
@@ -203,6 +232,7 @@
         $("#save-prep").disabled = blockedPrep(client.views.prep);
         $("#export-prep").disabled = !client.views.prep.saved;
         $("#seed-add").disabled = !client.views.prep.recommendations.length;
+        $("#acquisition-sample").disabled = !client.views.prep.acquisition_queue.length;
       }
       root.document.querySelectorAll("[data-unavailable]").forEach(button => {button.disabled = true;});
       if (client.pending) {
@@ -218,6 +248,9 @@
         $("#seed-memberships").focus();
       }
       else if (returnFocus?.dataset.action === "seed_add") $("#eligible-search").focus();
+      else if (returnFocus?.id === "acquisition-accept" || returnFocus?.dataset.action === "acquisition_progress") {
+        $("#prep-decisions").focus();
+      }
       else if (actedOnReview) {
         const panel = $(returnFocus?.dataset.entryId ? "#seed-memberships" : mode === "prep" ? "#prep-review" : "#live-requests");
         (panel.querySelector("button") || panel).focus();
@@ -255,8 +288,10 @@
   $("#export-prep").addEventListener("click", () => run(() => client.command("prep", {action:"export"})));
   $("#retry-pending").addEventListener("click", () => run(async () => {
     const guest = client.pending?.action === "guest";
+    const acquisition = client.pending?.action === "acquisition_accept";
     const view = await client.retry();
     if (guest) guestAccepted();
+    if (acquisition) acquisitionAccepted();
     return view;
   }));
   $("#reconcile").addEventListener("click", () => {
@@ -324,11 +359,61 @@
   }));
   $("#seed-add").addEventListener("click", () => run(() => client.command("prep",
     {action:"seed_add", file_id:$("#seed-add-file").value})));
+  async function previewAcquisition(track, generation) {
+    const body = {key:$("#acquisition-request").value, track, base_revision:client.views.prep.revision};
+    const preview = await client.request("/api/acquisition/preview", {
+      method:"POST", headers:{"Content-Type":"application/json", "X-Setlist-Token":client.token},
+      body:JSON.stringify(body),
+    });
+    if (generation !== acquisitionGeneration) throw new Error("Selected metadata changed. Preview it again.");
+    acquisitionPreview = {...body, preview_id:preview.id};
+    $("#acquisition-preview-note").textContent = `${preview.status.replaceAll("_", " ")}. ${preview.note} ${preview.selected_file_id ? "Selected file: " + preview.selected_file_id + "." : "Nothing fulfilled."} ${preview.note_scope}`;
+    $("#acquisition-preview-track").textContent = JSON.stringify(preview.track, null, 2);
+    $("#acquisition-preview-changes").innerHTML = preview.changes.map(change =>
+      `<li>${escape(change.title)}: ${escape(change.before.replaceAll("_", " "))} &rarr; ${escape(change.after.replaceAll("_", " "))}${change.selected_file_id ? ` / ${escape(change.selected_file_id)}` : ""}</li>`
+    ).join("") || "<li>No request resolution changed.</li>";
+    $("#acquisition-preview").hidden = false;
+    $("#acquisition-preview").focus();
+    return client.views.prep;
+  }
+  $("#acquisition-form").addEventListener("input", invalidateAcquisition);
+  $("#acquisition-form").addEventListener("change", invalidateAcquisition);
+  $("#acquisition-form").addEventListener("submit", event => {
+    event.preventDefault();
+    if (busy) return;
+    invalidateAcquisition();
+    const generation = acquisitionGeneration;
+    run(async () => {
+      const file = $("#acquisition-file").files[0];
+      if (!file || !file.size || file.size > 8192) throw new Error("Select a nonempty synthetic JSON file no larger than 8 KiB.");
+      return previewAcquisition(JSON.parse(await file.text()), generation);
+    });
+  });
+  $("#acquisition-sample").addEventListener("click", () => {
+    if (busy) return;
+    invalidateAcquisition();
+    const generation = acquisitionGeneration;
+    run(() => {
+      const row = client.views.prep.acquisition_queue.find(row => row.key === $("#acquisition-request").value);
+      if (!row) throw new Error("Choose a pending acquisition request.");
+      return previewAcquisition({id:`acquired-${row.key}`, title:row.title,
+        artist:row.artist || "Synthetic Artist", version:row.version || "",
+        path:`/Demo/Acquired/${row.key}.mp3`}, generation);
+    });
+  });
+  $("#acquisition-accept").addEventListener("click", () => run(async () => {
+    if (!acquisitionPreview) throw new Error("Preview the selected metadata first.");
+    const {base_revision, ...fields} = acquisitionPreview;
+    if (base_revision !== client.views.prep.revision) throw new Error("Session changed. Preview again.");
+    const view = await client.command("prep", {action:"acquisition_accept", ...fields});
+    acquisitionAccepted();
+    return view;
+  }));
   root.document.addEventListener("click", event => {
     const button = event.target.closest("[data-action]");
     if (button) run(() => client.command(mode, {action:button.dataset.action,
       key:button.dataset.key, file_id:button.dataset.fileId,
-      entry_id:button.dataset.entryId, direction:button.dataset.direction}));
+      entry_id:button.dataset.entryId, direction:button.dataset.direction, progress:button.dataset.progress}));
   });
   switchMode("prep");
 })(typeof globalThis !== "undefined" ? globalThis : this);

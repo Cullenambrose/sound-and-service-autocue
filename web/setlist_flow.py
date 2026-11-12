@@ -12,10 +12,11 @@ from library.matcher import extract_version_tags
 from setlist import PreparedLibrary, context_from_event, rank_next_song, rank_prep_crate, song_identity
 
 if __package__:
-    from . import serato_import, record_pools
+    from . import serato_import, record_pools, acquisition
 else:
     import serato_import
     import record_pools
+    import acquisition
 
 FIXTURES = Path(__file__).resolve().parents[1] / "engine/setlist/fixtures"
 
@@ -71,6 +72,7 @@ class SetlistFlow:
         self.library = copy.deepcopy(library if library is not None else json.loads(
             (FIXTURES / "mock-library.json").read_text())["tracks"])
         self.prepared_library = PreparedLibrary(self.library)
+        self._added_snapshot = None
         self._typed_diagnostics = {}
         self.lock = threading.RLock()
         self.state = {
@@ -78,15 +80,29 @@ class SetlistFlow:
             "guests": copy.deepcopy(self.event.get("_demo_live_inputs", {}).get("guest_requests", [])),
             "saved": None, "exported": None, "receipts": {},
             "serato_source": None,
+            "acquisition_progress": {}, "library_additions": [],
         }
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text())
             self.state.setdefault("serato_source", None)
+            self.state.setdefault("acquisition_progress", {})
+            self.state.setdefault("library_additions", [])
             if set(self.state) != {
                 "revision", "prep_decisions", "live_decisions", "played", "guests",
                 "saved", "exported", "receipts", "serato_source",
+                "acquisition_progress", "library_additions",
             }:
                 raise ValueError("Unsupported synthetic session; use a new 05- output directory.")
+
+    def _library_snapshot(self, state):
+        additions = state["library_additions"]
+        if not additions:
+            return self.library, self.prepared_library
+        key = canonical(additions)
+        if self._added_snapshot is None or self._added_snapshot[0] != key:
+            tracks = self.library + copy.deepcopy(additions)
+            self._added_snapshot = (key, tracks, PreparedLibrary(tracks))
+        return self._added_snapshot[1:]
 
     def _write(self, path, data):
         descriptor, temporary = tempfile.mkstemp(prefix=f"{self.output_prefix}-write-", dir=self.directory)
@@ -113,7 +129,8 @@ class SetlistFlow:
             for request in getattr(context, field):
                 decision = decisions.get(request_key(category, request))
                 if decision and decision["action"] == "confirm":
-                    track = next((track for track in self.library if track["id"] == decision["file_id"]), None)
+                    track = next((track for track in self._library_snapshot(state)[0]
+                                  if track["id"] == decision["file_id"]), None)
                     if track is None:
                         raise FlowConflict("Confirmed synthetic file is no longer available.")
                     request = replace(
@@ -128,12 +145,13 @@ class SetlistFlow:
     def _rank(self, mode, state):
         context = self._context(mode, state)
         ranker = rank_prep_crate if mode == "prep" else rank_next_song
-        return ranker(context, self.prepared_library, limit=len(self.library))
+        tracks, prepared = self._library_snapshot(state)
+        return ranker(context, prepared, limit=len(tracks))
 
     def _view(self, mode, state):
         result = self._rank(mode, state)
         # Original diagnostics preserve exactly what was typed after a confirmation.
-        event_key = canonical(self.event)
+        event_key = canonical(self.event) + canonical(state["library_additions"])
         guest_keys = tuple(canonical(guest) for guest in state["guests"]) if mode == "live" else ()
         cached = self._typed_diagnostics.get(mode)
         if cached is not None and cached[:2] == (event_key, guest_keys):
@@ -203,6 +221,9 @@ class SetlistFlow:
         source = state["serato_source"] if mode == "prep" else None
         seed_rows, crate_entries = self._seed(source, recommendations)
         saved_current = bool(saved and saved["decisions"] == state["prep_decisions"]
+                             and saved.get("library_revision") == (
+                                 digest(canonical(state["library_additions"]).encode())
+                                 if state["library_additions"] else None)
                              and saved.get("seed_revision") == (
                                  digest(canonical(state["serato_source"]).encode())
                                  if state["serato_source"] else None))
@@ -212,7 +233,7 @@ class SetlistFlow:
             "phase": result.phase, "requests": rows,
             "needs_review": [row for row in rows if row["needs_review"]],
             "recommendations": recommendations,
-            "acquisition_queue": record_pools.acquisition_rows(rows) if mode == "prep" else [],
+            "acquisition_queue": record_pools.acquisition_rows(rows, state["acquisition_progress"]) if mode == "prep" else [],
             "serato_source": source, "seed_rows": seed_rows, "crate_entries": crate_entries,
             "saved": saved, "saved_current": saved_current, "verification": verification,
             "prep_done": bool(
@@ -255,6 +276,41 @@ class SetlistFlow:
         with self.lock:
             return self._view(mode, self.state)
 
+    def acquisition_preview(self, body):
+        if not isinstance(body, dict) or set(body) != {"key", "track", "base_revision"}:
+            raise ValueError("A reconciliation preview needs key, track and base_revision.")
+        with self.lock:
+            if type(body["base_revision"]) is not int or body["base_revision"] != self.state["revision"]:
+                raise FlowConflict("Session changed. Reload before previewing the file.")
+            before = self._view("prep", self.state)
+            row = next((row for row in before["acquisition_queue"] if row["key"] == body["key"]), None)
+            if row is None:
+                raise FlowConflict("This acquisition request is no longer pending.")
+            track = acquisition.synthetic_track(body["track"])
+            tracks = self._library_snapshot(self.state)[0]
+            if len(self.state["library_additions"]) >= 100:
+                raise ValueError("This synthetic session supports at most 100 acquired metadata records.")
+            if any(item["id"] == track["id"] or item.get("path") == track["path"] for item in tracks):
+                raise FlowConflict("That file ID or path is already in the loaded synthetic library.")
+            draft = copy.deepcopy(self.state)
+            draft["library_additions"].append(track)
+            after = self._view("prep", draft)
+            resolved = next(item for item in after["requests"] if item["key"] == body["key"])
+            changes = [
+                {"title": current["request"]["title"], "before": previous["status"],
+                 "after": current["status"], "selected_file_id": current["selected_file_id"]}
+                for previous, current in zip(before["requests"], after["requests"])
+                if (previous["status"], previous["selected_file_id"], previous["candidates"])
+                != (current["status"], current["selected_file_id"], current["candidates"])
+            ]
+            return {"id": digest(canonical(body).encode()), "track": track,
+                    "status": resolved["status"], "note": resolved["note"],
+                    "fulfilled": resolved["fulfilled"], "candidates": resolved["candidates"],
+                    "selected_file_id": resolved["selected_file_id"],
+                    "recommendation_count": len(after["recommendations"]),
+                    "changes": changes,
+                    "note_scope": "Synthetic metadata only; no audio file was inspected. Saved Prep stays unchanged."}
+
     def verify(self, state=None):
         state = self.state if state is None else state
         if not state["saved"] or not self.saved_path.exists() or not self.export_path.exists():
@@ -293,16 +349,34 @@ class SetlistFlow:
                 "serato_import": {"upload", "preview_id"},
                 "seed_remove": {"entry_id"}, "seed_move": {"entry_id", "direction"},
                 "seed_add": {"file_id"},
+                "acquisition_progress": {"key", "progress"},
+                "acquisition_accept": {"key", "track", "preview_id"},
             }
             if action not in fields or set(body) - (
                 {"request_id", "base_revision", "mode", "action"} | fields[action]
             ):
                 raise ValueError("Unknown workflow action or fields.")
             if ((action in {"guest", "played"} and mode != "live")
-                    or (action in {"save", "export", "serato_import", "seed_remove", "seed_move", "seed_add"} and mode != "prep")):
+                    or (action in {"save", "export", "serato_import", "seed_remove", "seed_move", "seed_add",
+                                   "acquisition_progress", "acquisition_accept"} and mode != "prep")):
                 raise ValueError("Guest/played actions are Live-only; save/export actions are Prep-only.")
-            if action == "serato_import":
-                source = serato_import.preview(body.get("upload"), self.library)
+            if action == "acquisition_progress":
+                queue = self._view("prep", state)["acquisition_queue"]
+                if not any(row["key"] == body.get("key") for row in queue):
+                    raise FlowConflict("This acquisition request is no longer pending.")
+                if not isinstance(body.get("progress"), str) or body["progress"] not in acquisition.PROGRESS:
+                    raise ValueError("Choose not_started, searching or acquired acquisition progress.")
+                state["acquisition_progress"][body["key"]] = body["progress"]
+            elif action == "acquisition_accept":
+                preview = self.acquisition_preview({
+                    "key": body.get("key"), "track": body.get("track"),
+                    "base_revision": body["base_revision"],
+                })
+                if preview["id"] != body.get("preview_id"):
+                    raise FlowConflict("Reconciliation preview changed; preview the file again.")
+                state["library_additions"].append(preview["track"])
+            elif action == "serato_import":
+                source = serato_import.preview(body.get("upload"), self._library_snapshot(state)[0])
                 if source["id"] != body.get("preview_id"):
                     raise FlowConflict("Serato preview changed; preview the selected snapshots again.")
                 source["order"] = [entry["id"] for entry in source["entries"]]
@@ -367,7 +441,8 @@ class SetlistFlow:
                     "metadata": {"first_name": first_name.strip(), "email": email.strip()},
                 })
             elif action == "played":
-                track = next((track for track in self.library if track["id"] == body.get("file_id")), None)
+                track = next((track for track in self._library_snapshot(state)[0]
+                              if track["id"] == body.get("file_id")), None)
                 if track is None:
                     raise ValueError("Choose a synthetic library file.")
                 state["played"].append({"title": track["title"], "artist": track.get("artist")})
@@ -379,6 +454,8 @@ class SetlistFlow:
                     raise FlowConflict("Remove unavailable or blocked imported entries before saving.")
                 state["saved"] = {"entries": prep["crate_entries"],
                                   "decisions": copy.deepcopy(state["prep_decisions"])}
+                if state["library_additions"]:
+                    state["saved"]["library_revision"] = digest(canonical(state["library_additions"]).encode())
                 if state["serato_source"]:
                     state["saved"]["seed_revision"] = digest(canonical(state["serato_source"]).encode())
                     state["saved"]["source"] = state["serato_source"]["source"]

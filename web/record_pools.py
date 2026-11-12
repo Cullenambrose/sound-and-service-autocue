@@ -18,11 +18,13 @@ PROVIDERS = (
 )
 
 
-def acquisition_rows(requests):
+def acquisition_rows(requests, progress=None):
+    progress = progress or {}
     return [{
         "key": row["key"], "title": row["request"]["title"],
         "artist": row["request"].get("artist"), "version": row["request"].get("version"),
         "status": row["status"],
+        "progress": progress.get(row["key"], "not_started"),
         "query": " ".join(str(value) for value in (
             row["request"].get("artist"), row["request"]["title"], row["request"].get("version")) if value),
         "providers": PROVIDERS,

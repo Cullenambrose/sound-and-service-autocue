@@ -60,7 +60,8 @@ def demo_server(flow, port=0):
                 if path in {"/api/prep", "/api/live"}:
                     return self.send(200, flow.view(path.rsplit("/", 1)[1]))
                 if path == "/api/serato/demo":
-                    return self.send(200, serato_import.demo_upload(flow.library))
+                    with flow.lock:
+                        return self.send(200, serato_import.demo_upload(flow._library_snapshot(flow.state)[0]))
                 if path == "/api/serato/catalog":
                     with flow.lock:
                         source = flow.state["serato_source"]
@@ -84,14 +85,17 @@ def demo_server(flow, port=0):
                     or self.headers.get("X-Setlist-Token") != token):
                 return self.send(403, {"error": "Reload the local demo to establish a session."})
             try:
-                if self.path not in {"/api/command", "/api/serato/preview"}:
+                if self.path not in {"/api/command", "/api/serato/preview", "/api/acquisition/preview"}:
                     return self.send(404, {"error": "Unknown synthetic demo route."})
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 1500000:
                     raise ValueError("JSON commands must be between 1 and 1500000 bytes.")
                 body = json.loads(self.rfile.read(length))
                 if self.path == "/api/serato/preview":
-                    return self.send(200, serato_import.preview(body, flow.library))
+                    with flow.lock:
+                        return self.send(200, serato_import.preview(body, flow._library_snapshot(flow.state)[0]))
+                if self.path == "/api/acquisition/preview":
+                    return self.send(200, flow.acquisition_preview(body))
                 if length > 8192 and not (isinstance(body, dict) and body.get("action") == "serato_import"):
                     raise ValueError("Non-upload JSON commands must be at most 8192 bytes.")
                 return self.send(200, flow.command(body))

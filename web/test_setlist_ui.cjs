@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, seedRows, eligibleRows, prepProgress, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -190,4 +190,18 @@ test("Prep workspace has real source set and decision jump destinations and keep
   assert.match(html, /id="eligible-search"[^>]*aria-controls="eligible-tracks"/);
   assert.match(html, /<details id="seed-workspace"/);
   assert.ok(html.indexOf('id="prep-tracks"') < html.indexOf('id="seed-memberships"'));
+});
+
+test("acquisition progress stays explicitly separate from playable fulfillment", () => {
+  const rows = [{key:"missing", title:"Missing <Demo>", artist:"Artist", version:"Radio Edit",
+    query:"Artist Missing", progress:"acquired", providers:[]}];
+  const before = JSON.stringify(rows);
+  const html = acquisitionRows(rows);
+  assert.match(html, /Missing &lt;Demo&gt;/);
+  assert.match(html, /Acquired externally; not verified/);
+  assert.match(html, /data-progress="acquired"\s+aria-pressed="true"/);
+  assert.match(html, /Still unresolved/);
+  assert.doesNotMatch(html, /data-action="confirm"|class="badge success"/);
+  assert.equal(JSON.stringify(rows), before);
+  assert.match(acquisitionRows([]), /No missing-song lookups/);
 });

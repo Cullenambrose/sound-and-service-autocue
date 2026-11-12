@@ -78,6 +78,30 @@ not files to read or create. Do not use this demo with customer or music data.
   `06-prep-export.m3u8`; explicitly selecting an old `05-*` output directory
   preserves its existing filenames. No Serato crate or music file is written.
 
+## Synthetic acquisition reconciliation
+
+Missing-song rows retain separate, durable progress: **Not started**,
+**Searching**, or **Acquired externally; not verified**. These states never
+fulfill a request, add a badge, or change ranking.
+
+**Reconcile synthetic acquired metadata** previews one explicitly selected JSON
+object with `id`, `title`, `artist`, `path` under `/Demo/`, and optional `version`.
+The invented-sample button provides a metadata-only walkthrough. No audio path
+is opened, scanned, created or validated as a real playable file. This is not
+an authorized real-library acquisition adapter.
+
+Preview reruns the shared engine against a draft snapshot without persistence.
+Acceptance is explicit, revision-bound and retry-safe; it adds metadata to the
+demo session and rebuilds the prepared library. Wrong versions and ambiguous
+titles remain unfulfilled until their normal review decision. Do-not-play and
+Live played exclusions still apply. Provider progress is never used as evidence
+of a local match. Existing sessions migrate with empty acquisition state.
+
+Saved Prep JSON and exports stay byte-identical across preview/acceptance and
+Live requests. Accepted metadata makes the working snapshot stale relative to
+the saved crate; save/export again to publish the new set. Old export downloads
+continue to represent the old saved snapshot exactly.
+
 ## Validation
 
 ```bash
@@ -106,9 +130,9 @@ change the inclusive 0.6 setlist or separate 0.7 crate confidence cutoffs.
 The workflow builds a caller-owned `PreparedLibrary` snapshot once per load;
 rebuild that snapshot when library metadata changes. Plain iterable callers
 retain their original uncached behavior. Original typed diagnostics are cached
-per mode until event/guest requests change, rather than reranking for each
-confirmation. Recommendation serialization copies the known result fields
-without recursively converting entire track dictionaries. Both screens are
+per mode until event/guest requests or accepted library metadata change, rather
+than reranking for each confirmation. Recommendation serialization copies the
+known result fields without recursively converting entire track dictionaries. Both screens are
 warmed before the CLI server starts accepting requests. Guest submission still
 performs exactly one durable session write; retry receipts prevent duplicate
 writes. No matching, scoring, tie-breaking or exclusion rules change.
