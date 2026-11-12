@@ -92,6 +92,16 @@
           aria-label="${escape(added ? `Added to set: ${item.track.title}` : `Add to set: ${item.track.title}, ${item.version_label}`)}">${added ? "Added to set" : "Add to set"}</button></article>`;
     }).join("") || '<p class="empty">No eligible tracks contain that text. This filter does not resolve requests or search record pools.</p>'};
   }
+  function providerRows(providers, query = "") {
+    const filter = query.trim().toLocaleLowerCase();
+    const visible = providers.filter(provider => provider.name.toLocaleLowerCase().includes(filter));
+    return {count:visible.length, html:visible.map(provider => {
+      const search = provider.link_mode === "search" || provider.link_mode === "search_login";
+      const label = provider.link_mode === "search_login" ? "Search link / sign-in required"
+        : search ? "Direct search" : "Copy text, then search";
+      return `<div><a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${search ? "Search" : "Open"} ${escape(provider.name)} <span class="request-sub">${escape(provider.kind)} / ${label}</span></a><p class="muted">${escape(provider.note)}</p>${search ? `<a href="${escape(provider.homepage_url)}" target="_blank" rel="noopener noreferrer">Open ${escape(provider.name)} homepage instead</a>` : ""}</div>`;
+    }).join("") || '<p class="empty">No providers contain that name.</p>'};
+  }
   function acquisitionRows(rows) {
     const labels = {not_started:"Not started", searching:"Searching", acquired:"Acquired externally; not verified"};
     return rows.map(row => `<article class="review-row">
@@ -101,7 +111,11 @@
       <label for="lookup-${escape(row.key)}">Search text (select and copy)</label>
       <input id="lookup-${escape(row.key)}" readonly value="${escape(row.query)}">
       <button class="secondary" data-copy-query="${escape(row.key)}">Copy search text</button>
-      <details><summary>Choose a provider (${row.providers.length})</summary><div class="provider-destinations">${row.providers.map(provider => `<div><a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${provider.link_mode === "search" ? "Search" : "Open"} ${escape(provider.name)} <span class="request-sub">${escape(provider.kind)} / ${provider.link_mode === "search" ? "Direct search" : "Copy text, then search"}</span></a><p class="muted">${escape(provider.note)}</p>${provider.link_mode === "search" ? `<a href="${escape(provider.homepage_url)}" target="_blank" rel="noopener noreferrer">Open ${escape(provider.name)} homepage instead</a>` : ""}</div>`).join("")}</div></details>
+      <details><summary>Choose a provider (${row.providers.length})</summary>
+      <label for="provider-filter-${escape(row.key)}">Filter providers by name</label>
+      <input id="provider-filter-${escape(row.key)}" type="search" data-provider-filter="${escape(row.key)}" aria-controls="provider-links-${escape(row.key)}" maxlength="100">
+      <p class="muted" role="status" data-provider-count="${escape(row.key)}">${row.providers.length} providers. Search links and copy/open fallbacks are labeled below.</p>
+      <div id="provider-links-${escape(row.key)}" class="provider-destinations">${providerRows(row.providers).html}</div></details>
       <p class="muted">Only a link click sends the search text to that provider. No account connection or availability check. Verify the exact version there.</p>
       <div class="seed-actions">${Object.entries(labels).map(([progress, label]) => `<button class="secondary"
         data-action="acquisition_progress" data-key="${escape(row.key)}" data-progress="${progress}"
@@ -150,7 +164,7 @@
       return result;
     }
   }
-  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, copySearchText, planningRows, prepProgress, FlowClient};
+  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, providerRows, acquisitionRows, copySearchText, planningRows, prepProgress, FlowClient};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   if (!root.document) return;
   const $ = selector => root.document.querySelector(selector);
@@ -532,6 +546,16 @@
     acquisitionAccepted();
     return view;
   }));
+  root.document.addEventListener("input", event => {
+    const filter = event.target.closest("[data-provider-filter]");
+    if (!filter) return;
+    const row = client.views.prep?.acquisition_queue.find(row => row.key === filter.dataset.providerFilter);
+    if (!row) return;
+    const result = providerRows(row.providers, filter.value);
+    root.document.getElementById("provider-links-" + row.key).innerHTML = result.html;
+    filter.parentElement.querySelector("[data-provider-count]").textContent =
+      `${result.count} of ${row.providers.length} providers. Filtering does not search their catalogs.`;
+  });
   root.document.addEventListener("click", event => {
     const copy = event.target.closest("[data-copy-query]");
     if (copy) {

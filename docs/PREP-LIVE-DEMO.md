@@ -189,7 +189,7 @@ The source hashes and original catalog snapshot remain in the session. Download
 the catalog JSON to reuse the existing catalog/personal-set import contract;
 this demo does not initialize a second catalog database.
 
-**Find missing songs** provides manual lookup text and six provider destinations
+**Find missing songs** provides manual lookup text and provider destinations
 from [Crate Hackers' public page](https://www.cratehackers.com/): Direct Music
 Service, Late Night Record Pool, BPM Supreme, Beatport, Beatsource and DJcity.
 Crate Hackers advertises connected downloads for the first two and search for the
@@ -199,15 +199,17 @@ Store/streaming destinations are distinguished from record pools. Public API
 authorization has not been established; no endpoints or logged-in scraping are
 assumed. Explicit DJcity and Beatport links now include the URL-encoded query,
 using search URLs reproduced through their normal public browser forms.
+Heavy Hits and XMiX additionally use search URLs observed through their normal
+forms, explicitly labeled sign-in required (results after login unverified).
 Other destinations remain clearly labeled copy-text/open-site fallbacks.
 Opening Prep makes no provider requests; only clicking a search link sends
 the song query to that provider. No event/guest details or local paths are sent.
 The app connects no accounts and performs no purchases or downloads. Provider listings
 never fulfill requests or become playable files.
 
-The supplied reference UI additionally shows 23 selectable record pools. Those
-names are a research backlog, not verified integrations here; the six manual
-destinations above are not a full feature-parity claim.
+The full 23-pool reference inventory plus the two Beatport destinations now has
+25 verified outbound destinations with provider-name filtering. These are
+browser actions, not 25 connected searches/downloads or a full parity claim.
 
 See [browser search compatibility](PROVIDER-SEARCH-LINKS.md) for per-provider
 evidence and fallback boundaries. Connected APIs are not required for browser

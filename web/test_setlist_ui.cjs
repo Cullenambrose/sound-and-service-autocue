@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, copySearchText, planningRows, prepProgress, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, seedRows, eligibleRows, providerRows, acquisitionRows, copySearchText, planningRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -236,6 +236,29 @@ test("copying search text is explicit and clipboard failures propagate", async (
   await assert.rejects(copySearchText("Synthetic",undefined),/Select and copy/);
   await assert.rejects(copySearchText("Synthetic",{writeText:async()=>{throw new Error("Permission denied");}}),
     /Permission denied/);
+});
+
+test("provider name filter is display-only and distinguishes login-gated searches", () => {
+  const providers = [
+    {name:"Heavy Hits",kind:"Record pool",link_mode:"search_login",url:"https://heavyhits.com/search/?q=Demo",
+      homepage_url:"https://heavyhits.com/",note:"Results after login unverified"},
+    {name:"Country DJ Pool",kind:"Record pool",link_mode:"homepage",url:"https://www.countrydjpool.com/",
+      note:"Copy text and search"},
+  ];
+  const before = JSON.stringify(providers);
+  const filtered = providerRows(providers," HEAVY ");
+  assert.equal(filtered.count,1);
+  assert.match(filtered.html,/Search Heavy Hits/);
+  assert.match(filtered.html,/Search link \/ sign-in required/);
+  assert.match(filtered.html,/Results after login unverified/);
+  assert.doesNotMatch(filtered.html,/Country DJ Pool|Direct search/);
+  assert.equal(providerRows(providers,"").count,2);
+  assert.match(providerRows(providers,"missing").html,/No providers contain/);
+  assert.equal(JSON.stringify(providers),before);
+  const html = acquisitionRows([{key:"test",title:"Synthetic",progress:"not_started",query:"Synthetic",providers}]);
+  assert.match(html,/data-provider-filter="test"/);
+  assert.match(html,/aria-controls="provider-links-test"/);
+  assert.match(html,/2 providers/);
 });
 
 test("imported recovery shows original and replacement paths and explicit reconnect", () => {

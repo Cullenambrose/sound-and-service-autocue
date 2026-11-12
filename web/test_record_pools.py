@@ -33,11 +33,53 @@ def test_search_links_round_trip_the_exact_query_without_parameter_injection(tit
 def test_unverified_destinations_remain_homepage_fallbacks_not_invented_searches():
     links = record_pools.provider_links("Demo Artist Paper Moons Radio Edit")
     fallbacks = [provider for provider in links if provider["link_mode"] == "homepage"]
-    assert len(links) == 6 and len(fallbacks) == 4
+    assert len(links) == 25 and len(fallbacks) == 21
     for provider in fallbacks:
         original = next(item for item in record_pools.PROVIDERS if item["name"] == provider["name"])
         assert provider["url"] == original["url"]
         assert "search" in provider["note"].lower()
+
+
+@pytest.mark.parametrize("title", ["Paper Moons", "Démo & Mix? #1/+ %26"])
+def test_observed_login_searches_preserve_queries_without_claiming_results(title):
+    links = record_pools.provider_links(title)
+    gated = {provider["name"]: provider for provider in links if provider["link_mode"] == "search_login"}
+    assert set(gated) == {"Heavy Hits", "XMiX"}
+    for name, parameter in (("Heavy Hits", "q"), ("XMiX", "searchtext")):
+        assert parse_qs(urlsplit(gated[name]["url"]).query) == {parameter: [title]}
+        assert "unverified" in gated[name]["note"]
+        assert "login" in gated[name]["note"]
+
+
+def test_every_reference_pool_has_one_verified_destination_and_explicit_capability():
+    expected = {"Barbangerz", "BPM Supreme", "Club Killers", "Country DJ Pool", "Crate Gang",
+                "DJcity", "Digital DJ Pool", "Digital Music Pool", "Direct Music Service",
+                "Doing The Damage", "Headliner Music Club", "Heavy Hits", "iDJPool",
+                "Late Night Record Pool", "Latino Music Pool", "MP3 For DJs", "MyMP3Pool",
+                "Radio DJ Pool", "Urban DJ Pool", "XMiX", "XtendaMix", "ZIPDJ", "Live DJ Service"}
+    links = record_pools.provider_links("Synthetic")
+    pools = [provider for provider in links if provider["kind"] != "Store / streaming"]
+    assert len(pools) == 23 and {provider["name"] for provider in pools} == expected
+    assert len({provider["name"] for provider in links}) == 25
+    for provider in links:
+        assert provider["link_mode"] in {"search", "search_login", "homepage"}
+        for field in ("url", "homepage_url"):
+            parsed = urlsplit(provider[field])
+            assert parsed.scheme == "https" and parsed.hostname
+            assert parsed.username is None and parsed.password is None
+        assert provider["note"]
+
+
+def test_corrected_destinations_and_provider_failures_are_explicit():
+    links = {provider["name"]: provider for provider in record_pools.provider_links("Synthetic")}
+    assert links["MyMP3Pool"]["homepage_url"] == "https://mp3poolonline.com/"
+    assert links["Club Killers"]["homepage_url"] == "https://djtools.clubkillers.com/sign-in"
+    assert links["XMiX"]["homepage_url"] == "https://www.xmixdigital.com/"
+    assert links["Latino Music Pool"]["link_mode"] == "homepage"
+    assert "HTTP 500" in links["Latino Music Pool"]["note"]
+    assert "disabled" in links["XtendaMix"]["note"]
+    assert "US" in links["Radio DJ Pool"]["note"]
+    assert "US" in links["MP3 For DJs"]["note"]
 
 
 def test_link_queries_contain_song_fields_only_and_do_not_mutate_progress():

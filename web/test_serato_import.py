@@ -261,7 +261,7 @@ def test_missing_lookup_does_not_change_fulfillment_or_playable_files(tmp_path, 
     view = flow.view("prep")
     assert {row["status"] for row in view["acquisition_queue"]} == {"missing", "version_unavailable"}
     for row in view["acquisition_queue"]:
-        assert len(row["providers"]) == 6 and row["query"]
+        assert len(row["providers"]) == 25 and row["query"]
         request = next(request for request in view["requests"] if request["key"] == row["key"])
         assert not request["fulfilled"] and request["selected_file_id"] is None
     assert "c" not in [item["track"]["id"] for item in view["recommendations"]]

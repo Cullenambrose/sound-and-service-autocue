@@ -95,14 +95,13 @@ or a subscription's permission to automate access.
 | [Beatport](https://www.beatport.com/) | Public search form and direct URL replay verified | Browser search link |
 | [Beatport Open Format](https://www.beatport.com/open-format) | Public open-format catalog | Manual homepage only |
 
-The supplied reference screen lists 23 pools. The remaining named destinations
-are a research inventory, **not enabled integrations or verified URLs**:
-Barbangerz, Club Killers, Country DJ Pool, Crate Gang, Digital DJ Pool,
-Digital Music Pool, Doing The Damage, Headliner Music Club, Heavy Hits, iDJPool,
-Latino Music Pool, MP3 For DJs, MyMP3Pool, Radio DJ Pool, Urban DJ Pool, XMiX,
-XtendaMix, ZIPDJ and Live DJ Service. Together with BPM Supreme, DJcity, DMS and
-Late Night this accounts for the 23 reference entries. Beatport destinations are
-additional store/streaming destinations, not pools.
+All 23 reference pools now have verified public destinations in the missing-song
+queue. Together with two Beatport destinations this gives 25 provider actions.
+DJcity/Beatport have public browser search links. Heavy Hits/XMiX have observed
+search links labeled sign-in required; post-login results remain unverified.
+The other 21 actions explicitly provide copy/open fallbacks, not connected
+search. See the [complete evidence matrix](PROVIDER-SEARCH-LINKS.md), including
+Latino Music Pool's HTTP 500 search and eligibility restrictions.
 
 No undocumented endpoints, fabricated provider search URLs, authenticated
 scraping, subscriptions, purchases or direct downloads are implemented.
@@ -124,7 +123,7 @@ has not been verified. No credentials were collected.
 
 | Gate | Required evidence before enablement |
 |---|---|
-| Connected providers / remaining pool verification | Official current destination and documented permitted access, authorized test account, terms, scopes, rate limits and download rights |
+| Connected providers / logged-in search verification | Authorized test access and official search behavior; APIs/downloads additionally require permitted access, terms, scopes, rate limits and rights |
 | Spotify/SMPL/DJEP | Approved use case, documented authorized schema/API, consent, attribution, disconnect/deletion and secure credential handling |
 | Licensed curated crates / charts | Permission/license to use metadata and collections; source provenance and refresh contract |
 | Real Serato/library compatibility | Separately authorized selected read-only files and disposable DJ-software compatibility validation |
