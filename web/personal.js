@@ -1,5 +1,5 @@
 (() => {
-  let outbox, selected = "", current = null, busy = false, exportPreview = null, exportsOffset = 0;
+  let outbox, selected = "", current = null, busy = false, exportPreview = null, exportsOffset = 0, syntheticPrep = false;
   async function refreshExports(offset = 0) {
     $("#personal-exports").innerHTML = "";
     $("#personal-exports-previous").disabled = true;
@@ -68,6 +68,9 @@
       `<option value="${escapeHtml(crate.id)}" ${crate.id === selected ? "selected" : ""}>${escapeHtml(crate.name)} · ${crate.entries} entries · r${crate.revision}</option>`
     ).join("") || '<option value="">No personal crates</option>';
     current = selected ? await api("/api/catalog/personal/detail?crate_id=" + encodeURIComponent(selected)) : null;
+    $("#personal-open-prep").hidden = !current || !syntheticPrep;
+    $("#personal-open-prep").href = current
+      ? "/setlist/?" + new URLSearchParams({personal:current.id, revision:String(current.revision)}) : "/setlist/";
     $("#personal-title").textContent = current ? `${current.name} · revision ${current.revision}` : "Choose or create a personal crate";
     $("#personal-name").value = current?.name || "";
     $("#personal-entries").innerHTML = current?.entries.map((entry, index) =>
@@ -124,6 +127,17 @@
     await save(current.id, current.revision, name, refs(current.entries));
   });
   bind("#personal-refresh", refresh);
+  bind("#personal-prep", async () => {
+    requireCurrent();
+    const snapshot = await api("/api/catalog/personal/prep?crate_id=" + encodeURIComponent(current.id));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(snapshot, null, 2)], {type:"application/json"}));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "06-personal-prep.json";
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    status(`Synthetic handoff downloaded. In Prep portable import choose catalog JSON and crate ID ${current.id}.`);
+  });
   bind("#personal-export-preview", async () => {
     requireCurrent();
     clearExport();
@@ -191,7 +205,8 @@
     await refresh();
   });
   action(async () => {
-    await api("/api/session");
+    const session = await api("/api/session");
+    syntheticPrep = session.synthetic_prep === true;
     outbox = new PersonalOutbox(localStorage, datasetId);
     await refresh();
     await refreshExports();

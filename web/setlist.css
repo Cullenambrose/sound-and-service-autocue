@@ -111,6 +111,13 @@ a { color: var(--cyan); }
 #acquisition-queue [aria-pressed="true"] { border-color: var(--cyan); }
 .provider-destinations { display: grid; gap: 10px; padding: 8px 0; }
 .provider-destinations a { min-height: 44px; }
+.prep-layout select { max-width: 100%; padding: 10px; font-size: 16px; background: var(--bg); color: var(--text); border: 1px solid var(--line); }
+.prep-layout select:focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
+#target-form, .membership-plan { display: grid; gap: 8px; margin: 12px 0; }
+.membership-plan input[type="checkbox"] { width: auto; min-height: 20px; margin-right: 8px; }
+.membership-plan label:has(input[type="checkbox"]) { display: flex; align-items: center; min-height: 44px; }
+#phase-totals p { margin: 8px 0; }
+#out-of-pool { color: var(--amber); }
 @media (max-width: 1200px) {
   .prep-layout { grid-template-columns: 240px minmax(0, 1fr); }
   .decision-column { grid-column: 1 / -1; }

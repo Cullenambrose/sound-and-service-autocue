@@ -46,6 +46,26 @@
           <button id="serato-accept" class="primary">Use as starting set</button>
         </div>
       </details>
+      <details class="review-panel" id="portable-import">
+        <summary>Import a file or personal set</summary>
+        <p class="muted">Synthetic metadata only: strict CSV, M3U/M3U8, or an existing catalog/personal-set handoff. No audio paths are opened.</p>
+        <form id="portable-form">
+          <label for="portable-format">Format</label><select id="portable-format"><option value="csv">CSV metadata</option><option value="m3u">M3U / M3U8 paths</option><option value="catalog">Catalog / personal-set JSON</option></select>
+          <label for="portable-name">Starting-set name</label><input id="portable-name" required maxlength="200" value="Synthetic starting set">
+          <label for="portable-crate">Catalog crate ID (JSON only)</label><input id="portable-crate" maxlength="200">
+          <label for="portable-file">Selected synthetic file</label><input id="portable-file" type="file" accept=".csv,.m3u,.m3u8,.json" required>
+          <p class="muted">CSV header: id,title,artist,path,version. M3U unknown paths retain missing metadata, never filename guesses.</p>
+          <button type="submit" class="secondary">Preview portable starting set</button>
+        </form>
+        <div id="portable-preview" hidden><p id="portable-note"></p><ol id="portable-rows"></ol><button id="portable-accept" class="primary">Use portable starting set</button></div>
+      </details>
+      <section class="review-panel" aria-label="Recommendation scope">
+        <h3>Build mode</h3>
+        <label for="prep-mode">Candidate scope</label><select id="prep-mode"><option value="seed">Start from playlist order</option><option value="source">Recommend from imported source only</option><option value="library">Use available synthetic library</option></select>
+        <button id="apply-mode" class="secondary">Apply build mode</button>
+        <p id="scope-note" class="muted"></p>
+      </section>
+      <details class="review-panel"><summary>Library snapshot &amp; multiple files</summary><p id="library-counts"></p><p class="muted">Shared song identity groups only. Versions and repeated playlist memberships are legitimate; nothing is deleted or moved.</p><div id="duplicate-report"></div></details>
       <section class="crate-panel" aria-label="Eligible track browser">
         <h3>Eligible tracks</h3><p id="eligible-help" class="muted">Shared-engine recommendations, not your whole library. Import a starting set to add files.</p>
         <label for="eligible-search">Filter title, artist or version</label><input id="eligible-search" type="search" placeholder="Find an eligible track" maxlength="200" aria-controls="eligible-tracks">
@@ -59,6 +79,11 @@
         <div class="section-heading"><h3>Event crate <span id="crate-count" class="count"></span></h3><button id="edit-seed" class="secondary" hidden>Edit starting-set order</button></div>
         <p id="prep-order-note" class="muted">Ordered by the shared setlist engine. Every row keeps its original file.</p>
         <p id="verify" class="verification-note muted"></p>
+        <details id="planning-panel"><summary>Phase and duration plan</summary><div id="phase-totals"></div>
+          <form id="target-form"><label for="target-phase">Phase target</label><select id="target-phase"><option value="unassigned">Unassigned</option><option value="ceremony">Ceremony</option><option value="dinner">Dinner</option><option value="first_dance">First dance</option><option value="dancing">Dancing</option></select><label for="target-minutes">Target minutes</label><input id="target-minutes" type="number" min="0" max="1440" step="1" required><button class="secondary">Save duration target</button></form>
+          <button id="sequence-preview" class="secondary">Preview suggested sequence</button>
+          <div id="sequence-result" hidden tabindex="-1"><p id="sequence-note"></p><ol id="sequence-rows"></ol><button id="sequence-accept" class="primary">Accept suggested sequence</button></div>
+        </details>
         <div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable Prep files"><table><caption class="sr-only">Exact files in working crate order</caption><thead><tr><th scope="col">#</th><th scope="col">SONG / ARTIST</th><th scope="col">EXACT VERSION / FILE</th><th scope="col">WHY IT'S HERE</th></tr></thead><tbody id="prep-tracks"></tbody></table></div>
       </section>
       <details id="seed-workspace" class="review-panel" hidden>
@@ -76,6 +101,7 @@
       <section class="review-panel" aria-label="Prep needs review">
         <div class="section-heading"><h3>Needs review <span id="review-count" class="count"></span></h3><span class="muted">Your decisions, never a guess.</span></div>
         <div id="prep-review" tabindex="-1" aria-label="Remaining Prep decisions"></div>
+        <div id="out-of-pool" role="status"></div>
       </section>
       <details class="review-panel" id="acquisition-panel">
         <summary>Find missing songs <span id="acquisition-count"></span></summary>

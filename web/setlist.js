@@ -31,14 +31,16 @@
     if (view.prep_done) return "Saved · Exported · Verified: 0 mismatches";
     if (view.verification.mismatches > 0) return `Verification failed: ${view.verification.mismatches} mismatches`;
     if (view.needs_review.length) return `${view.needs_review.length} ${view.needs_review.length === 1 ? "decision" : "decisions"} before saving`;
-    if (view.seed_rows?.some(row => row.status !== "available")) return "Resolve imported entries before saving";
+    if (view.out_of_pool?.length) return `${view.out_of_pool.length} matched requests outside source · Change build mode`;
+    if ((view.prep_mode || "seed") === "seed" && view.seed_rows?.some(row => row.status !== "available")) return "Resolve imported entries before saving";
     if (view.saved && view.saved_current === false) return "Working set changed · Save again";
     return view.saved ? "Crate saved · Export to finish" : "Ready to save";
   }
   function trackRows(items, live = false) {
     return items.map((item, index) => `<tr><td>${String(index + 1).padStart(2, "0")}</td>
       <td><span class="track-title">${escape(item.track.title)}</span><span class="request-sub">${escape(item.track.artist)}</span></td>
-      <td>${escape(item.version_label)} <span class="request-sub">${escape(item.track.id)}</span><span class="file-path">${escape(item.track.path)}</span></td>
+      <td>${escape(item.version_label)} <span class="request-sub">${escape(item.track.id)}</span><span class="file-path">${escape(item.track.path)}</span>
+      <details><summary>Mix metadata</summary><span class="request-sub">BPM: ${escape(item.track.bpm ?? "Unknown")} / Key: ${escape(item.track.key ?? "Unknown")} / Energy: ${escape(item.track.energy ?? "Unknown")}</span></details></td>
       <td>${item.reasons.map(reason => `<span class="badge">${escape(reason)}</span>`).join("")}</td>
       ${live ? `<td><button class="secondary" data-action="played" data-file-id="${escape(item.track.id)}">Mark played</button></td>` : ""}</tr>`).join("");
   }
@@ -61,7 +63,17 @@
         ${index ? `<button class="secondary" data-action="seed_move" data-entry-id="${escape(row.id)}" data-direction="up" aria-label="Move up: entry ${index + 1}">Move up</button>` : ""}
         ${index < rows.length - 1 ? `<button class="secondary" data-action="seed_move" data-entry-id="${escape(row.id)}" data-direction="down" aria-label="Move down: entry ${index + 1}">Move down</button>` : ""}
         <button class="dismiss" data-action="seed_remove" data-entry-id="${escape(row.id)}" aria-label="Remove from set: entry ${index + 1}">Remove from set</button>
-      </div>` : ""}</li>`).join("");
+      </div><form class="membership-plan" data-plan-entry="${escape(row.id)}">
+        <label for="phase-${escape(row.id)}">Phase for entry ${index + 1}</label>
+        <select id="phase-${escape(row.id)}" name="phase">${["unassigned","ceremony","dinner","first_dance","dancing"].map(phase =>
+          `<option value="${phase}" ${phase === (row.planning?.phase || "unassigned") ? "selected" : ""}>${phase.replaceAll("_"," ")}</option>`).join("")}</select>
+        <label><input type="checkbox" name="pinned" ${row.planning?.pinned ? "checked" : ""}> Pin position for entry ${index + 1}</label>
+        <button type="submit" class="secondary">Save phase / pin</button>
+      </form>` : ""}</li>`).join("");
+  }
+  function planningRows(planning) {
+    return Object.entries(planning).map(([phase,row]) => `<p><strong>${escape(phase.replaceAll("_"," "))}</strong>:
+      ${row.entries} entries · ${(row.known_seconds / 60).toFixed(1)} known min · ${row.unknown} unknown durations${row.target_minutes == null ? "" : ` · target ${row.target_minutes} min${row.unknown ? " (total unknown)" : ` · ${(row.known_seconds / 60 - row.target_minutes).toFixed(1)} min vs target`}`}</p>`).join("");
   }
   function eligibleRows(items, query = "", source = null) {
     const filter = query.trim().toLocaleLowerCase();
@@ -103,7 +115,8 @@
       this.pending = null;
     }
     async request(path, options = {}) {
-      const response = await this.fetcher(path, options);
+      const prefix = root.location?.pathname.startsWith("/setlist/") ? "/setlist" : "";
+      const response = await this.fetcher(prefix + path, options);
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
       return body;
@@ -131,11 +144,17 @@
       return result;
     }
   }
-  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, prepProgress, FlowClient};
+  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, planningRows, prepProgress, FlowClient};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   if (!root.document) return;
   const $ = selector => root.document.querySelector(selector);
   let acquisitionPreview = null;
+  let portablePreview = null, portableGeneration = 0, sequencePreview = null;
+  function invalidatePortable() {
+    portableGeneration++;
+    portablePreview = null;
+    $("#portable-preview").hidden = true;
+  }
   let acquisitionGeneration = 0;
   function invalidateAcquisition() {
     acquisitionGeneration++;
@@ -156,14 +175,16 @@
     $("#serato-preview").hidden = true;
   }
   function blockedPrep(view) {
-    return !!view.needs_review.length || view.seed_rows?.some(row => row.status !== "available");
+    return !!view.needs_review.length || !!view.out_of_pool?.length
+      || (view.prep_mode || "seed") === "seed" && view.seed_rows?.some(row => row.status !== "available");
   }
   function guestAccepted() {
     $("#guest-form").reset();
     $("#guest-entry").open = false;
   }
   function paintEligible(view) {
-    const result = eligibleRows(view.recommendations, $("#eligible-search").value, view.serato_source);
+    const result = eligibleRows(view.recommendations, $("#eligible-search").value,
+      view.prep_mode === "seed" ? view.serato_source : null);
     $("#eligible-tracks").innerHTML = result.html;
     $("#eligible-count").textContent = `${result.count} of ${view.recommendations.length} eligible tracks`;
     if (busy || client.pending) $("#eligible-tracks").querySelectorAll("button")
@@ -174,7 +195,11 @@
     if (view.mode === "prep") {
       $("#prep-review").innerHTML = reviewRows(view.needs_review);
       $("#prep-tracks").innerHTML = trackRows(view.crate_entries || view.recommendations);
-      $("#prep-order-note").textContent = view.serato_source
+      $("#prep-order-note").textContent = view.prep_mode === "source"
+        ? "Shared-engine order within the imported source. Outside-source requirements stay separate."
+        : view.prep_mode === "library"
+        ? "Shared-engine order across the supplied synthetic library. Imported order is retained separately."
+        : view.serato_source
         ? "Your working set order, with matched event requests and cues appended. Every row keeps its exact file."
         : "Ordered by the shared setlist engine. Every row keeps its original file.";
       $("#review-count").textContent = view.needs_review.length;
@@ -183,13 +208,30 @@
       $("#prep-progress").textContent = prepProgress(view);
       $("#prep-progress").classList.toggle("complete", view.prep_done);
       $("#prep-progress").classList.toggle("failed", view.verification.mismatches > 0);
+      $("#prep-mode").value = view.prep_mode;
+      $("#scope-note").textContent = view.prep_mode === "source"
+        ? "Only eligible exact files from the imported source. Outside-source event requests stay visible below."
+        : view.prep_mode === "library" ? "Full synthetic library in shared-engine order; imported order is retained separately."
+        : "Imported membership order, followed by matched event requests. Missing source entries must be resolved.";
+      $("#out-of-pool").innerHTML = (view.out_of_pool || []).map(row =>
+        `<p>${escape(row.request.title)}: matched in library, outside selected source. Change build mode to include it.</p>`).join("");
+      $("#phase-totals").innerHTML = planningRows(view.planning);
+      $("#library-counts").textContent = `${view.library_overview.tracks} synthetic records / ${view.library_overview.song_identities} songs / ${view.library_overview.multiple_file_songs} songs with multiple files.`;
+      $("#duplicate-report").innerHTML = view.library_overview.groups.map(group => `<details><summary>${escape(group[0].title)} (${group.length} files)</summary>${group.map(track => `<p>${escape(track.title)} / ${escape(track.artist)}<span class="file-path">${escape(track.path)}</span></p>`).join("")}</details>`).join("") || '<p class="empty">No multiple-file song groups.</p>';
+      $("#planning-panel").hidden = !view.serato_source || view.prep_mode !== "seed";
+      if (sequencePreview && sequencePreview.revision !== view.revision) {
+        sequencePreview = null;
+        $("#sequence-result").hidden = true;
+      }
       $("#verify").textContent = view.verification.note;
       $("#save-prep").disabled = blockedPrep(view);
       $("#export-prep").disabled = !view.saved;
       $("#download").hidden = view.verification.mismatches !== 0;
-      $("#seed-workspace").hidden = !view.serato_source;
-      $("#edit-seed").hidden = !view.serato_source;
-      $("#eligible-help").textContent = view.serato_source
+      $("#seed-workspace").hidden = !view.serato_source || view.prep_mode !== "seed";
+      $("#edit-seed").hidden = !view.serato_source || view.prep_mode !== "seed";
+      $("#eligible-help").textContent = view.prep_mode !== "seed"
+        ? "Shared-engine recommendations in the selected scope. Switch to playlist-order mode to edit memberships."
+        : view.serato_source
         ? "Shared-engine recommendations, not your whole library. Add an exact file to your working set."
         : "Shared-engine recommendations, not your whole library. Import a starting set to add files.";
       $("#seed-memberships").innerHTML = seedRows(view.seed_rows || [], true);
@@ -259,6 +301,8 @@
         $("#seed-memberships").focus();
       }
       else if (returnFocus?.dataset.action === "seed_add") $("#eligible-search").focus();
+      else if (returnFocus?.id === "portable-accept") $("#seed-memberships").focus();
+      else if (returnFocus?.id === "sequence-accept") $("#sequence-preview").focus();
       else if (returnFocus?.id === "acquisition-accept" || returnFocus?.dataset.action === "acquisition_progress") {
         $("#prep-decisions").focus();
       }
@@ -370,6 +414,68 @@
   }));
   $("#seed-add").addEventListener("click", () => run(() => client.command("prep",
     {action:"seed_add", file_id:$("#seed-add-file").value})));
+  $("#apply-mode").addEventListener("click", () => run(() => client.command("prep",
+    {action:"prep_mode", value:$("#prep-mode").value})));
+  $("#target-form").addEventListener("submit", event => {
+    event.preventDefault();
+    run(() => client.command("prep", {action:"phase_target",phase:$("#target-phase").value,
+      minutes:Number($("#target-minutes").value)}));
+  });
+  root.document.addEventListener("submit", event => {
+    const form = event.target.closest("[data-plan-entry]");
+    if (!form) return;
+    event.preventDefault();
+    run(() => client.command("prep", {action:"seed_plan",entry_id:form.dataset.planEntry,
+      phase:form.elements.phase.value,pinned:form.elements.pinned.checked}));
+  });
+  $("#sequence-preview").addEventListener("click", () => run(async () => {
+    const preview = await client.request("/api/sequence/preview", {
+      method:"POST", headers:{"Content-Type":"application/json","X-Setlist-Token":client.token},
+      body:JSON.stringify({base_revision:client.views.prep.revision})});
+    sequencePreview = {...preview, revision:client.views.prep.revision};
+    $("#sequence-note").textContent = preview.note;
+    $("#sequence-rows").innerHTML = preview.rows.map(row => `<li>${escape(row.title)} · ${escape(row.planning.phase.replaceAll("_"," "))}${row.planning.pinned ? " · pinned" : ""}</li>`).join("");
+    $("#sequence-result").hidden = false;
+    $("#sequence-result").focus();
+    return client.views.prep;
+  }));
+  $("#sequence-accept").addEventListener("click", () => run(() => {
+    if (!sequencePreview || sequencePreview.revision !== client.views.prep.revision) throw new Error("Preview the current sequence first.");
+    return client.command("prep",{action:"sequence_accept",preview_id:sequencePreview.id});
+  }));
+  $("#portable-form").addEventListener("input",invalidatePortable);
+  $("#portable-form").addEventListener("change",invalidatePortable);
+  $("#portable-form").addEventListener("submit", event => {
+    event.preventDefault();
+    if (busy) return;
+    invalidatePortable();
+    const generation = portableGeneration;
+    run(async () => {
+      const file = $("#portable-file").files[0];
+      if (!file || !file.size || file.size > 512 * 1024) throw new Error("Select synthetic text no larger than 512 KiB.");
+      const upload = {format:$("#portable-format").value,name:$("#portable-name").value,
+        crate_id:$("#portable-crate").value,text:await file.text()};
+      return previewPortable(upload,generation);
+    });
+  });
+  $("#portable-accept").addEventListener("click", () => run(async () => {
+    if (!portablePreview) throw new Error("Preview the selected portable input first.");
+    const view = await client.command("prep",{action:"portable_import",...portablePreview});
+    invalidatePortable();
+    $("#seed-workspace").open = true;
+    return view;
+  }));
+  async function previewPortable(upload,generation) {
+    const preview = await client.request("/api/portable/preview", {
+      method:"POST",headers:{"Content-Type":"application/json","X-Setlist-Token":client.token},
+      body:JSON.stringify(upload)});
+    if (generation !== portableGeneration) throw new Error("Selected portable input changed. Preview again.");
+    portablePreview = {upload,preview_id:preview.id};
+    $("#portable-note").textContent = `${preview.entries.length} memberships. ${preview.note}`;
+    $("#portable-rows").innerHTML = seedRows(preview.entries);
+    $("#portable-preview").hidden = false;
+    return client.views.prep;
+  }
   async function previewAcquisition(track, generation) {
     const body = {key:$("#acquisition-request").value, track, base_revision:client.views.prep.revision};
     const preview = await client.request("/api/acquisition/preview", {
@@ -426,5 +532,18 @@
       key:button.dataset.key, file_id:button.dataset.fileId,
       entry_id:button.dataset.entryId, direction:button.dataset.direction, progress:button.dataset.progress}));
   });
-  switchMode("prep");
+  switchMode("prep").then(() => {
+    const params = new URLSearchParams(root.location.search);
+    if (root.location.pathname.startsWith("/setlist/") && params.has("personal")) run(async () => {
+      const response = await root.fetch("/api/catalog/personal/prep?" + new URLSearchParams({crate_id:params.get("personal")}));
+      const document = await response.json();
+      if (!response.ok) throw new Error(document.error || "Personal-set handoff failed.");
+      const crate = document.crates[0];
+      if (String(crate.revision) !== params.get("revision")) throw new Error("Personal set changed. Refresh its main-app revision before previewing.");
+      invalidatePortable();
+      $("#portable-import").open = true;
+      return previewPortable({format:"catalog",name:crate.title,crate_id:crate.id,
+        text:JSON.stringify(document)},portableGeneration);
+    });
+  });
 })(typeof globalThis !== "undefined" ? globalThis : this);

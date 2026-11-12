@@ -110,7 +110,9 @@
       <div class="library-head"><div><span class="eyebrow">PERSONAL CRATES · LOCAL ONLY</span><h2>Arrange your set</h2></div></div>
       <p class="muted">Personal copies of catalog memberships, not edits to imported crates. Repeated songs are allowed. Edits do not copy, analyze or tag music. Explicit export verifies every reviewed file and downloads a ZIP with M3U8, CSV and a manifest; no silent skips.</p>
       <div class="path-row"><input id="personal-new-name" aria-label="New personal crate name" placeholder="New personal crate name"><button id="personal-create" class="button secondary">Create personal crate</button></div>
-      <div class="path-row"><select id="personal-select" aria-label="Personal crate"><option value="">No personal crates</option></select><button id="personal-refresh" class="quiet">Refresh personal crates</button></div>
+      <div class="path-row"><select id="personal-select" aria-label="Personal crate"><option value="">No personal crates</option></select><button id="personal-refresh" class="quiet">Refresh personal crates</button><button id="personal-prep" class="quiet">Download synthetic Prep handoff</button></div>
+      <p class="muted">Synthetic /Demo/ metadata only. Download the handoff for portable import, or enable AUTOCUE_SYNTHETIC_PREP to preview it in this app. No selected audio is opened.</p>
+      <a id="personal-open-prep" class="button secondary" href="/setlist/" hidden>Preview selected personal set in Prep</a>
       <div id="personal-status" class="notice" role="status" aria-live="polite"></div>
       <div id="personal-pending" class="catalog-pending" hidden>
         <strong>Unacknowledged personal crate change retained on this browser.</strong>

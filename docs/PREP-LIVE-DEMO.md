@@ -122,6 +122,10 @@ and retry-safe, and does not add request boosts or mark old songs played.
 
 ## Validation
 
+See [set-building capabilities](SET-BUILDING-CAPABILITIES.md) for portable input
+schemas, explicit build modes, phases/duration/pins, the opt-in main-app mount,
+personal-set handoff and externally blocked release gates.
+
 ```bash
 PYTHONPATH=engine .venv/bin/python -m pytest web/test_setlist_flow.py -q -s
 node --test web/test_setlist_ui.cjs

@@ -1473,6 +1473,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-AutoCue-Token") != SESSION_TOKEN:
             json_response(self, {"error": "Request rejected: local session token missing or invalid."}, 403)
             return False
+        if (getattr(self, "synthetic_workspace", False)
+                and (self.command != "POST" or urllib.parse.urlparse(self.path).path not in {
+                    "/api/catalog/import", "/api/catalog/personal/save"})):
+            json_response(self, {"error": "Synthetic Prep mode permits catalog metadata and personal-set saves only; media, scans and tag writes are disabled."}, 403)
+            return False
         return True
 
     def do_GET(self):
@@ -1518,7 +1523,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"error": "Request rejected: local origin required."}, 403)
             with connect() as db:
                 identity = review_store.dataset_id(db)
-            return json_response(self, {"token": SESSION_TOKEN, "dataset_id": identity})
+            return json_response(self, {"token": SESSION_TOKEN, "dataset_id": identity,
+                                        "synthetic_prep": bool(getattr(self, "synthetic_workspace", False))})
         if parsed.path == "/api/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1713,6 +1719,12 @@ class Handler(BaseHTTPRequestHandler):
                         result = {"crates": personal_crates.listing(db)}
                     elif parsed.path == "/api/catalog/personal/detail":
                         result = personal_crates.detail(db, query.get("crate_id", [""])[0])
+                    elif parsed.path == "/api/catalog/personal/prep":
+                        if __package__:
+                            from .set_intake import personal_snapshot
+                        else:
+                            from set_intake import personal_snapshot
+                        result = personal_snapshot(db, query.get("crate_id", [""])[0])
                     elif parsed.path == "/api/catalog/files":
                         files = catalog.file_records(db)
                         search = query.get("q", [""])[0].casefold()
@@ -1731,8 +1743,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.log_error("Catalog read failed: %s", error)
                 return json_response(self, {"error": str(error)}, 503)
         if parsed.path == "/api/crates":
+            if getattr(self, "synthetic_workspace", False):
+                return json_response(self, {"crates": [], "note": "Synthetic Prep mode does not scan Serato folders."})
             return json_response(self, {"crates": list_crates()})
         if parsed.path == "/api/crates/detail":
+            if getattr(self, "synthetic_workspace", False):
+                return json_response(self, {"error": "Real Serato inspection is disabled in synthetic Prep mode."}, 403)
             try:
                 path = Path(urllib.parse.parse_qs(parsed.query).get("path", [""])[0]).resolve(strict=True)
             except OSError as error:
@@ -2235,17 +2251,37 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    handler = Handler
+    directory = os.environ.get("AUTOCUE_SYNTHETIC_PREP")
+    if directory:
+        if __package__:
+            from .setlist_demo import mounted_handler, OUTPUTS
+            from .setlist_flow import SetlistFlow
+        else:
+            from setlist_demo import mounted_handler, OUTPUTS
+            from setlist_flow import SetlistFlow
+        path = Path(directory).expanduser().absolute()
+        if path.parent.resolve() != OUTPUTS.resolve() or not path.name.startswith("06-") or path.is_symlink():
+            raise ValueError("Synthetic Prep output must be a non-symlink 06-* directory in Desktop/MASTER-TODO/outputs.")
+        if DATA.parent.resolve() != OUTPUTS.resolve() or not DATA.name.startswith("06-") or DATA.is_symlink():
+            raise ValueError("With synthetic Prep enabled, AUTOCUE_WEB_DATA must also be a non-symlink 06-* output directory.")
+        flow = SetlistFlow(path, output_prefix="06")
+        flow.view("prep")
+        flow.view("live")
+        handler = mounted_handler(Handler, flow)
     initialize()
-    server = LocalHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), Handler)
-    with connect() as db:
-        scan_jobs.recover(db)
-        queued = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at").fetchall()
-    for row in queued:
-        worker_queue.put(row["id"])
-    threading.Thread(target=worker, daemon=True).start()
+    server = LocalHTTPServer(("127.0.0.1", int(os.environ.get("AUTOCUE_PORT", "8770"))), handler)
     scan_stop = threading.Event()
-    scan_thread = threading.Thread(target=scan_jobs.worker, args=(connect, scan_stop), daemon=True)
-    scan_thread.start()
+    scan_thread = None
+    if not directory:
+        with connect() as db:
+            scan_jobs.recover(db)
+            queued = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at").fetchall()
+        for row in queued:
+            worker_queue.put(row["id"])
+        threading.Thread(target=worker, daemon=True).start()
+        scan_thread = threading.Thread(target=scan_jobs.worker, args=(connect, scan_stop), daemon=True)
+        scan_thread.start()
     print("AutoCue web app: http://127.0.0.1:%d" % server.server_address[1], flush=True)
     try:
         server.serve_forever()
@@ -2254,8 +2290,9 @@ def main():
     finally:
         server.server_close()
         scan_stop.set()
-        scan_thread.join(timeout=5)
-        if scan_thread.is_alive():
+        if scan_thread is not None:
+            scan_thread.join(timeout=5)
+        if scan_thread is not None and scan_thread.is_alive():
             print("Catalog scan still inside filesystem/metadata I/O; startup will mark it interrupted.", file=sys.stderr)
 
 

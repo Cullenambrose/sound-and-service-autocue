@@ -14,10 +14,11 @@ if str(ROOT / "engine") not in sys.path:
     sys.path.insert(0, str(ROOT / "engine"))
 if __package__:
     from .setlist_flow import FlowConflict, SetlistFlow
-    from . import serato_import
+    from . import serato_import, set_intake
 else:
     from setlist_flow import FlowConflict, SetlistFlow
     import serato_import
+    import set_intake
 
 WEB = Path(__file__).resolve().parent
 OUTPUTS = Path.home() / "Desktop/MASTER-TODO/outputs"
@@ -28,7 +29,7 @@ STATIC = {
 }
 
 
-def demo_server(flow, port=0):
+def demo_server(flow, port=0, *, handler_only=False, mount_prefix=""):
     token = secrets.token_hex(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -51,10 +52,16 @@ def demo_server(flow, port=0):
             if not self.allowed_host():
                 return self.send(403, {"error": "Use the loopback demo URL."})
             path = urlparse(self.path).path
+            if mount_prefix:
+                path = path.removeprefix(mount_prefix)
             try:
                 if path in STATIC:
                     filename, content_type = STATIC[path]
-                    return self.send(200, (WEB / filename).read_bytes(), content_type)
+                    data = (WEB / filename).read_bytes()
+                    if filename == "setlist.html" and mount_prefix:
+                        for target in ("/setlist.js", "/setlist.css", "/api/export", "/api/serato/catalog"):
+                            data = data.replace(f'"{target}"'.encode(), f'"{mount_prefix}{target}"'.encode())
+                    return self.send(200, data, content_type)
                 if path == "/api/session":
                     return self.send(200, {"token": token, "synthetic": True})
                 if path in {"/api/prep", "/api/live"}:
@@ -85,18 +92,25 @@ def demo_server(flow, port=0):
                     or self.headers.get("X-Setlist-Token") != token):
                 return self.send(403, {"error": "Reload the local demo to establish a session."})
             try:
-                if self.path not in {"/api/command", "/api/serato/preview", "/api/acquisition/preview"}:
+                path = self.path.removeprefix(mount_prefix) if mount_prefix else self.path
+                if path not in {"/api/command", "/api/serato/preview", "/api/acquisition/preview",
+                                     "/api/portable/preview", "/api/sequence/preview"}:
                     return self.send(404, {"error": "Unknown synthetic demo route."})
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 1500000:
                     raise ValueError("JSON commands must be between 1 and 1500000 bytes.")
                 body = json.loads(self.rfile.read(length))
-                if self.path == "/api/serato/preview":
+                if path == "/api/serato/preview":
                     with flow.lock:
                         return self.send(200, serato_import.preview(body, flow._library_snapshot(flow.state)[0]))
-                if self.path == "/api/acquisition/preview":
+                if path == "/api/acquisition/preview":
                     return self.send(200, flow.acquisition_preview(body))
-                if length > 8192 and not (isinstance(body, dict) and body.get("action") == "serato_import"):
+                if path == "/api/sequence/preview":
+                    return self.send(200, flow.sequence_preview(body))
+                if path == "/api/portable/preview":
+                    with flow.lock:
+                        return self.send(200, set_intake.preview(body, flow._library_snapshot(flow.state)[0]))
+                if length > 8192 and not (isinstance(body, dict) and body.get("action") in {"serato_import", "portable_import"}):
                     raise ValueError("Non-upload JSON commands must be at most 8192 bytes.")
                 return self.send(200, flow.command(body))
             except FlowConflict as error:
@@ -106,7 +120,27 @@ def demo_server(flow, port=0):
             except OSError as error:
                 return self.send(503, {"error": "Could not persist synthetic workflow: " + str(error)})
 
+    if handler_only:
+        return Handler
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
+def mounted_handler(base, flow):
+    """Mount the unchanged synthetic workspace beside the existing app routes."""
+    workspace = demo_server(flow, handler_only=True, mount_prefix="/setlist")
+
+    class Combined(workspace, base):
+        synthetic_workspace = True
+
+        def do_GET(self):
+            return (workspace.do_GET(self) if self.path.startswith("/setlist/")
+                    else base.do_GET(self))
+
+        def do_POST(self):
+            return (workspace.do_POST(self) if self.path.startswith("/setlist/")
+                    else base.do_POST(self))
+
+    return Combined
 
 
 def main():

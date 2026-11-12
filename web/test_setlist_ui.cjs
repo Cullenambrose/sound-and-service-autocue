@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, prepProgress, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, seedRows, eligibleRows, acquisitionRows, planningRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -222,4 +222,16 @@ test("imported recovery shows original and replacement paths and explicit reconn
   assert.match(recovered, /Original reference retained/);
   assert.doesNotMatch(recovered, /data-action="seed_reconnect"/);
   assert.equal(JSON.stringify(row), before);
+});
+
+test("phase planning keeps unknown durations explicit and source scope blocks premature completion", () => {
+  const html = planningRows({dinner:{entries:2,known_seconds:180,unknown:1,target_minutes:20}});
+  assert.match(html, /3\.0 known min/);
+  assert.match(html, /1 unknown durations/);
+  assert.match(html, /total unknown/);
+  assert.doesNotMatch(html, /min vs target/);
+  const view = {needs_review:[],verification:{mismatches:null},out_of_pool:[{key:"outside"}]};
+  assert.match(prepProgress(view), /outside source/);
+  assert.match(seedRows([{id:"a",title:"Alpha",path:"/Demo/a.mp3",status:"available",
+    planning:{phase:"dinner",pinned:true}}],true), /name="pinned" checked/);
 });
