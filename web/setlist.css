@@ -106,7 +106,8 @@ a { color: var(--cyan); }
 .eligible-track .badge { margin-top: 6px; }
 #acquisition-form select { width: 100%; padding: 10px; background: var(--bg); color: var(--text); border: 1px solid var(--line); font-size: 16px; }
 #acquisition-form button { margin-top: 10px; }
-#acquisition-preview { margin-top: 16px; border-left: 2px solid var(--cyan); padding-left: 10px; }
+#acquisition-preview { margin-top: 16px; border-left: 2px solid var(--cyan); padding-left: 10px; overflow-wrap: anywhere; }
+#acquisition-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #acquisition-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #acquisition-queue [aria-pressed="true"] { border-color: var(--cyan); }
 .provider-destinations { display: grid; gap: 10px; padding: 8px 0; max-height: 600px; overflow: auto; }

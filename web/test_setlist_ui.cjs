@@ -100,6 +100,20 @@ test("guest form asks only first name optional email and song, with no account s
   assert.doesNotMatch(form, /password|sign.?up|sign.?in/i);
 });
 
+test("preview results accept keyboard focus and decision groups have valid accessible names", () => {
+  const html = fs.readFileSync(path.join(__dirname, "setlist.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "setlist.css"), "utf8");
+  const script = fs.readFileSync(path.join(__dirname, "setlist.js"), "utf8");
+  for (const id of ["serato-preview", "portable-preview", "acquisition-preview"]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*tabindex="-1"`));
+    assert.ok(script.includes(`$("#${id}").focus()`));
+  }
+  for (const id of ["prep-review", "live-requests"]) {
+    assert.match(html, new RegExp(`id="${id}" role="group"[^>]*aria-label=`));
+  }
+  assert.match(css, /#acquisition-preview\s*\{[^}]*overflow-wrap:\s*anywhere/);
+});
+
 test("FlowClient calls shared-engine endpoints and retains identical requests on lost acknowledgment", async () => {
   let lose = true;
   const sent = [];

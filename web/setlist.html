@@ -39,7 +39,7 @@
           <button type="submit" class="secondary">Preview selected snapshots</button>
         </form>
         <button id="serato-sample" class="secondary">Preview synthetic sample</button>
-        <div id="serato-preview" hidden>
+        <div id="serato-preview" tabindex="-1" hidden>
           <h3>Import preview</h3><p id="serato-preview-summary" class="muted"></p>
           <ol id="serato-preview-rows" class="seed-list"></ol>
           <p>Accepting replaces the working imported source, not your saved export. Duplicates and source order are retained; matched event requests and cues are appended.</p>
@@ -57,7 +57,7 @@
           <p class="muted">CSV header: id,title,artist,path,version. M3U unknown paths retain missing metadata, never filename guesses.</p>
           <button type="submit" class="secondary">Preview portable starting set</button>
         </form>
-        <div id="portable-preview" hidden><p id="portable-note"></p><ol id="portable-rows"></ol><button id="portable-accept" class="primary">Use portable starting set</button></div>
+        <div id="portable-preview" tabindex="-1" hidden><p id="portable-note"></p><ol id="portable-rows"></ol><button id="portable-accept" class="primary">Use portable starting set</button></div>
       </details>
       <section class="review-panel" aria-label="Recommendation scope">
         <h3>Build mode</h3>
@@ -100,7 +100,7 @@
       <div class="column-heading"><span class="eyebrow">03 / DECISIONS</span><h3>Resolve before you save</h3></div>
       <section class="review-panel" aria-label="Prep needs review">
         <div class="section-heading"><h3>Needs review <span id="review-count" class="count"></span></h3><span class="muted">Your decisions, never a guess.</span></div>
-        <div id="prep-review" tabindex="-1" aria-label="Remaining Prep decisions"></div>
+        <div id="prep-review" role="group" tabindex="-1" aria-label="Remaining Prep decisions"></div>
         <div id="out-of-pool" role="status"></div>
       </section>
       <details class="review-panel" id="acquisition-panel">
@@ -145,7 +145,7 @@
           </form>
           <p class="boundary-note">Synthetic demo only. No music, tag or Serato writes.</p>
         </details>
-        <section class="review-panel" aria-label="DJ request list"><div class="section-heading"><h3>DJ request list</h3><span class="count" id="guest-count"></span></div><div id="live-requests" tabindex="-1" aria-label="Guest request decisions"></div></section>
+        <section class="review-panel" aria-label="DJ request list"><div class="section-heading"><h3>DJ request list</h3><span class="count" id="guest-count"></span></div><div id="live-requests" role="group" tabindex="-1" aria-label="Guest request decisions"></div></section>
         </div>
         <section id="live-recommendations" class="crate-panel live-recommendations" tabindex="-1" aria-label="Live recommendations"><div class="section-heading"><h3>Up next, your choice</h3></div><p class="muted">Played songs and do-not-play are excluded.</p><div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable Live recommendations"><table><caption class="sr-only">Live recommendations in shared engine order</caption><thead><tr><th scope="col">#</th><th scope="col">SONG / ARTIST</th><th scope="col">EXACT VERSION / FILE</th><th scope="col">WHY IT'S HERE</th><th scope="col">PLAYED</th></tr></thead><tbody id="live-tracks"></tbody></table></div></section>
       </div>

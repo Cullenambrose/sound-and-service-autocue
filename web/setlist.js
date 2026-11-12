@@ -350,6 +350,10 @@
       }
       $("#recovery").hidden = !client.pending;
       if (!$("#error").hidden) $("#error").focus();
+      else if (returnFocus?.form?.id === "acquisition-form" && acquisitionPreview) $("#acquisition-preview").focus();
+      else if (returnFocus?.form?.id === "serato-form" && importPreview) $("#serato-preview").focus();
+      else if (returnFocus?.form?.id === "portable-form" && portablePreview) $("#portable-preview").focus();
+      else if (returnFocus?.id === "sequence-preview" && sequencePreview) $("#sequence-result").focus();
       else if (returnFocus?.id === "serato-accept") {
         $("#seed-workspace").open = true;
         $("#seed-memberships").focus();
