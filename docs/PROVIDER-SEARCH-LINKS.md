@@ -79,3 +79,10 @@ break deep links; the homepage/copy fallback remains necessary.
 
 Live provider results inside the app or connected downloads would be separate
 authorized integrations. They are not prerequisites for these browser links.
+
+A subsequent bounded public-HTML recheck of all 21 fallbacks found no newly
+verified search template. Several destinations are JavaScript shells, so plain
+HTML retrieval is inconclusive, not proof that no search exists. Latino Music
+Pool's previously observed search URL again returned HTTP 500. No capability
+was upgraded on static markup alone; the two public/two sign-in-required/21
+fallback counts remain unchanged.
