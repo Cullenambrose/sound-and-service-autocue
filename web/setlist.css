@@ -77,6 +77,38 @@ a { color: var(--cyan); }
 #serato-form button { margin-top: 12px; }
 #seed-add-file { max-width: 100%; padding: 10px; font-size: 16px; background: var(--bg); color: var(--text); border: 1px solid var(--line); }
 #seed-add-file:focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
+.workspace-jumps { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 0 0 20px; font-size: 14px; }
+.workspace-jumps a { min-height: 44px; display: inline-flex; align-items: center; }
+.prep-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+.source-column, .set-column, .decision-column { min-width: 0; scroll-margin-top: 16px; }
+.column-heading { min-height: 74px; }
+.eyebrow { display: block; color: var(--muted); font: 11px/1.5 ui-monospace, monospace; letter-spacing: 1px; margin-bottom: 6px; }
+.prep-layout .review-panel, .prep-layout .crate-panel { padding: 14px; }
+.prep-layout #prep-review { grid-template-columns: 1fr; }
+.prep-layout .section-heading { flex-wrap: wrap; gap: 6px; }
+.prep-layout .candidates { flex-direction: column; }
+.prep-layout .candidate { min-width: 0; }
+.prep-layout details > summary { cursor: pointer; min-height: 44px; font-size: 16px; font-weight: 650; }
+.prep-layout details > summary .request-sub { font-weight: 400; margin: 4px 0 10px; }
+.prep-layout .table-wrap { max-height: 680px; }
+.prep-layout th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.prep-layout table { min-width: 550px; }
+.prep-layout td:nth-child(2) { min-width: 130px; }
+.prep-layout td:nth-child(3) { min-width: 155px; }
+.prep-layout td:nth-child(4) { min-width: 130px; }
+.verification-note { border-left: 2px solid var(--cyan); padding-left: 10px; }
+.eligible-list { display: grid; gap: 10px; max-height: 660px; overflow: auto; padding: 3px; }
+.eligible-track { min-width: 0; border-top: 1px solid var(--line); padding-top: 10px; }
+.eligible-track strong { font-size: 15px; overflow-wrap: anywhere; }
+.eligible-track button { margin-top: 8px; width: 100%; }
+.eligible-track details { margin-top: 6px; }
+.eligible-track summary { color: var(--cyan); }
+.eligible-track .badge { margin-top: 6px; }
+@media (max-width: 1200px) {
+  .prep-layout { grid-template-columns: 240px minmax(0, 1fr); }
+  .decision-column { grid-column: 1 / -1; }
+  .prep-layout #prep-review { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .table-wrap { overflow: auto; max-width: 100%; }
 table { width: 100%; border-collapse: collapse; min-width: 720px; }
 th { text-align: left; font-size: 12px; color: var(--muted); padding: 10px; border-bottom: 1px solid var(--line); }
@@ -116,6 +148,11 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8p
   .live-sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 }
 @media (max-width: 700px) {
+  .prep-layout { grid-template-columns: 1fr; }
+  .decision-column { grid-column: auto; }
+  .column-heading { min-height: 0; margin-bottom: 12px; }
+  .prep-layout #prep-review { grid-template-columns: 1fr; }
+  .eligible-list { max-height: 320px; }
   main { padding: 12px; }
   .event-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
   .section-heading { align-items: flex-start; flex-wrap: wrap; }

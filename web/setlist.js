@@ -53,6 +53,23 @@
         <button class="dismiss" data-action="seed_remove" data-entry-id="${escape(row.id)}" aria-label="Remove from set: entry ${index + 1}">Remove from set</button>
       </div>` : ""}</li>`).join("");
   }
+  function eligibleRows(items, query = "", source = null) {
+    const filter = query.trim().toLocaleLowerCase();
+    const visible = items.filter(item => [item.track.title, item.track.artist, item.version_label]
+      .some(value => String(value ?? "").toLocaleLowerCase().includes(filter)));
+    return {count:visible.length, html:visible.map(item => {
+      const added = source?.order.includes("added:" + item.track.id);
+      const unavailable = !source || added;
+      return `<article class="eligible-track"><strong>${escape(item.track.title)}</strong>
+        <span class="request-sub">${escape(item.track.artist)} / ${escape(item.version_label)}</span>
+        ${item.reasons.map(reason => `<span class="badge">${escape(reason)}</span>`).join("")}
+        <details><summary>Exact file</summary><span class="file-path">${escape(item.track.path)}</span>
+        <span class="request-sub">${escape(item.track.id)}</span></details>
+        <button class="secondary" data-action="seed_add" data-file-id="${escape(item.track.id)}"
+          ${unavailable ? 'disabled data-unavailable="true"' : ""}
+          aria-label="${escape(added ? `Added to set: ${item.track.title}` : `Add to set: ${item.track.title}, ${item.version_label}`)}">${added ? "Added to set" : "Add to set"}</button></article>`;
+    }).join("") || '<p class="empty">No eligible tracks contain that text. This filter does not resolve requests or search record pools.</p>'};
+  }
   class FlowClient {
     constructor(fetcher) {
       this.fetcher = fetcher;
@@ -89,7 +106,7 @@
       return result;
     }
   }
-  const exports = {escape, reviewRows, trackRows, seedRows, prepProgress, FlowClient};
+  const exports = {escape, reviewRows, trackRows, seedRows, eligibleRows, prepProgress, FlowClient};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   if (!root.document) return;
   const $ = selector => root.document.querySelector(selector);
@@ -109,6 +126,13 @@
     $("#guest-form").reset();
     $("#guest-entry").open = false;
   }
+  function paintEligible(view) {
+    const result = eligibleRows(view.recommendations, $("#eligible-search").value, view.serato_source);
+    $("#eligible-tracks").innerHTML = result.html;
+    $("#eligible-count").textContent = `${result.count} of ${view.recommendations.length} eligible tracks`;
+    if (busy || client.pending) $("#eligible-tracks").querySelectorAll("button")
+      .forEach(button => {button.disabled = true;});
+  }
   function paint(view) {
     $("#event-name").textContent = view.event_name;
     if (view.mode === "prep") {
@@ -118,6 +142,7 @@
         ? "Your working set order, with matched event requests and cues appended. Every row keeps its exact file."
         : "Ordered by the shared setlist engine. Every row keeps its original file.";
       $("#review-count").textContent = view.needs_review.length;
+      $("#decision-total").textContent = view.needs_review.length;
       $("#crate-count").textContent = (view.crate_entries || view.recommendations).length;
       $("#prep-progress").textContent = prepProgress(view);
       $("#prep-progress").classList.toggle("complete", view.prep_done);
@@ -127,6 +152,10 @@
       $("#export-prep").disabled = !view.saved;
       $("#download").hidden = view.verification.mismatches !== 0;
       $("#seed-workspace").hidden = !view.serato_source;
+      $("#edit-seed").hidden = !view.serato_source;
+      $("#eligible-help").textContent = view.serato_source
+        ? "Shared-engine recommendations, not your whole library. Add an exact file to your working set."
+        : "Shared-engine recommendations, not your whole library. Import a starting set to add files.";
       $("#seed-memberships").innerHTML = seedRows(view.seed_rows || [], true);
       $("#seed-source").textContent = view.serato_source
         ? `${view.serato_source.crate_name} · ${view.seed_rows.length} working memberships · original order retained until you edit` : "";
@@ -136,6 +165,7 @@
         option.textContent = `${item.track.title} — ${item.track.artist} / ${item.version_label}`;
         return option;
       }));
+      paintEligible(view);
       $("#acquisition-count").textContent = `(${view.acquisition_queue.length})`;
       $("#acquisition-queue").innerHTML = view.acquisition_queue.map(row => `<article class="review-row">
         <h3>${escape(row.title)}</h3><span class="request-sub">${escape(row.artist || "Artist not specified")} ${escape(row.version || "")}</span>
@@ -172,7 +202,9 @@
       if (mode === "prep" && client.views.prep) {
         $("#save-prep").disabled = blockedPrep(client.views.prep);
         $("#export-prep").disabled = !client.views.prep.saved;
+        $("#seed-add").disabled = !client.views.prep.recommendations.length;
       }
+      root.document.querySelectorAll("[data-unavailable]").forEach(button => {button.disabled = true;});
       if (client.pending) {
         root.document.querySelectorAll("button").forEach(button => {button.disabled = true;});
         $("#retry-pending").disabled = false;
@@ -181,7 +213,11 @@
       }
       $("#recovery").hidden = !client.pending;
       if (!$("#error").hidden) $("#error").focus();
-      else if (returnFocus?.id === "serato-accept") $("#seed-memberships").focus();
+      else if (returnFocus?.id === "serato-accept") {
+        $("#seed-workspace").open = true;
+        $("#seed-memberships").focus();
+      }
+      else if (returnFocus?.dataset.action === "seed_add") $("#eligible-search").focus();
       else if (actedOnReview) {
         const panel = $(returnFocus?.dataset.entryId ? "#seed-memberships" : mode === "prep" ? "#prep-review" : "#live-requests");
         (panel.querySelector("button") || panel).focus();
@@ -207,6 +243,13 @@
     return run(() => client.load(mode));
   }
   $("#prep-tab").addEventListener("click", () => switchMode("prep"));
+  $("#edit-seed").addEventListener("click", () => {
+    $("#seed-workspace").open = true;
+    $("#seed-memberships").focus();
+  });
+  $("#eligible-search").addEventListener("input", () => {
+    if (client.views.prep) paintEligible(client.views.prep);
+  });
   $("#live-tab").addEventListener("click", () => switchMode("live"));
   $("#save-prep").addEventListener("click", () => run(() => client.command("prep", {action:"save"})));
   $("#export-prep").addEventListener("click", () => run(() => client.command("prep", {action:"export"})));

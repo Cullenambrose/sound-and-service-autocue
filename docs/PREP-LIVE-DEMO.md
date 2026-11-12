@@ -42,7 +42,16 @@ not files to read or create. Do not use this demo with customer or music data.
 - Unavailable-version buttons name the substitution ("Use Clean instead").
   Matched Live rows show the resolved title, artist, version and exact path
   alongside the original request, with a distinct success state.
-- Prep review cards use a compact two-column layout on desktop. Live
+- Prep uses an event-first source/set/decision workspace on wide screens.
+  The source rail previews synthetic Serato snapshots and filters eligible
+  shared-engine recommendations by displayed title, artist or version.
+  Filtering preserves server order and never resolves requests, changes
+  ranking, searches providers or claims access to the whole library.
+  Adding a displayed exact file requires an accepted imported starting set.
+  The working crate remains central; occurrence-level ordering controls expand
+  separately, and unresolved requests and missing-song lookup remain alongside.
+  Section jump links and a stacked narrow-screen layout retain keyboard access.
+  Live
   recommendations sit beside the guest form and request queue, rather than
   below them. Narrow screens retain document/keyboard order and provide a
   jump link to the scrollable recommendation table.

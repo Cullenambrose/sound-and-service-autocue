@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, seedRows, prepProgress, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, seedRows, eligibleRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -150,4 +150,44 @@ test("imported memberships preserve duplicates and expose explicit occurrence-le
   assert.match(html, /Remove from set: entry 3/);
   assert.equal(prepProgress({needs_review:[], verification:{mismatches:null}, seed_rows:rows}),
     "Resolve imported entries before saving");
+});
+
+test("eligible browser filters display metadata without resolving or reranking requests", () => {
+  const items = [
+    {track:{id:"b", title:"Beta <Demo>", artist:"Artist B", path:"/Demo/b.mp3"},
+      version_label:"Dirty", reasons:["Must-play request"]},
+    {track:{id:"a", title:"Alpha", artist:"Artist A", path:"/Demo/a.mp3"},
+      version_label:"Clean", reasons:[]},
+  ];
+  const before = JSON.stringify(items);
+  const all = eligibleRows(items);
+  assert.equal(all.count, 2);
+  assert.ok(all.html.indexOf("Beta &lt;Demo&gt;") < all.html.indexOf("Alpha"));
+  assert.match(all.html, /disabled data-unavailable/);
+  assert.match(all.html, /Exact file/);
+  assert.match(all.html, /Must-play request/);
+  for (const query of [" DIRTY ", "Artist B", "beta"]) {
+    const result = eligibleRows(items, query, {order:[]});
+    assert.equal(result.count, 1);
+    assert.match(result.html, /data-file-id="b"/);
+    assert.doesNotMatch(result.html, /disabled|Alpha/);
+  }
+  const added = eligibleRows(items, "", {order:["added:b"]});
+  assert.match(added.html, /Added to set: Beta &lt;Demo&gt;/);
+  assert.equal((added.html.match(/data-unavailable/g) || []).length, 1);
+  const missing = eligibleRows(items, "Septemer");
+  assert.equal(missing.count, 0);
+  assert.match(missing.html, /does not resolve requests/);
+  assert.equal(JSON.stringify(items), before);
+});
+
+test("Prep workspace has real source set and decision jump destinations and keeps saved order visible", () => {
+  const html = fs.readFileSync(path.join(__dirname, "setlist.html"), "utf8");
+  for (const id of ["prep-sources", "prep-set", "prep-decisions"]) {
+    assert.match(html, new RegExp(`href="#${id}"`));
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /id="eligible-search"[^>]*aria-controls="eligible-tracks"/);
+  assert.match(html, /<details id="seed-workspace"/);
+  assert.ok(html.indexOf('id="prep-tracks"') < html.indexOf('id="seed-memberships"'));
 });
