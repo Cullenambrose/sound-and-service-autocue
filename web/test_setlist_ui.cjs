@@ -205,3 +205,21 @@ test("acquisition progress stays explicitly separate from playable fulfillment",
   assert.equal(JSON.stringify(rows), before);
   assert.match(acquisitionRows([]), /No missing-song lookups/);
 });
+
+test("imported recovery shows original and replacement paths and explicit reconnect", () => {
+  const row = {id:"source:0", title:"Orbit <Demo>", artist:"Demo Band",
+    path:"/Demo/Original.mp3", status:"missing_library_file", reconnect_status:"matched",
+    reconnect_candidates:[{id:"exact",title:"Orbit <Demo>",artist:"Demo Band",
+      version_label:"Radio Edit",path:"/Demo/Acquired.mp3"}]};
+  const before = JSON.stringify(row);
+  const html = seedRows([row], true);
+  assert.match(html, /Original\.mp3/);
+  assert.match(html, /Acquired\.mp3/);
+  assert.match(html, /data-action="seed_reconnect"/);
+  assert.match(html, /Reconnect file for entry 1: Orbit &lt;Demo&gt;/);
+  assert.doesNotMatch(seedRows([row]), /data-action="seed_reconnect"/);
+  const recovered = seedRows([{...row,status:"available",replacement:row.reconnect_candidates[0]}],true);
+  assert.match(recovered, /Original reference retained/);
+  assert.doesNotMatch(recovered, /data-action="seed_reconnect"/);
+  assert.equal(JSON.stringify(row), before);
+});

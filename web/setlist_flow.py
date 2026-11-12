@@ -9,7 +9,7 @@ import tempfile
 import threading
 
 from library.matcher import extract_version_tags
-from setlist import PreparedLibrary, context_from_event, rank_next_song, rank_prep_crate, song_identity
+from setlist import PreparedLibrary, SongRequest, SetlistContext, context_from_event, rank_next_song, rank_prep_crate, song_identity
 
 if __package__:
     from . import serato_import, record_pools, acquisition
@@ -73,6 +73,7 @@ class SetlistFlow:
             (FIXTURES / "mock-library.json").read_text())["tracks"])
         self.prepared_library = PreparedLibrary(self.library)
         self._added_snapshot = None
+        self._seed_resolution_cache = {}
         self._typed_diagnostics = {}
         self.lock = threading.RLock()
         self.state = {
@@ -219,7 +220,7 @@ class SetlistFlow:
         ]
         saved = state["saved"]
         source = state["serato_source"] if mode == "prep" else None
-        seed_rows, crate_entries = self._seed(source, recommendations)
+        seed_rows, crate_entries = self._seed(source, recommendations, state)
         saved_current = bool(saved and saved["decisions"] == state["prep_decisions"]
                              and saved.get("library_revision") == (
                                  digest(canonical(state["library_additions"]).encode())
@@ -233,7 +234,9 @@ class SetlistFlow:
             "phase": result.phase, "requests": rows,
             "needs_review": [row for row in rows if row["needs_review"]],
             "recommendations": recommendations,
-            "acquisition_queue": record_pools.acquisition_rows(rows, state["acquisition_progress"]) if mode == "prep" else [],
+            "acquisition_queue": (
+                record_pools.acquisition_rows(rows, state["acquisition_progress"])
+                + self._seed_acquisitions(seed_rows, state) if mode == "prep" else []),
             "serato_source": source, "seed_rows": seed_rows, "crate_entries": crate_entries,
             "saved": saved, "saved_current": saved_current, "verification": verification,
             "prep_done": bool(
@@ -244,7 +247,39 @@ class SetlistFlow:
             ),
         }
 
-    def _seed(self, source, recommendations):
+    def _seed_candidates(self, entry, state):
+        if not entry["title"] or not entry["artist"]:
+            return "missing_metadata", []
+        key = canonical((entry["title"], entry["artist"], state["library_additions"]))
+        if key not in self._seed_resolution_cache:
+            tracks, prepared = self._library_snapshot(state)
+            result = rank_prep_crate(
+                SetlistContext(must_play=(SongRequest(title=entry["title"], artist=entry["artist"]),)),
+                prepared, limit=len(tracks))
+            diagnostic = result.resolution_diagnostics[0]
+            candidates = [
+                {**clean_track(item.track), "version_label": version_label(item.track)}
+                for item in result if item.song_identity == diagnostic.identity
+            ] if diagnostic.status == "matched" else []
+            if len(self._seed_resolution_cache) >= serato_import.MAX_MEMBERSHIPS:
+                self._seed_resolution_cache.clear()
+            self._seed_resolution_cache[key] = diagnostic.status, candidates
+        return self._seed_resolution_cache[key]
+
+    def _seed_acquisitions(self, rows, state):
+        requests, labels = [], {}
+        for index, row in enumerate(rows):
+            if (row["status"] == "missing_library_file" and row["title"] and row["artist"]
+                    and row["reconnect_status"] in {"missing", "version_unavailable"}):
+                key = "seed:" + row["id"]
+                requests.append({"key": key, "request": {"title": row["title"], "artist": row["artist"]},
+                                 "needs_review": True, "status": "version_unavailable"
+                                 if row["reconnect_status"] == "version_unavailable" else "missing"})
+                labels[key] = f"Imported entry {index + 1}"
+        return [{**row, "source_label": labels[row["key"]]} for row in
+                record_pools.acquisition_rows(requests, state["acquisition_progress"])]
+
+    def _seed(self, source, recommendations, state):
         if source is None:
             return [], recommendations
         files = {item["track"]["id"]: item for item in recommendations}
@@ -252,15 +287,25 @@ class SetlistFlow:
         source_entries = {entry["id"]: entry for entry in source["entries"]}
         for entry_id in source["order"]:
             entry = source_entries[entry_id]
-            item = files.get(entry["file_id"])
+            replacement_id = source.get("replacements", {}).get(entry_id)
+            item = files.get(replacement_id or entry["file_id"])
             status = entry["status"] if entry["status"] != "available" else (
                 "available" if item else "blocked_or_version_conflict"
             )
-            rows.append({**entry, "status": status})
+            reconnect_status, candidates = None, []
+            if entry["status"] == "missing_library_file":
+                reconnect_status, candidates = self._seed_candidates(entry, state)
+                candidates = [candidate for candidate in candidates if candidate["id"] in files]
+            if replacement_id:
+                status = "available" if item else "blocked_or_version_conflict"
+            rows.append({**entry, "status": status, "reconnect_status": reconnect_status,
+                         "replacement": item["track"] if replacement_id and item else None,
+                         "reconnect_candidates": candidates if not replacement_id else []})
             if status == "available":
                 entries.append({**item, "seed_entry_id": entry_id,
                                 "reasons": (*item["reasons"], "Added by DJ" if entry["position"] is None
-                                            else "Imported Serato playlist")})
+                                            else "Imported Serato playlist",
+                                            *(("Reconnected by DJ",) if replacement_id else ()))})
         # Matched event requests and cues preserve imported membership order.
         identities = {song_identity(item["track"]["title"], item["track"]["artist"]) for item in entries}
         for item in recommendations:
@@ -295,7 +340,13 @@ class SetlistFlow:
             draft = copy.deepcopy(self.state)
             draft["library_additions"].append(track)
             after = self._view("prep", draft)
-            resolved = next(item for item in after["requests"] if item["key"] == body["key"])
+            resolved = next((item for item in after["requests"] if item["key"] == body["key"]), None)
+            if resolved is None:
+                seed = next(item for item in after["seed_rows"] if "seed:" + item["id"] == body["key"])
+                candidates = seed["reconnect_candidates"]
+                resolved = {"status": "ready_to_reconnect" if candidates else seed["reconnect_status"],
+                            "note": "Imported membership requires an explicit Reconnect file decision.",
+                            "fulfilled": False, "candidates": candidates, "selected_file_id": None}
             changes = [
                 {"title": current["request"]["title"], "before": previous["status"],
                  "after": current["status"], "selected_file_id": current["selected_file_id"]}
@@ -303,6 +354,11 @@ class SetlistFlow:
                 if (previous["status"], previous["selected_file_id"], previous["candidates"])
                 != (current["status"], current["selected_file_id"], current["candidates"])
             ]
+            for previous, current in zip(before["seed_rows"], after["seed_rows"]):
+                if previous["reconnect_candidates"] != current["reconnect_candidates"]:
+                    changes.append({"title": current["title"], "before": previous["reconnect_status"],
+                                    "after": "ready_to_reconnect" if current["reconnect_candidates"]
+                                    else current["reconnect_status"], "selected_file_id": None})
             return {"id": digest(canonical(body).encode()), "track": track,
                     "status": resolved["status"], "note": resolved["note"],
                     "fulfilled": resolved["fulfilled"], "candidates": resolved["candidates"],
@@ -349,6 +405,7 @@ class SetlistFlow:
                 "serato_import": {"upload", "preview_id"},
                 "seed_remove": {"entry_id"}, "seed_move": {"entry_id", "direction"},
                 "seed_add": {"file_id"},
+                "seed_reconnect": {"entry_id", "file_id"},
                 "acquisition_progress": {"key", "progress"},
                 "acquisition_accept": {"key", "track", "preview_id"},
             }
@@ -358,7 +415,7 @@ class SetlistFlow:
                 raise ValueError("Unknown workflow action or fields.")
             if ((action in {"guest", "played"} and mode != "live")
                     or (action in {"save", "export", "serato_import", "seed_remove", "seed_move", "seed_add",
-                                   "acquisition_progress", "acquisition_accept"} and mode != "prep")):
+                                   "acquisition_progress", "acquisition_accept", "seed_reconnect"} and mode != "prep")):
                 raise ValueError("Guest/played actions are Live-only; save/export actions are Prep-only.")
             if action == "acquisition_progress":
                 queue = self._view("prep", state)["acquisition_queue"]
@@ -381,11 +438,19 @@ class SetlistFlow:
                     raise FlowConflict("Serato preview changed; preview the selected snapshots again.")
                 source["order"] = [entry["id"] for entry in source["entries"]]
                 state["serato_source"] = source
-            elif action in {"seed_remove", "seed_move", "seed_add"}:
+            elif action in {"seed_remove", "seed_move", "seed_add", "seed_reconnect"}:
                 source = state["serato_source"]
                 if source is None:
                     raise FlowConflict("Import and accept a Serato snapshot first.")
-                if action == "seed_add":
+                if action == "seed_reconnect":
+                    view = self._view("prep", state)
+                    row = next((row for row in view["seed_rows"] if row["id"] == body.get("entry_id")), None)
+                    if not row or row["status"] != "missing_library_file":
+                        raise FlowConflict("This imported membership is no longer waiting for a file.")
+                    if body.get("file_id") not in {track["id"] for track in row["reconnect_candidates"]}:
+                        raise ValueError("Choose the shared-engine exact-version reconnect candidate.")
+                    source.setdefault("replacements", {})[row["id"]] = body["file_id"]
+                elif action == "seed_add":
                     if len(source["order"]) >= serato_import.MAX_MEMBERSHIPS:
                         raise ValueError("Working sets support at most 1000 memberships.")
                     view = self._view("prep", state)

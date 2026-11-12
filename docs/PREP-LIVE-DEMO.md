@@ -102,6 +102,24 @@ Live requests. Accepted metadata makes the working snapshot stale relative to
 the saved crate; save/export again to publish the new set. Old export downloads
 continue to represent the old saved snapshot exactly.
 
+### Recover unavailable imported memberships
+
+An imported membership with trustworthy title/artist metadata but an unavailable
+original path can now use **Reconnect file**. The shared engine must first
+resolve its requested song/version to an eligible exact file in the current
+event recommendations. Ambiguous source metadata, missing metadata, wrong
+versions, do-not-play and higher-priority event versions never receive guessed
+replacements. Missing songs/versions from these memberships also appear in
+the acquisition queue.
+
+Accepting acquired synthetic metadata only makes a replacement candidate
+available; it does not reconnect any membership automatically. Each duplicate
+occurrence requires its own explicit decision. Original source entries, paths,
+snapshot and hashes remain unchanged; separate replacement mappings retain
+provenance and preserve membership positions. Saved exports use the selected
+replacement paths in exact working order. Reconnection is Prep-only, revisioned
+and retry-safe, and does not add request boosts or mark old songs played.
+
 ## Validation
 
 ```bash

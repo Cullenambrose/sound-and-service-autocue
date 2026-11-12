@@ -47,6 +47,16 @@
       <div class="row-head"><strong>${index + 1}. ${escape(row.title || "Metadata unavailable")}</strong>
       <span class="badge ${row.status === "available" ? "success" : "review"}">${escape(row.status.replaceAll("_", " "))}</span></div>
       <span class="request-sub">${escape(row.artist || "Unknown artist")}</span><span class="file-path">${escape(row.path)}</span>
+      ${row.replacement ? `<p class="review-note">Reconnected by DJ. Original reference retained above.</p><strong>${escape(row.replacement.title)}</strong><span class="file-path">${escape(row.replacement.path)}</span>` : ""}
+      ${editable && row.status === "missing_library_file" ? `<p class="muted">${escape(row.reconnect_status === "matched" && !row.reconnect_candidates?.length
+        ? "Matching file is excluded or another event version has priority."
+        : row.reconnect_status === "ambiguous" ? "Imported title is ambiguous. Remove this membership or review its source; no replacement guessed."
+        : row.reconnect_status === "missing_metadata" ? "Source metadata is incomplete; no replacement guessed."
+        : "Original file unavailable. Acquisition never reconnects it automatically.")}</p>
+        ${(row.reconnect_candidates || []).map(track => `<div class="candidate"><strong>${escape(track.title)}</strong>
+          <span class="request-sub">${escape(track.artist)} / ${escape(track.version_label)}</span><span class="file-path">${escape(track.path)}</span>
+          <button class="confirm" data-action="seed_reconnect" data-entry-id="${escape(row.id)}" data-file-id="${escape(track.id)}"
+            aria-label="Reconnect file for entry ${index + 1}: ${escape(track.title)}">Reconnect file</button></div>`).join("")}` : ""}
       ${editable ? `<div class="seed-actions">
         ${index ? `<button class="secondary" data-action="seed_move" data-entry-id="${escape(row.id)}" data-direction="up" aria-label="Move up: entry ${index + 1}">Move up</button>` : ""}
         ${index < rows.length - 1 ? `<button class="secondary" data-action="seed_move" data-entry-id="${escape(row.id)}" data-direction="down" aria-label="Move down: entry ${index + 1}">Move down</button>` : ""}
@@ -74,6 +84,7 @@
     const labels = {not_started:"Not started", searching:"Searching", acquired:"Acquired externally; not verified"};
     return rows.map(row => `<article class="review-row">
       <h3>${escape(row.title)}</h3><span class="request-sub">${escape(row.artist || "Artist not specified")} ${escape(row.version || "")}</span>
+      ${row.source_label ? `<span class="request-sub">${escape(row.source_label)}</span>` : ""}
       <p class="review-note">${escape(labels[row.progress])}</p>
       <label for="lookup-${escape(row.key)}">Search text (select and copy)</label>
       <input id="lookup-${escape(row.key)}" readonly value="${escape(row.query)}">
@@ -198,7 +209,7 @@
       $("#acquisition-request").replaceChildren(...view.acquisition_queue.map(row => {
         const option = root.document.createElement("option");
         option.value = row.key;
-        option.textContent = `${row.title} / ${row.artist || "Artist not specified"} / ${row.version || "Version as requested"}`;
+        option.textContent = `${row.source_label ? row.source_label + ": " : ""}${row.title} / ${row.artist || "Artist not specified"} / ${row.version || "Version as requested"}`;
         return option;
       }));
       if (view.acquisition_queue.some(row => row.key === selectedRequest)) $("#acquisition-request").value = selectedRequest;
