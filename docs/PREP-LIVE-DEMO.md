@@ -189,6 +189,10 @@ The source hashes and original catalog snapshot remain in the session. Download
 the catalog JSON to reuse the existing catalog/personal-set import contract;
 this demo does not initialize a second catalog database.
 
+For individually selected read-only files outside `/Demo/`, use the separate
+[read-only pilot](READ-ONLY-PREP-PILOT.md). The demo and default main app remain
+unchanged; the pilot does not imply real-format compatibility approval.
+
 **Find missing songs** provides manual lookup text and provider destinations
 from [Crate Hackers' public page](https://www.cratehackers.com/): Direct Music
 Service, Late Night Record Pool, BPM Supreme, Beatport, Beatsource and DJcity.

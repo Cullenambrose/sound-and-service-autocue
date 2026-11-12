@@ -1,4 +1,4 @@
-"""Synthetic event workflow; matching, ranking and hard exclusions belong to setlist."""
+"""Shared event workflow; matching, ranking and hard exclusions belong to setlist."""
 import copy
 from dataclasses import asdict, replace
 import hashlib
@@ -55,7 +55,7 @@ def playlist(entries):
     paths = [entry["track"]["path"] for entry in entries]
     if any(not isinstance(path, str) or not path.startswith("/") or "\n" in path or "\r" in path
            for path in paths):
-        raise ValueError("Every playlist entry needs an absolute, single-line synthetic path.")
+        raise ValueError("Every playlist entry needs an absolute, single-line local path.")
     return ("#EXTM3U\n" + "".join(path + "\n" for path in paths)).encode("utf-8")
 
 
@@ -99,7 +99,7 @@ class SetlistFlow:
                 "acquisition_progress", "library_additions",
                 "prep_mode",
             }:
-                raise ValueError("Unsupported synthetic session; use a new 05- output directory.")
+                raise ValueError("Unsupported workflow session; use a new output directory.")
 
     def _library_snapshot(self, state):
         additions = state["library_additions"]
@@ -139,7 +139,7 @@ class SetlistFlow:
                     track = next((track for track in self._library_snapshot(state)[0]
                                   if track["id"] == decision["file_id"]), None)
                     if track is None:
-                        raise FlowConflict("Confirmed synthetic file is no longer available.")
+                        raise FlowConflict("Confirmed library file is no longer available.")
                     request = replace(
                         request, title=track["title"], artist=track.get("artist"),
                         version=track.get("version"),
@@ -175,7 +175,7 @@ class SetlistFlow:
             typed_diagnostics = original.resolution_diagnostics
             self._typed_diagnostics[mode] = (event_key, guest_keys, typed_diagnostics)
         if len(result.resolution_diagnostics) != len(typed_diagnostics):
-            raise ValueError("Confirmation changed the request list; reload the synthetic session.")
+            raise ValueError("Confirmation changed the request list; reload the session.")
         rows, held, fulfilled = [], set(), set()
         for diagnostic, typed in zip(result.resolution_diagnostics, typed_diagnostics):
             key = request_key(typed.category, typed.request)
@@ -404,12 +404,12 @@ class SetlistFlow:
             row = next((row for row in before["acquisition_queue"] if row["key"] == body["key"]), None)
             if row is None:
                 raise FlowConflict("This acquisition request is no longer pending.")
-            track = acquisition.synthetic_track(body["track"])
+            track = self._acquisition_track(body["track"])
             tracks = self._library_snapshot(self.state)[0]
             if len(self.state["library_additions"]) >= 100:
-                raise ValueError("This synthetic session supports at most 100 acquired metadata records.")
+                raise ValueError("This session supports at most 100 acquired records.")
             if any(item["id"] == track["id"] or item.get("path") == track["path"] for item in tracks):
-                raise FlowConflict("That file ID or path is already in the loaded synthetic library.")
+                raise FlowConflict("That file ID or path is already in the loaded library.")
             draft = copy.deepcopy(self.state)
             draft["library_additions"].append(track)
             after = self._view("prep", draft)
@@ -439,6 +439,13 @@ class SetlistFlow:
                     "recommendation_count": len(after["recommendations"]),
                     "changes": changes,
                     "note_scope": "Synthetic metadata only; no audio file was inspected. Saved Prep stays unchanged."}
+
+    def _acquisition_track(self, value):
+        return acquisition.synthetic_track(value)
+
+    def serato_preview(self, body):
+        with self.lock:
+            return serato_import.preview(body, self._library_snapshot(self.state)[0])
 
     def verify(self, state=None):
         state = self.state if state is None else state
@@ -539,7 +546,8 @@ class SetlistFlow:
                 state["library_additions"].append(preview["track"])
             elif action in {"serato_import", "portable_import"}:
                 adapter = serato_import if action == "serato_import" else set_intake
-                source = adapter.preview(body.get("upload"), self._library_snapshot(state)[0])
+                source = (self.serato_preview(body.get("upload")) if action == "serato_import"
+                          else adapter.preview(body.get("upload"), self._library_snapshot(state)[0]))
                 if source["id"] != body.get("preview_id"):
                     raise FlowConflict("Serato preview changed; preview the selected snapshots again.")
                 source["order"] = [entry["id"] for entry in source["entries"]]
@@ -611,7 +619,7 @@ class SetlistFlow:
                         or len(first_name) > 80 or len(email) > 254 or len(song) > 200):
                     raise ValueError("Enter a first name and a song; email is optional.")
                 if len(state["guests"]) >= 100:
-                    raise ValueError("This synthetic session supports up to 100 guest requests.")
+                    raise ValueError("This session supports up to 100 guest requests.")
                 state["guests"].append({
                     "id": request_id, "title": song.strip(),
                     "metadata": {"first_name": first_name.strip(), "email": email.strip()},
@@ -620,7 +628,7 @@ class SetlistFlow:
                 track = next((track for track in self._library_snapshot(state)[0]
                               if track["id"] == body.get("file_id")), None)
                 if track is None:
-                    raise ValueError("Choose a synthetic library file.")
+                    raise ValueError("Choose a loaded library file.")
                 state["played"].append({"title": track["title"], "artist": track.get("artist")})
             elif action == "save":
                 prep = self._view("prep", state)
@@ -653,7 +661,7 @@ class SetlistFlow:
                 self._write(self.export_path, data)
                 state["exported"] = digest(data)
             else:
-                raise ValueError("Unknown synthetic workflow action.")
+                raise ValueError("Unknown workflow action.")
             state["revision"] += 1
             state["receipts"][request_id] = (
                 "sha256:" + digest(canonical(body).encode()) if action in {"serato_import", "portable_import"} else canonical(body))

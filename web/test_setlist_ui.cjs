@@ -76,7 +76,7 @@ test("blocked do-not-play and already-played rows cannot be confirmed", () => {
 });
 
 test("Prep and Live display backend order exact files versions and reasons without ranking", () => {
-  const items = [{track:{id:"dirty", title:"Summer (Dirty)", artist:"Demo Artist", path:"/Demo/Dirty.mp3"},
+  const items = [{track:{id:"dirty", title:"Summer (Dirty)", artist:"Demo Artist", path:"/Demo/Dirty.mp3", key:""},
     version_label:"Dirty", reasons:["Live guest request", "Song cue fits first dance"]},
     {track:{id:"orbit", title:"Slow Orbit", artist:"Maya Vale", path:"/Demo/Short.mp3"},
       version_label:"Short Edit", reasons:["Must-play request"]}];
@@ -86,6 +86,7 @@ test("Prep and Live display backend order exact files versions and reasons witho
     assert.ok(html.includes(text));
   }
   assert.equal((html.match(/Mark played/g) || []).length, 2);
+  assert.match(html,/Key: Unknown/);
 });
 
 test("guest form asks only first name optional email and song, with no account step", () => {
@@ -132,6 +133,21 @@ test("HTTP errors never look like saved or fulfilled success", async () => {
   await assert.rejects(client.command("prep", {action:"save"}), /Session changed/);
   assert.ok(client.pending);
   assert.equal(client.views.prep.revision, 0);
+});
+
+test("FlowClient retains read-only pilot selection without uploading local audio", async () => {
+  const calls = [];
+  const session = {token:"local-pilot", synthetic:false, read_only_pilot:true,
+    max_snapshot_bytes:32 * 1024 * 1024, acquisition_paths:["/Selected/Fixture.wav"]};
+  const client = new FlowClient(async url => {
+    calls.push(url);
+    return {ok:true,json:async () => url === "/api/session" ? session : {mode:"prep",revision:0}};
+  });
+  await client.load("prep");
+  await client.load("live");
+  assert.equal(client.session,session);
+  assert.equal(client.token,"local-pilot");
+  assert.deepEqual(calls,["/api/session","/api/prep","/api/live"]);
 });
 
 test("imported memberships preserve duplicates and expose explicit occurrence-level edits", () => {

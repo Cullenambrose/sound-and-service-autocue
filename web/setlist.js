@@ -40,7 +40,7 @@
     return items.map((item, index) => `<tr><td>${String(index + 1).padStart(2, "0")}</td>
       <td><span class="track-title">${escape(item.track.title)}</span><span class="request-sub">${escape(item.track.artist)}</span></td>
       <td>${escape(item.version_label)} <span class="request-sub">${escape(item.track.id)}</span><span class="file-path">${escape(item.track.path)}</span>
-      <details><summary>Mix metadata</summary><span class="request-sub">BPM: ${escape(item.track.bpm ?? "Unknown")} / Key: ${escape(item.track.key ?? "Unknown")} / Energy: ${escape(item.track.energy ?? "Unknown")}</span></details></td>
+      <details><summary>Mix metadata</summary><span class="request-sub">BPM: ${escape(item.track.bpm ?? "Unknown")} / Key: ${escape(item.track.key || "Unknown")} / Energy: ${escape(item.track.energy ?? "Unknown")}</span></details></td>
       <td>${item.reasons.map(reason => `<span class="badge">${escape(reason)}</span>`).join("")}</td>
       ${live ? `<td><button class="secondary" data-action="played" data-file-id="${escape(item.track.id)}">Mark played</button></td>` : ""}</tr>`).join("");
   }
@@ -131,6 +131,7 @@
     constructor(fetcher) {
       this.fetcher = fetcher;
       this.token = null;
+      this.session = null;
       this.views = {};
       this.pending = null;
     }
@@ -142,7 +143,10 @@
       return body;
     }
     async load(mode) {
-      if (!this.token) this.token = (await this.request("/api/session")).token;
+      if (!this.token) {
+        this.session = await this.request("/api/session");
+        this.token = this.session.token;
+      }
       this.views[mode] = await this.request(`/api/${mode}`);
       return this.views[mode];
     }
@@ -210,7 +214,37 @@
     if (busy || client.pending) $("#eligible-tracks").querySelectorAll("button")
       .forEach(button => {button.disabled = true;});
   }
+  let pilotConfigured = false;
+  function configurePilot() {
+    if (!client.session?.read_only_pilot || pilotConfigured) return;
+    pilotConfigured = true;
+    root.document.title = "Booth Buddy · Read-only Prep pilot";
+    $(".demo-label").textContent = "READ-ONLY PILOT / SELECTED FILES ONLY";
+    $("#workspace-scope").textContent = "Explicitly selected files · Read-only tags and availability · No library scan";
+    $("#serato-help").textContent = "Select a static .crate and matching database snapshot, at most 32 MiB each. Only verified files in the launch selection can be available. Unselected paths are not opened. Source bytes stay untouched.";
+    $("#serato-sample").hidden = true;
+    $("#portable-import").hidden = true;
+    $("#prep-mode option[value='library']").textContent = "Use selected verified library";
+    $("#acquisition-title").textContent = "Verify a selected acquired file";
+    $("#acquisition-help").textContent = "Only paths explicitly permitted at launch are available here. Preview reads file tags and hashes without modifying the file. The shared engine checks song and requested version; availability is checked again on acceptance. Licensing and audio quality are not certified.";
+    $("#acquisition-file").hidden = true;
+    $("#acquisition-file").required = false;
+    $("#acquisition-file-label").hidden = true;
+    $("#selected-acquisition").hidden = false;
+    $("#acquisition-path").required = true;
+    $("#acquisition-path").replaceChildren(...client.session.acquisition_paths.map(path => {
+      const option = root.document.createElement("option");
+      option.value = path;
+      option.textContent = path;
+      return option;
+    }));
+    $("#acquisition-sample").hidden = true;
+    $("#acquisition-accept").textContent = "Accept verified file";
+    $(".boundary-note").textContent = "Read-only pilot. No music, tag or Serato writes. Saved Prep stays separate.";
+  }
   function paint(view) {
+    configurePilot();
+    const libraryLabel = client.session?.read_only_pilot ? "selected verified" : "synthetic";
     $("#event-name").textContent = view.event_name;
     if (view.mode === "prep") {
       $("#prep-review").innerHTML = reviewRows(view.needs_review);
@@ -218,7 +252,7 @@
       $("#prep-order-note").textContent = view.prep_mode === "source"
         ? "Shared-engine order within the imported source. Outside-source requirements stay separate."
         : view.prep_mode === "library"
-        ? "Shared-engine order across the supplied synthetic library. Imported order is retained separately."
+        ? `Shared-engine order across the ${libraryLabel} library. Imported order is retained separately.`
         : view.serato_source
         ? "Your working set order, with matched event requests and cues appended. Every row keeps its exact file."
         : "Ordered by the shared setlist engine. Every row keeps its original file.";
@@ -231,12 +265,12 @@
       $("#prep-mode").value = view.prep_mode;
       $("#scope-note").textContent = view.prep_mode === "source"
         ? "Only eligible exact files from the imported source. Outside-source event requests stay visible below."
-        : view.prep_mode === "library" ? "Full synthetic library in shared-engine order; imported order is retained separately."
+        : view.prep_mode === "library" ? `Full ${libraryLabel} library in shared-engine order; imported order is retained separately.`
         : "Imported membership order, followed by matched event requests. Missing source entries must be resolved.";
       $("#out-of-pool").innerHTML = (view.out_of_pool || []).map(row =>
         `<p>${escape(row.request.title)}: matched in library, outside selected source. Change build mode to include it.</p>`).join("");
       $("#phase-totals").innerHTML = planningRows(view.planning);
-      $("#library-counts").textContent = `${view.library_overview.tracks} synthetic records / ${view.library_overview.song_identities} songs / ${view.library_overview.multiple_file_songs} songs with multiple files.`;
+      $("#library-counts").textContent = `${view.library_overview.tracks} ${libraryLabel} records / ${view.library_overview.song_identities} songs / ${view.library_overview.multiple_file_songs} songs with multiple files.`;
       $("#duplicate-report").innerHTML = view.library_overview.groups.map(group => `<details><summary>${escape(group[0].title)} (${group.length} files)</summary>${group.map(track => `<p>${escape(track.title)} / ${escape(track.artist)}<span class="file-path">${escape(track.path)}</span></p>`).join("")}</details>`).join("") || '<p class="empty">No multiple-file song groups.</p>';
       $("#planning-panel").hidden = !view.serato_source || view.prep_mode !== "seed";
       if (sequencePreview && sequencePreview.revision !== view.revision) {
@@ -396,7 +430,8 @@
   }
   function readSnapshot(input) {
     const file = input.files[0];
-    if (!file || !file.size || file.size > 512 * 1024) return Promise.reject(new Error("Select a nonempty snapshot no larger than 512 KiB."));
+    const limit = client.session?.max_snapshot_bytes || 512 * 1024;
+    if (!file || !file.size || file.size > limit) return Promise.reject(new Error(`Select a nonempty snapshot no larger than ${limit / 1024} KiB.`));
     return new Promise((resolve, reject) => {
       const reader = new root.FileReader();
       reader.onload = () => resolve(reader.result.split(",")[1]);
@@ -521,6 +556,9 @@
     invalidateAcquisition();
     const generation = acquisitionGeneration;
     run(async () => {
+      if (client.session?.read_only_pilot) {
+        return previewAcquisition({path:$("#acquisition-path").value}, generation);
+      }
       const file = $("#acquisition-file").files[0];
       if (!file || !file.size || file.size > 8192) throw new Error("Select a nonempty synthetic JSON file no larger than 8 KiB.");
       return previewAcquisition(JSON.parse(await file.text()), generation);

@@ -15,7 +15,7 @@ MAX_SNAPSHOT_BYTES = 512 * 1024
 MAX_MEMBERSHIPS = 1000
 
 
-def decode_upload(body):
+def decode_upload(body, *, max_bytes=MAX_SNAPSHOT_BYTES):
     if not isinstance(body, dict) or set(body) != {"crate_name", "crate_base64", "database_base64", "volume_root"}:
         raise ValueError("Select a static .crate and database snapshot, a crate name and volume root.")
     name = catalog.text(body["crate_name"], "crate_name", required=True)
@@ -26,31 +26,31 @@ def decode_upload(body):
     decoded = []
     for key in ("crate_base64", "database_base64"):
         value = body[key]
-        if not isinstance(value, str) or len(value) > (MAX_SNAPSHOT_BYTES + 2) // 3 * 4:
-            raise ValueError("Each uploaded snapshot must be at most 512 KiB.")
+        if not isinstance(value, str) or len(value) > (max_bytes + 2) // 3 * 4:
+            raise ValueError(f"Each uploaded snapshot must be at most {max_bytes // 1024} KiB.")
         try:
             data = base64.b64decode(value, validate=True)
         except (ValueError, binascii.Error) as error:
             raise ValueError(f"{key} must contain valid base64.") from error
-        if not data or len(data) > MAX_SNAPSHOT_BYTES:
-            raise ValueError("Each uploaded snapshot must be nonempty and at most 512 KiB.")
+        if not data or len(data) > max_bytes:
+            raise ValueError(f"Each uploaded snapshot must be nonempty and at most {max_bytes // 1024} KiB.")
         decoded.append(data)
     return name, *decoded
 
 
-def preview(body, library):
-    name, crate_bytes, database_bytes = decode_upload(body)
+def preview(body, library, *, synthetic=True, max_bytes=MAX_SNAPSHOT_BYTES):
+    name, crate_bytes, database_bytes = decode_upload(body, max_bytes=max_bytes)
     try:
         crate = parse_snapshot_bytes(crate_bytes, kind="crate", volume_root=body["volume_root"])
         database = parse_snapshot_bytes(database_bytes, kind="database", volume_root=body["volume_root"])
     except SeratoParseError as error:
         raise ValueError(str(error)) from error
     if len(crate["tracks"]) > MAX_MEMBERSHIPS:
-        raise ValueError("Synthetic import supports at most 1000 crate memberships.")
+        raise ValueError("Import supports at most 1000 crate memberships.")
     records = {}
     for track in database["tracks"]:
         path = track["path"]
-        if not path.startswith("/Demo/"):
+        if synthetic and not path.startswith("/Demo/"):
             raise ValueError("Synthetic demo accepts /Demo/ references only; no real library import is enabled.")
         if path in records and records[path] != track:
             raise ValueError("Database contains conflicting metadata for the same path.")
@@ -65,7 +65,7 @@ def preview(body, library):
     entries, songs = [], []
     for position, membership in enumerate(crate["tracks"]):
         path = membership["path"]
-        if not path.startswith("/Demo/"):
+        if synthetic and not path.startswith("/Demo/"):
             raise ValueError("Synthetic demo accepts /Demo/ references only; no real library import is enabled.")
         metadata = records.get(path)
         status = "missing_metadata" if not metadata or not metadata.get("title") or not metadata.get("artist") else "unverified"
@@ -88,7 +88,7 @@ def preview(body, library):
             "file_id": selected.get("id") if status == "available" else None,
         })
     document = {
-        "schema_version": 1, "source": "Serato synthetic uploaded snapshot",
+        "schema_version": 1, "source": "Serato synthetic uploaded snapshot" if synthetic else "Selected Serato uploaded snapshot",
         "crate_sha256": crate_hash, "database_sha256": database_hash,
         "crates": [{"id": source_id, "title": name[:-6].replace("%%", " / "), "available": True,
                     "songs": songs}],
@@ -97,7 +97,8 @@ def preview(body, library):
     return {"id": source_id, "crate_name": name, "entries": entries, "catalog_snapshot": document,
             "counts": {status: sum(entry["status"] == status for entry in entries) for status in
                        ("available", "missing_metadata", "metadata_conflict", "missing_library_file")},
-            "note": "Order and duplicates preserved. Availability is checked against the supplied demo library only; no music paths are opened.",
+            "note": ("Order and duplicates preserved. Availability is checked against the supplied demo library only; no music paths are opened."
+                     if synthetic else "Order and duplicates preserved. Only explicitly selected verified music files can be available. Unselected paths are not opened or guessed."),
             "source": {"crate_sha256": crate_hash, "database_sha256": database_hash}}
 
 

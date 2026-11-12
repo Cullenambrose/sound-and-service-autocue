@@ -63,10 +63,13 @@ def demo_server(flow, port=0, *, handler_only=False, mount_prefix=""):
                             data = data.replace(f'"{target}"'.encode(), f'"{mount_prefix}{target}"'.encode())
                     return self.send(200, data, content_type)
                 if path == "/api/session":
-                    return self.send(200, {"token": token, "synthetic": True})
+                    info = flow.session_info() if hasattr(flow, "session_info") else {"synthetic": True}
+                    return self.send(200, {"token": token, **info})
                 if path in {"/api/prep", "/api/live"}:
                     return self.send(200, flow.view(path.rsplit("/", 1)[1]))
                 if path == "/api/serato/demo":
+                    if not getattr(flow, "synthetic", True):
+                        raise ValueError("Synthetic samples are disabled in the read-only pilot.")
                     with flow.lock:
                         return self.send(200, serato_import.demo_upload(flow._library_snapshot(flow.state)[0]))
                 if path == "/api/serato/catalog":
@@ -97,17 +100,20 @@ def demo_server(flow, port=0, *, handler_only=False, mount_prefix=""):
                                      "/api/portable/preview", "/api/sequence/preview"}:
                     return self.send(404, {"error": "Unknown synthetic demo route."})
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 1500000:
-                    raise ValueError("JSON commands must be between 1 and 1500000 bytes.")
+                upload_limit = getattr(flow, "max_snapshot_bytes", serato_import.MAX_SNAPSHOT_BYTES)
+                limit = max(1500000, 2 * ((upload_limit + 2) // 3 * 4) + 8192)
+                if not 0 < length <= limit:
+                    raise ValueError(f"JSON commands must be between 1 and {limit} bytes.")
                 body = json.loads(self.rfile.read(length))
                 if path == "/api/serato/preview":
-                    with flow.lock:
-                        return self.send(200, serato_import.preview(body, flow._library_snapshot(flow.state)[0]))
+                    return self.send(200, flow.serato_preview(body))
                 if path == "/api/acquisition/preview":
                     return self.send(200, flow.acquisition_preview(body))
                 if path == "/api/sequence/preview":
                     return self.send(200, flow.sequence_preview(body))
                 if path == "/api/portable/preview":
+                    if not getattr(flow, "synthetic", True):
+                        raise ValueError("Portable synthetic intake is disabled in the read-only pilot.")
                     with flow.lock:
                         return self.send(200, set_intake.preview(body, flow._library_snapshot(flow.state)[0]))
                 if length > 8192 and not (isinstance(body, dict) and body.get("action") in {"serato_import", "portable_import"}):
@@ -118,7 +124,7 @@ def demo_server(flow, port=0, *, handler_only=False, mount_prefix=""):
             except (ValueError, TypeError) as error:
                 return self.send(400, {"error": str(error)})
             except OSError as error:
-                return self.send(503, {"error": "Could not persist synthetic workflow: " + str(error)})
+                return self.send(503, {"error": "Could not read or persist local workflow: " + str(error)})
 
     if handler_only:
         return Handler

@@ -16,7 +16,7 @@
   </header>
   <main id="workspace" tabindex="-1">
     <div class="event-heading">
-      <div><h1 id="event-name">Demo wedding</h1><p class="muted">First dance · Exact local files · Synthetic data only</p></div>
+      <div><h1 id="event-name">Demo wedding</h1><p id="workspace-scope" class="muted">First dance · Exact local files · Synthetic data only</p></div>
       <span class="review-stamp">DESIGN REVIEW PENDING<br><strong>95/100 required before shipping</strong></span>
     </div>
     <nav class="tabs" aria-label="Event workspace"><button id="prep-tab" aria-current="page">01 &nbsp; Prep</button><button id="live-tab">02 &nbsp; Live</button></nav>
@@ -31,7 +31,7 @@
       <div class="column-heading"><span class="eyebrow">01 / SOURCES</span><h3>Your starting point</h3></div>
       <details class="review-panel" id="serato-import">
         <summary>Import a Serato playlist <span class="request-sub">Preview first. Source files stay untouched.</span></summary>
-        <p class="muted">Select a static .crate and its database snapshot, or use the invented sample below. This demo accepts only /Demo/ track references. Preview does not save or replace your set.</p>
+        <p id="serato-help" class="muted">Select a static .crate and its database snapshot, or use the invented sample below. This demo accepts only /Demo/ track references. Preview does not save or replace your set.</p>
         <form id="serato-form">
           <label for="serato-crate">Static .crate snapshot</label><input id="serato-crate" type="file" accept=".crate" required>
           <label for="serato-database">Matching database V2 snapshot</label><input id="serato-database" type="file" required>
@@ -108,11 +108,12 @@
         <p class="muted">Search links open the provider's own website. Where a search URL is unverified, copy the text and search there yourself. No accounts are connected, no availability is claimed, and nothing is downloaded or added to your crate.</p>
         <div id="acquisition-queue"></div>
         <details id="acquisition-intake">
-          <summary>Reconcile synthetic acquired metadata</summary>
-          <p class="muted">Select one invented JSON track record: id, title, artist, path under /Demo/, optional version. No audio is inspected. Preview uses the shared engine; acceptance refreshes only this demo's metadata. Saved Prep is not replaced.</p>
+          <summary id="acquisition-title">Reconcile synthetic acquired metadata</summary>
+          <p id="acquisition-help" class="muted">Select one invented JSON track record: id, title, artist, path under /Demo/, optional version. No audio is inspected. Preview uses the shared engine; acceptance refreshes only this demo's metadata. Saved Prep is not replaced.</p>
           <form id="acquisition-form">
             <label for="acquisition-request">Pending request</label><select id="acquisition-request" required></select>
-            <label for="acquisition-file">Synthetic track JSON</label><input id="acquisition-file" type="file" accept=".json,application/json" required>
+            <label id="acquisition-file-label" for="acquisition-file">Synthetic track JSON</label><input id="acquisition-file" type="file" accept=".json,application/json" required>
+            <div id="selected-acquisition" hidden><label for="acquisition-path">Explicitly selected acquired file</label><select id="acquisition-path"></select></div>
             <button type="submit" class="secondary">Preview selected metadata</button>
             <button type="button" id="acquisition-sample" class="secondary">Preview invented matching sample</button>
           </form>

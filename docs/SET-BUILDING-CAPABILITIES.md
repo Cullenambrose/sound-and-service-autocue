@@ -4,6 +4,12 @@ The local Prep/Live workspace uses the shared setlist engine. It does not scan
 audio, write Serato/tag/music files, connect provider accounts or download audio.
 All selectable paths must be invented `/Demo/` references.
 
+A separately launched [selected-file read-only pilot](READ-ONLY-PREP-PILOT.md)
+now permits individually selected real-path files without a folder scan or
+source writes. It reuses this workflow and the shared engine, but does not
+enable production mode in the main app. Validation still uses generated audio
+and snapshots; actual Serato compatibility and signed-in searches remain gated.
+
 ## Supported input matrix
 
 | Input | Support | Boundary |
