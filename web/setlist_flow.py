@@ -11,6 +11,11 @@ import threading
 from library.matcher import extract_version_tags
 from setlist import PreparedLibrary, context_from_event, rank_next_song, rank_prep_crate, song_identity
 
+if __package__:
+    from . import serato_import, record_pools
+else:
+    import serato_import
+    import record_pools
 
 FIXTURES = Path(__file__).resolve().parents[1] / "engine/setlist/fixtures"
 
@@ -72,12 +77,14 @@ class SetlistFlow:
             "revision": 0, "prep_decisions": {}, "live_decisions": {}, "played": [],
             "guests": copy.deepcopy(self.event.get("_demo_live_inputs", {}).get("guest_requests", [])),
             "saved": None, "exported": None, "receipts": {},
+            "serato_source": None,
         }
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text())
+            self.state.setdefault("serato_source", None)
             if set(self.state) != {
                 "revision", "prep_decisions", "live_decisions", "played", "guests",
-                "saved", "exported", "receipts",
+                "saved", "exported", "receipts", "serato_source",
             }:
                 raise ValueError("Unsupported synthetic session; use a new 05- output directory.")
 
@@ -193,20 +200,54 @@ class SetlistFlow:
             for item in result if item.song_identity not in held - fulfilled
         ]
         saved = state["saved"]
+        source = state["serato_source"] if mode == "prep" else None
+        seed_rows, crate_entries = self._seed(source, recommendations)
+        saved_current = bool(saved and saved["decisions"] == state["prep_decisions"]
+                             and saved.get("seed_revision") == (
+                                 digest(canonical(state["serato_source"]).encode())
+                                 if state["serato_source"] else None))
         verification = self.verify(state)
         return {
             "mode": mode, "revision": state["revision"], "event_name": self.event.get("event_name", "Demo wedding"),
             "phase": result.phase, "requests": rows,
             "needs_review": [row for row in rows if row["needs_review"]],
             "recommendations": recommendations,
-            "saved": saved, "verification": verification,
+            "acquisition_queue": record_pools.acquisition_rows(rows) if mode == "prep" else [],
+            "serato_source": source, "seed_rows": seed_rows, "crate_entries": crate_entries,
+            "saved": saved, "saved_current": saved_current, "verification": verification,
             "prep_done": bool(
-                saved and saved["decisions"] == state["prep_decisions"]
+                saved_current
                 and (mode != "prep" or not any(row["needs_review"] for row in rows))
                 and state["exported"] == verification.get("export_sha256")
                 and verification["mismatches"] == 0
             ),
         }
+
+    def _seed(self, source, recommendations):
+        if source is None:
+            return [], recommendations
+        files = {item["track"]["id"]: item for item in recommendations}
+        rows, entries = [], []
+        source_entries = {entry["id"]: entry for entry in source["entries"]}
+        for entry_id in source["order"]:
+            entry = source_entries[entry_id]
+            item = files.get(entry["file_id"])
+            status = entry["status"] if entry["status"] != "available" else (
+                "available" if item else "blocked_or_version_conflict"
+            )
+            rows.append({**entry, "status": status})
+            if status == "available":
+                entries.append({**item, "seed_entry_id": entry_id,
+                                "reasons": (*item["reasons"], "Added by DJ" if entry["position"] is None
+                                            else "Imported Serato playlist")})
+        # Matched event requests and cues preserve imported membership order.
+        identities = {song_identity(item["track"]["title"], item["track"]["artist"]) for item in entries}
+        for item in recommendations:
+            identity = song_identity(item["track"]["title"], item["track"]["artist"])
+            if ({"requested", "customer"} & set(item["badges"])) and identity not in identities:
+                entries.append(item)
+                identities.add(identity)
+        return rows, entries
 
     def view(self, mode):
         if mode not in {"prep", "live"}:
@@ -235,7 +276,7 @@ class SetlistFlow:
         with self.lock:
             previous = self.state["receipts"].get(request_id)
             if previous:
-                if previous != canonical(body):
+                if previous not in {canonical(body), "sha256:" + digest(canonical(body).encode())}:
                     raise FlowConflict("Request ID was reused with different content.")
                 return self.view(body.get("mode", "prep"))
             if type(body.get("base_revision")) is not int or body["base_revision"] != self.state["revision"]:
@@ -249,15 +290,60 @@ class SetlistFlow:
                 "confirm": {"key", "file_id"}, "dismiss": {"key"},
                 "guest": {"first_name", "email", "song"}, "played": {"file_id"},
                 "save": set(), "export": set(),
+                "serato_import": {"upload", "preview_id"},
+                "seed_remove": {"entry_id"}, "seed_move": {"entry_id", "direction"},
+                "seed_add": {"file_id"},
             }
             if action not in fields or set(body) - (
                 {"request_id", "base_revision", "mode", "action"} | fields[action]
             ):
                 raise ValueError("Unknown workflow action or fields.")
             if ((action in {"guest", "played"} and mode != "live")
-                    or (action in {"save", "export"} and mode != "prep")):
+                    or (action in {"save", "export", "serato_import", "seed_remove", "seed_move", "seed_add"} and mode != "prep")):
                 raise ValueError("Guest/played actions are Live-only; save/export actions are Prep-only.")
-            if action in {"confirm", "dismiss"}:
+            if action == "serato_import":
+                source = serato_import.preview(body.get("upload"), self.library)
+                if source["id"] != body.get("preview_id"):
+                    raise FlowConflict("Serato preview changed; preview the selected snapshots again.")
+                source["order"] = [entry["id"] for entry in source["entries"]]
+                state["serato_source"] = source
+            elif action in {"seed_remove", "seed_move", "seed_add"}:
+                source = state["serato_source"]
+                if source is None:
+                    raise FlowConflict("Import and accept a Serato snapshot first.")
+                if action == "seed_add":
+                    if len(source["order"]) >= serato_import.MAX_MEMBERSHIPS:
+                        raise ValueError("Working sets support at most 1000 memberships.")
+                    view = self._view("prep", state)
+                    item = next((item for item in view["recommendations"]
+                                 if item["track"]["id"] == body.get("file_id")), None)
+                    if item is None:
+                        raise ValueError("Choose an eligible recommendation from the shared engine.")
+                    track = item["track"]
+                    entry_id = "added:" + str(track["id"])
+                    if entry_id in source["order"]:
+                        raise FlowConflict("That added file is already in the working set.")
+                    if not any(entry["id"] == entry_id for entry in source["entries"]):
+                        source["entries"].append({"id": entry_id, "position": None, "song_id": None,
+                            "raw_path": track["path"], "path": track["path"], "title": track["title"],
+                            "artist": track["artist"], "status": "available", "file_id": track["id"]})
+                    source["order"].append(entry_id)
+                else:
+                    entry_id = body.get("entry_id")
+                    if entry_id not in source["order"]:
+                        raise FlowConflict("Working-set membership changed; reload before editing.")
+                    position = source["order"].index(entry_id)
+                    if action == "seed_remove":
+                        source["order"].remove(entry_id)
+                    else:
+                        direction = body.get("direction")
+                        if direction not in {"up", "down"}:
+                            raise ValueError("Move direction must be up or down.")
+                        target = position + (-1 if direction == "up" else 1)
+                        if not 0 <= target < len(source["order"]):
+                            raise ValueError("Membership is already at the edge of the working set.")
+                        source["order"][position], source["order"][target] = source["order"][target], entry_id
+            elif action in {"confirm", "dismiss"}:
                 view = self._view(mode, state)
                 row = next((row for row in view["requests"] if row["key"] == body.get("key")), None)
                 if not row or not row["needs_review"]:
@@ -289,8 +375,13 @@ class SetlistFlow:
                 prep = self._view("prep", state)
                 if prep["needs_review"]:
                     raise FlowConflict("Confirm or dismiss every Needs review row before saving.")
-                state["saved"] = {"entries": prep["recommendations"],
+                if any(row["status"] != "available" for row in prep["seed_rows"]):
+                    raise FlowConflict("Remove unavailable or blocked imported entries before saving.")
+                state["saved"] = {"entries": prep["crate_entries"],
                                   "decisions": copy.deepcopy(state["prep_decisions"])}
+                if state["serato_source"]:
+                    state["saved"]["seed_revision"] = digest(canonical(state["serato_source"]).encode())
+                    state["saved"]["source"] = state["serato_source"]["source"]
                 state["exported"] = None
                 self._write(self.saved_path, (canonical(state["saved"]) + "\n").encode())
             elif action == "export":
@@ -304,7 +395,8 @@ class SetlistFlow:
             else:
                 raise ValueError("Unknown synthetic workflow action.")
             state["revision"] += 1
-            state["receipts"][request_id] = canonical(body)
+            state["receipts"][request_id] = (
+                "sha256:" + digest(canonical(body).encode()) if action == "serato_import" else canonical(body))
             result = self._view(mode, state)
             self._write(self.state_path, (canonical(state) + "\n").encode())
             self.state = state

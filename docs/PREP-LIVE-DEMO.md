@@ -13,8 +13,9 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m web.setlist_demo \
 
 Open the printed `http://127.0.0.1:8767` URL. Stop with Ctrl-C.
 `--shuffled` selects the shuffled copy of the same synthetic demo library.
-The server loads only the checked-in `mock-wedding-event.json` and one of the
-two demo libraries. It never imports the existing app server, initializes its
+The server loads the checked-in `mock-wedding-event.json` and one of the
+two demo libraries, plus explicitly uploaded synthetic snapshot bytes if selected.
+It never imports the existing app server, initializes its
 database, scans folders, opens music paths, or calls tag/crate/Serato writers.
 Its CLI accepts only a non-symlink `05-*` or `06-*` directory directly inside the requested
 Desktop outputs directory. Music paths in the playlist are synthetic references,
@@ -109,3 +110,46 @@ duplicate exact files, and Summer without creating any music files.
 Before screenshots show the old library-prep screen twice: event Prep and
 Live screens did not exist before this change. They are baseline evidence,
 not invented mockups of nonexistent prior screens.
+
+## Synthetic Serato starting sets
+
+Prep now accepts an explicitly selected static `.crate` plus database snapshot.
+Only invented `/Demo/` references are accepted. Use **Preview synthetic sample**
+to exercise it without selecting files. Uploads are bounded to 512 KiB each
+and 1,000 crate memberships. This is not yet a real-library compatibility claim.
+
+The strict byte parser supports nested track containers and legacy flat markers,
+retains occurrence order/duplicates and unknown track fields, and rejects
+truncation, invalid text, conflicting metadata and unsafe references explicitly.
+No referenced path is opened. Preview is read-only; **Use as starting set** is a
+revisioned, retry-safe explicit replacement of the working source.
+
+Imported memberships can be moved, removed, or supplemented from shared-engine
+recommendations. Engine-selected files are the only playable entries: unavailable,
+blocked or version-conflicting imports remain visible and prevent saving until
+removed. Matched event requests and cues are appended without disturbing imported
+order. Imports never mean "played this event." Save/export retains exact working
+membership order, including duplicates; Live cannot alter those saved artifacts.
+The source hashes and original catalog snapshot remain in the session. Download
+the catalog JSON to reuse the existing catalog/personal-set import contract;
+this demo does not initialize a second catalog database.
+
+**Find missing songs** provides manual lookup text and six provider destinations
+from [Crate Hackers' public page](https://www.cratehackers.com/): Direct Music
+Service, Late Night Record Pool, BPM Supreme, Beatport, Beatsource and DJcity.
+Crate Hackers advertises connected downloads for the first two and search for the
+others. Those are their capabilities, not this application's integrations.
+[Beatsource](https://www.beatsource.com/) now announces migration to Beatport.
+Store/streaming destinations are distinguished from record pools. Public API
+authorization has not been established; no endpoints or logged-in scraping are
+assumed. This app opens provider homepages only, sends no song text automatically,
+connects no accounts, and performs no purchases or downloads. Provider listings
+never fulfill requests or become playable files.
+
+The supplied reference UI additionally shows 23 selectable record pools. Those
+names are a research backlog, not verified integrations here; the six manual
+destinations above are not a full feature-parity claim.
+
+Remaining roadmap: real snapshot compatibility approval, phase-based set editing,
+authorized provider search APIs, acquired-file reconciliation, and opt-in history
+learning. Independent design approval is still required.

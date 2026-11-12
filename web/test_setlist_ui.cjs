@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const {reviewRows, trackRows, prepProgress, FlowClient} = require("./setlist.js");
+const {reviewRows, trackRows, seedRows, prepProgress, FlowClient} = require("./setlist.js");
 
 const row = {key:"review-1", category:"must_play",
   request:{title:"Shake It <script>", artist:"Demo Artist", version:""},
@@ -53,6 +53,8 @@ test("Prep completion distinguishes pending decisions, save, export and verifica
   assert.equal(prepProgress(view), "1 decision before saving");
   assert.equal(prepProgress({...view, needs_review:[]}), "Ready to save");
   assert.equal(prepProgress({...view, needs_review:[], saved:{}}), "Crate saved · Export to finish");
+  assert.equal(prepProgress({...view, needs_review:[], saved:{}, saved_current:false}),
+    "Working set changed · Save again");
   assert.equal(prepProgress({...view, needs_review:[], prep_done:true}),
     "Saved · Exported · Verified: 0 mismatches");
   assert.equal(prepProgress({...view, verification:{mismatches:2}}), "Verification failed: 2 mismatches");
@@ -130,4 +132,22 @@ test("HTTP errors never look like saved or fulfilled success", async () => {
   await assert.rejects(client.command("prep", {action:"save"}), /Session changed/);
   assert.ok(client.pending);
   assert.equal(client.views.prep.revision, 0);
+});
+
+test("imported memberships preserve duplicates and expose explicit occurrence-level edits", () => {
+  const rows = [
+    {id:"first", title:"Same <song>", artist:"Demo", path:"/Demo/same.mp3", status:"available"},
+    {id:"repeat", title:"Same <song>", artist:"Demo", path:"/Demo/same.mp3", status:"available"},
+    {id:"missing", path:"/Demo/missing.mp3", status:"missing_metadata"},
+  ];
+  assert.doesNotMatch(seedRows(rows), /data-action=/);
+  const html = seedRows(rows, true);
+  assert.equal((html.match(/Same &lt;song&gt;/g) || []).length, 2);
+  assert.match(html, /data-entry-id="first"/);
+  assert.match(html, /data-entry-id="repeat"/);
+  assert.match(html, /missing metadata/);
+  assert.match(html, /Move up: entry 2/);
+  assert.match(html, /Remove from set: entry 3/);
+  assert.equal(prepProgress({needs_review:[], verification:{mismatches:null}, seed_rows:rows}),
+    "Resolve imported entries before saving");
 });

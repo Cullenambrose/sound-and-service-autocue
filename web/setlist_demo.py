@@ -14,8 +14,10 @@ if str(ROOT / "engine") not in sys.path:
     sys.path.insert(0, str(ROOT / "engine"))
 if __package__:
     from .setlist_flow import FlowConflict, SetlistFlow
+    from . import serato_import
 else:
     from setlist_flow import FlowConflict, SetlistFlow
+    import serato_import
 
 WEB = Path(__file__).resolve().parent
 OUTPUTS = Path.home() / "Desktop/MASTER-TODO/outputs"
@@ -57,6 +59,14 @@ def demo_server(flow, port=0):
                     return self.send(200, {"token": token, "synthetic": True})
                 if path in {"/api/prep", "/api/live"}:
                     return self.send(200, flow.view(path.rsplit("/", 1)[1]))
+                if path == "/api/serato/demo":
+                    return self.send(200, serato_import.demo_upload(flow.library))
+                if path == "/api/serato/catalog":
+                    with flow.lock:
+                        source = flow.state["serato_source"]
+                        if source is None:
+                            raise FlowConflict("Accept a Serato snapshot before downloading its catalog.")
+                        return self.send(200, source["catalog_snapshot"])
                 if path == "/api/export":
                     with flow.lock:
                         if flow.verify()["mismatches"] != 0:
@@ -74,12 +84,16 @@ def demo_server(flow, port=0):
                     or self.headers.get("X-Setlist-Token") != token):
                 return self.send(403, {"error": "Reload the local demo to establish a session."})
             try:
-                if self.path != "/api/command":
+                if self.path not in {"/api/command", "/api/serato/preview"}:
                     return self.send(404, {"error": "Unknown synthetic demo route."})
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 8192:
-                    raise ValueError("JSON commands must be between 1 and 8192 bytes.")
+                if not 0 < length <= 1500000:
+                    raise ValueError("JSON commands must be between 1 and 1500000 bytes.")
                 body = json.loads(self.rfile.read(length))
+                if self.path == "/api/serato/preview":
+                    return self.send(200, serato_import.preview(body, flow.library))
+                if length > 8192 and not (isinstance(body, dict) and body.get("action") == "serato_import"):
+                    raise ValueError("Non-upload JSON commands must be at most 8192 bytes.")
                 return self.send(200, flow.command(body))
             except FlowConflict as error:
                 return self.send(409, {"error": str(error)})

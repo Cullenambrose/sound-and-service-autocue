@@ -31,6 +31,8 @@
     if (view.prep_done) return "Saved · Exported · Verified: 0 mismatches";
     if (view.verification.mismatches > 0) return `Verification failed: ${view.verification.mismatches} mismatches`;
     if (view.needs_review.length) return `${view.needs_review.length} ${view.needs_review.length === 1 ? "decision" : "decisions"} before saving`;
+    if (view.seed_rows?.some(row => row.status !== "available")) return "Resolve imported entries before saving";
+    if (view.saved && view.saved_current === false) return "Working set changed · Save again";
     return view.saved ? "Crate saved · Export to finish" : "Ready to save";
   }
   function trackRows(items, live = false) {
@@ -39,6 +41,17 @@
       <td>${escape(item.version_label)} <span class="request-sub">${escape(item.track.id)}</span><span class="file-path">${escape(item.track.path)}</span></td>
       <td>${item.reasons.map(reason => `<span class="badge">${escape(reason)}</span>`).join("")}</td>
       ${live ? `<td><button class="secondary" data-action="played" data-file-id="${escape(item.track.id)}">Mark played</button></td>` : ""}</tr>`).join("");
+  }
+  function seedRows(rows, editable = false) {
+    return rows.map((row, index) => `<li class="review-row">
+      <div class="row-head"><strong>${index + 1}. ${escape(row.title || "Metadata unavailable")}</strong>
+      <span class="badge ${row.status === "available" ? "success" : "review"}">${escape(row.status.replaceAll("_", " "))}</span></div>
+      <span class="request-sub">${escape(row.artist || "Unknown artist")}</span><span class="file-path">${escape(row.path)}</span>
+      ${editable ? `<div class="seed-actions">
+        ${index ? `<button class="secondary" data-action="seed_move" data-entry-id="${escape(row.id)}" data-direction="up" aria-label="Move up: entry ${index + 1}">Move up</button>` : ""}
+        ${index < rows.length - 1 ? `<button class="secondary" data-action="seed_move" data-entry-id="${escape(row.id)}" data-direction="down" aria-label="Move down: entry ${index + 1}">Move down</button>` : ""}
+        <button class="dismiss" data-action="seed_remove" data-entry-id="${escape(row.id)}" aria-label="Remove from set: entry ${index + 1}">Remove from set</button>
+      </div>` : ""}</li>`).join("");
   }
   class FlowClient {
     constructor(fetcher) {
@@ -76,12 +89,22 @@
       return result;
     }
   }
-  const exports = {escape, reviewRows, trackRows, prepProgress, FlowClient};
+  const exports = {escape, reviewRows, trackRows, seedRows, prepProgress, FlowClient};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   if (!root.document) return;
   const $ = selector => root.document.querySelector(selector);
   const client = new FlowClient(root.fetch.bind(root));
   let mode = "prep", busy = false;
+  let importPreview = null;
+  let importGeneration = 0;
+  function invalidatePreview() {
+    importGeneration += 1;
+    importPreview = null;
+    $("#serato-preview").hidden = true;
+  }
+  function blockedPrep(view) {
+    return !!view.needs_review.length || view.seed_rows?.some(row => row.status !== "available");
+  }
   function guestAccepted() {
     $("#guest-form").reset();
     $("#guest-entry").open = false;
@@ -90,16 +113,37 @@
     $("#event-name").textContent = view.event_name;
     if (view.mode === "prep") {
       $("#prep-review").innerHTML = reviewRows(view.needs_review);
-      $("#prep-tracks").innerHTML = trackRows(view.recommendations);
+      $("#prep-tracks").innerHTML = trackRows(view.crate_entries || view.recommendations);
+      $("#prep-order-note").textContent = view.serato_source
+        ? "Your working set order, with matched event requests and cues appended. Every row keeps its exact file."
+        : "Ordered by the shared setlist engine. Every row keeps its original file.";
       $("#review-count").textContent = view.needs_review.length;
-      $("#crate-count").textContent = view.recommendations.length;
+      $("#crate-count").textContent = (view.crate_entries || view.recommendations).length;
       $("#prep-progress").textContent = prepProgress(view);
       $("#prep-progress").classList.toggle("complete", view.prep_done);
       $("#prep-progress").classList.toggle("failed", view.verification.mismatches > 0);
       $("#verify").textContent = view.verification.note;
-      $("#save-prep").disabled = !!view.needs_review.length;
+      $("#save-prep").disabled = blockedPrep(view);
       $("#export-prep").disabled = !view.saved;
       $("#download").hidden = view.verification.mismatches !== 0;
+      $("#seed-workspace").hidden = !view.serato_source;
+      $("#seed-memberships").innerHTML = seedRows(view.seed_rows || [], true);
+      $("#seed-source").textContent = view.serato_source
+        ? `${view.serato_source.crate_name} · ${view.seed_rows.length} working memberships · original order retained until you edit` : "";
+      $("#seed-add-file").replaceChildren(...view.recommendations.map(item => {
+        const option = root.document.createElement("option");
+        option.value = item.track.id;
+        option.textContent = `${item.track.title} — ${item.track.artist} / ${item.version_label}`;
+        return option;
+      }));
+      $("#acquisition-count").textContent = `(${view.acquisition_queue.length})`;
+      $("#acquisition-queue").innerHTML = view.acquisition_queue.map(row => `<article class="review-row">
+        <h3>${escape(row.title)}</h3><span class="request-sub">${escape(row.artist || "Artist not specified")} ${escape(row.version || "")}</span>
+        <label for="lookup-${escape(row.key)}">Search text (select and copy)</label>
+        <input id="lookup-${escape(row.key)}" readonly value="${escape(row.query)}">
+        <div class="seed-actions">${row.providers.map(provider => `<a href="${escape(provider.url)}" target="_blank" rel="noopener noreferrer">${escape(provider.name)} <span class="request-sub">${escape(provider.kind)}</span></a>`).join("")}</div>
+        <p class="muted">Still unresolved. A provider listing is not a playable library file.</p>
+      </article>`).join("") || '<p class="empty">No missing-song lookups waiting.</p>';
     } else {
       const guests = view.requests.filter(row => row.category === "guest_request");
       $("#live-requests").innerHTML = reviewRows(guests, view.recommendations);
@@ -110,7 +154,7 @@
   async function run(operation) {
     if (busy) return;
     busy = true;
-    const actedOnReview = root.document.activeElement?.matches("[data-key]");
+    const actedOnReview = root.document.activeElement?.matches("[data-key], [data-entry-id]");
     const returnFocus = root.document.activeElement;
     $("main").setAttribute("aria-busy", "true");
     $("#error").hidden = true;
@@ -126,7 +170,7 @@
       $("main").setAttribute("aria-busy", "false");
       root.document.querySelectorAll("button").forEach(button => {button.disabled = false;});
       if (mode === "prep" && client.views.prep) {
-        $("#save-prep").disabled = !!client.views.prep.needs_review.length;
+        $("#save-prep").disabled = blockedPrep(client.views.prep);
         $("#export-prep").disabled = !client.views.prep.saved;
       }
       if (client.pending) {
@@ -137,8 +181,9 @@
       }
       $("#recovery").hidden = !client.pending;
       if (!$("#error").hidden) $("#error").focus();
+      else if (returnFocus?.id === "serato-accept") $("#seed-memberships").focus();
       else if (actedOnReview) {
-        const panel = $(mode === "prep" ? "#prep-review" : "#live-requests");
+        const panel = $(returnFocus?.dataset.entryId ? "#seed-memberships" : mode === "prep" ? "#prep-review" : "#live-requests");
         (panel.querySelector("button") || panel).focus();
       } else if (returnFocus?.isConnected && !returnFocus.disabled) {
         const closedDisclosure = returnFocus.closest("details:not([open])");
@@ -184,10 +229,63 @@
       return view;
     });
   });
+  async function previewSerato(upload, generation) {
+    const preview = await client.request("/api/serato/preview", {
+      method:"POST", headers:{"Content-Type":"application/json", "X-Setlist-Token":client.token},
+      body:JSON.stringify(upload),
+    });
+    if (generation !== importGeneration) throw new Error("Selected snapshots changed. Preview them again.");
+    importPreview = {upload, preview};
+    $("#serato-preview").hidden = false;
+    $("#serato-preview-summary").textContent = `${preview.crate_name}: ${preview.entries.length} memberships. ${preview.note}`;
+    $("#serato-preview-rows").innerHTML = seedRows(preview.entries);
+    return client.views.prep;
+  }
+  function readSnapshot(input) {
+    const file = input.files[0];
+    if (!file || !file.size || file.size > 512 * 1024) return Promise.reject(new Error("Select a nonempty snapshot no larger than 512 KiB."));
+    return new Promise((resolve, reject) => {
+      const reader = new root.FileReader();
+      reader.onload = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = () => reject(new Error("Could not read the selected snapshot."));
+      reader.readAsDataURL(file);
+    });
+  }
+  $("#serato-form").addEventListener("submit", event => {
+    event.preventDefault();
+    if (busy) return;
+    invalidatePreview();
+    const generation = importGeneration;
+    run(async () => previewSerato({
+      crate_name:$("#serato-crate").files[0]?.name,
+      crate_base64:await readSnapshot($("#serato-crate")),
+      database_base64:await readSnapshot($("#serato-database")),
+      volume_root:$("#serato-volume").value,
+    }, generation));
+  });
+  $("#serato-form").addEventListener("input", invalidatePreview);
+  $("#serato-form").addEventListener("change", invalidatePreview);
+  $("#serato-sample").addEventListener("click", () => {
+    if (busy) return;
+    invalidatePreview();
+    const generation = importGeneration;
+    run(async () => previewSerato(await client.request("/api/serato/demo"), generation));
+  });
+  $("#serato-accept").addEventListener("click", () => run(async () => {
+    if (!importPreview) throw new Error("Preview the selected snapshots first.");
+    const view = await client.command("prep", {action:"serato_import",
+      upload:importPreview.upload, preview_id:importPreview.preview.id});
+    invalidatePreview();
+    $("#seed-memberships").focus();
+    return view;
+  }));
+  $("#seed-add").addEventListener("click", () => run(() => client.command("prep",
+    {action:"seed_add", file_id:$("#seed-add-file").value})));
   root.document.addEventListener("click", event => {
     const button = event.target.closest("[data-action]");
     if (button) run(() => client.command(mode, {action:button.dataset.action,
-      key:button.dataset.key, file_id:button.dataset.fileId}));
+      key:button.dataset.key, file_id:button.dataset.fileId,
+      entry_id:button.dataset.entryId, direction:button.dataset.direction}));
   });
   switchMode("prep");
 })(typeof globalThis !== "undefined" ? globalThis : this);

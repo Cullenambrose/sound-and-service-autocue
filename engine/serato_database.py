@@ -7,11 +7,136 @@ import struct
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import urllib.parse
+import math
+import posixpath
 
 
 class SeratoParseError(Exception):
     """Error parsing Serato database files."""
     pass
+
+
+def snapshot_records(data: bytes):
+    """Strict TLV decoding for reviewed imports, without legacy resynchronization."""
+    offset = 0
+    records = []
+    while offset < len(data):
+        if len(data) - offset < 8:
+            raise SeratoParseError(f"Truncated TLV header at byte {offset}.")
+        tag, length = data[offset:offset + 4], struct.unpack(">I", data[offset + 4:offset + 8])[0]
+        if not all(32 <= byte <= 126 for byte in tag):
+            raise SeratoParseError(f"Invalid TLV tag at byte {offset}.")
+        end = offset + 8 + length
+        if end > len(data):
+            raise SeratoParseError(f"Truncated {tag!r} payload at byte {offset}.")
+        records.append((tag, data[offset + 8:end]))
+        offset = end
+    return records
+
+
+def snapshot_text(data: bytes):
+    try:
+        value = data.decode("utf-16-be").rstrip("\0")
+    except UnicodeDecodeError as error:
+        raise SeratoParseError("Snapshot contains invalid UTF-16BE text.") from error
+    if any(ord(char) < 32 for char in value):
+        raise SeratoParseError("Snapshot text contains control characters.")
+    return value
+
+
+def snapshot_path(value: str, volume_root: str):
+    if not value:
+        raise SeratoParseError("Snapshot track path is empty.")
+    if value.startswith("file:"):
+        url = urllib.parse.urlparse(value)
+        if url.scheme != "file" or url.netloc not in {"", "localhost"} or url.query or url.fragment:
+            raise SeratoParseError("Only local file URLs are supported.")
+        value = urllib.parse.unquote(url.path)
+    if any(ord(char) < 32 for char in value) or "\\" in value:
+        raise SeratoParseError("Snapshot paths must be single-line POSIX paths.")
+    if ".." in value.split("/"):
+        raise SeratoParseError("Snapshot path traversal is not supported.")
+    normalized = _normalize_path(value)
+    if ".." in normalized.split("/"):
+        raise SeratoParseError("Snapshot path traversal is not supported.")
+    if not normalized.startswith("/"):
+        normalized = volume_root.rstrip("/") + "/" + normalized
+    return posixpath.normpath(normalized)
+
+
+def parse_snapshot_bytes(data: bytes, *, kind: str, volume_root: str = "/"):
+    """Decode uploaded static crate/database bytes without opening any paths.
+
+    Supports nested otrk payloads and legacy flat otrk marker records.
+    Membership order and duplicate paths are intentionally preserved.
+    """
+    if kind not in {"crate", "database"}:
+        raise SeratoParseError("Snapshot kind must be crate or database.")
+    if (not isinstance(volume_root, str) or not volume_root.startswith("/")
+            or any(ord(char) < 32 for char in volume_root)
+            or ".." in volume_root.split("/") or "\\" in volume_root):
+        raise SeratoParseError("An explicit absolute POSIX volume root is required.")
+    records = snapshot_records(data)
+    if not records or records[0][0] != b"vrsn" or not snapshot_text(records[0][1]):
+        raise SeratoParseError("Snapshot requires a nonempty vrsn header.")
+    tracks = []
+    current = None
+    fields = {b"tsng": "title", b"tart": "artist", b"talb": "album", b"tgen": "genre",
+              b"tkey": "key", b"tbpm": "bpm", b"tlen": "duration_s"}
+
+    def finish():
+        if current is None:
+            return
+        if not current.get("path"):
+            raise SeratoParseError("Snapshot track has no path.")
+        tracks.append(current)
+
+    def field(tag, payload):
+        if tag in {b"ptrk", b"pfil", b"path"}:
+            if "path" in current:
+                raise SeratoParseError("Snapshot track has multiple paths.")
+            raw = snapshot_text(payload)
+            current["raw_path"] = raw
+            current["path"] = snapshot_path(raw, volume_root)
+        elif tag in fields and kind == "database":
+            key = fields[tag]
+            if key in current:
+                raise SeratoParseError(f"Duplicate snapshot field: {key}.")
+            value = snapshot_text(payload)
+            if key in {"bpm", "duration_s"}:
+                try:
+                    value = float(value)
+                except ValueError as error:
+                    raise SeratoParseError(f"Invalid {key} in snapshot.") from error
+                if not math.isfinite(value) or value < 0:
+                    raise SeratoParseError(f"Invalid {key} in snapshot.")
+            current[key] = value
+        else:
+            current.setdefault("raw_fields", []).append({"tag": tag.decode("ascii"), "hex": payload.hex()})
+
+    for tag, payload in records[1:]:
+        if tag == b"otrk":
+            finish()
+            current = {}
+            if payload:
+                for child_tag, child_payload in snapshot_records(payload):
+                    if child_tag == b"otrk":
+                        raise SeratoParseError("Nested track containers are not supported.")
+                    field(child_tag, child_payload)
+                finish()
+                current = None
+        elif current is not None:
+            field(tag, payload)
+        elif kind == "crate" and tag in {b"ptrk", b"pfil", b"path"}:
+            current = {}
+            field(tag, payload)
+            finish()
+            current = None
+        elif tag in fields or tag in {b"ptrk", b"pfil", b"path"}:
+            raise SeratoParseError("Track metadata appears outside a track container.")
+        # Non-track header fields (including column/display settings) are ignored.
+    finish()
+    return {"version": snapshot_text(records[0][1]), "tracks": tracks}
 
 
 def _read_tlv_records(data: bytes, expected_tags: Optional[List[bytes]] = None) -> List[Tuple[bytes, bytes]]:
