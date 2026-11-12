@@ -21,7 +21,7 @@ def selected_path(value):
 
 
 def fingerprint(path):
-    selected_path(str(path))
+    path = selected_path(str(path))
     info = path.stat()
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("Select an individual regular audio file, not a folder or device.")
@@ -71,14 +71,21 @@ class SelectedFiles:
             raise ValueError("Selected file changed while being verified; select it again.")
         track = {key: metadata[key] for key in ("title", "artist", "version", "key", "duration_s")}
         bpm = metadata["bpm"]
+        if isinstance(bpm, bool):
+            raise ValueError("Selected file BPM tag must be a nonnegative finite number.")
         if bpm:
             try:
                 number = float(bpm)
-            except ValueError as error:
+            except (TypeError, ValueError) as error:
                 raise ValueError("Selected file BPM tag must be a nonnegative finite number.") from error
             if not math.isfinite(number) or number < 0:
                 raise ValueError("Selected file BPM tag must be a nonnegative finite number.")
             track["bpm"] = number
+        duration = metadata["duration_s"]
+        if (duration is not None
+                and (type(duration) not in (int, float)
+                     or not math.isfinite(duration) or duration < 0)):
+            raise ValueError("Selected file duration must be a nonnegative finite number or null.")
         track.update(id="selected:" + hashlib.sha256(value.encode()).hexdigest(),
                      path=value, verification={**before, "sha256": content_hash},
                      provenance="selected_file_tags")
@@ -95,6 +102,6 @@ class SelectedFiles:
                     raise ValueError("Verified file changed; use a new pilot session and review it again.")
             else:
                 expected = track.get("verification", {})
-                actual = fingerprint(selected_path(path))
+                actual = fingerprint(path)
                 if actual != {key: expected.get(key) for key in actual}:
                     raise ValueError("Verified file changed or is unavailable; stop and review the selected file.")
