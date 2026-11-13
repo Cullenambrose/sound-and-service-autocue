@@ -141,10 +141,11 @@ def validate_snapshot(document):
     return songs
 
 
-def import_snapshot(db, document):
+def import_snapshot(db, document, *, begin=True):
     songs = validate_snapshot(document)
     identity = digest(document)
-    db.execute("BEGIN IMMEDIATE")
+    if begin:
+        db.execute("BEGIN IMMEDIATE")
     previous = db.execute("SELECT id FROM catalog_snapshots WHERE id=?", (identity,)).fetchone()
     if previous:
         return {"snapshot_id": identity, "added": False, "crates": len(document["crates"]),
@@ -514,7 +515,7 @@ def songs(db, snapshot_id, crate_id):
     return result
 
 
-def decide(db, body):
+def decide(db, body, *, begin=True):
     if not isinstance(body, dict):
         raise ValueError("Match decision must be an object.")
     if set(body) - {"request_id", "dataset_id", "snapshot_id", "song_id", "base_revision",
@@ -535,7 +536,8 @@ def decide(db, body):
     elif body["content_hash"] is not None:
         raise ValueError("A missing match must have a null content_hash.")
     encoded = canonical(body)
-    db.execute("BEGIN IMMEDIATE")
+    if begin:
+        db.execute("BEGIN IMMEDIATE")
     receipt = db.execute("SELECT * FROM catalog_match_receipts WHERE request_id=?", (body["request_id"],)).fetchone()
     if receipt:
         if receipt["body_json"] != encoded:

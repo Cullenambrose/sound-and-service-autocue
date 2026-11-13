@@ -5,7 +5,7 @@
 This follows the transactional review foundation on
 `dev/personal-dj-foundation`; it does not replace the cue algorithms.
 
-1. Package only the supported worker and its dependency closure.
+1. Package the supported worker and its dependency closure.
 2. Keep the existing function/legacy CLI usable; wrap it with a versioned job
    contract and explicit opt-ins for network text lookups and Gemini.
 3. Serialize same-track cache use, isolate temporary work and preserve completed
@@ -17,8 +17,11 @@ This follows the transactional review foundation on
 `engine/autocue_worker.py` is the worker entry point; `engine/analyze.py` remains
 the analysis engine. The wheel deliberately installs a curated list of flat
 modules, matching existing imports, and bundles the default genre configuration
-as `autocue_config`. It excludes the web server, tests, research scripts, audio,
-credentials and model weights. A namespaced package migration is deferred.
+as `autocue_config`. The later [Studio alpha](STUDIO.md) also packages the web
+application modules/assets and an `autocue-studio` command; it does not start
+the historical/default application or its media writers when launched.
+Audio, credentials and model weights are not bundled. A namespaced engine
+package migration is deferred.
 Historical experiments and their entry points remain in the checkout.
 
 ## Install and smoke test

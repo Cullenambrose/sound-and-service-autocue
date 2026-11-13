@@ -119,7 +119,16 @@ def snapshot(db, body):
         if file:
             root = db.execute("SELECT * FROM library_roots WHERE id=?", (file["root_id"],)).fetchone()
             roots[root["id"]] = dict(root)
-    return {"dataset_id": body["dataset_id"], "crate": crate, "roots": roots}
+    state = {"dataset_id": body["dataset_id"], "crate": crate, "roots": roots}
+    if crate["id"].startswith("studio-") and db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='studio_proposals'").fetchone():
+        if __package__:
+            from . import studio_service
+        else:
+            import studio_service
+        state["studio_creation"] = studio_service.crate_evidence(
+            db, {"crate_id": crate["id"]}, body["dataset_id"])
+    return state
 
 
 def source_identity(file):
@@ -173,7 +182,7 @@ def manifest(state, entries, proofs):
     crate = state["crate"]
     eligible = sum(entry["eligible"] for entry in entries)
     ready = bool(entries) and eligible == len(entries)
-    return {
+    document = {
         "schema_version": 1, "dataset_id": state["dataset_id"],
         "crate": {"id": crate["id"], "name": crate["name"], "revision": crate["revision"]},
         "verification": "human-reviewed SHA-256 bytes; not recording fingerprint or cue/tag approval",
@@ -183,6 +192,9 @@ def manifest(state, entries, proofs):
         "entries": entries, "roots": state["roots"],
         "file_identities": {key: list(identity) for key, (identity, error) in proofs.items() if not error},
     }
+    if "studio_creation" in state:
+        document["studio_creation"] = state["studio_creation"]
+    return document
 
 
 def bundle(document):

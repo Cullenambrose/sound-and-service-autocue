@@ -27,9 +27,11 @@ jobs:
       - run: python -m unittest discover -s engine -p 'test_*.py'
       - run: pytest engine/setlist/test_setlist.py engine/library/test_library.py engine/library/test_matcher.py engine/library/test_serato_crate_integration.py engine/library/test_serato_integration.py engine/test_serato_crate_writer.py engine/test_serato_database.py -q
       - run: python -m unittest web.test_catalog web.test_vendor_import web.test_scan_jobs web.test_server
+      - run: PYTHONPATH=engine pytest -q web/test_studio.py web/test_studio_product.py web/test_library_operations.py engine/setlist/test_planning.py engine/setlist/test_transitions.py
       - run: node --test web/test_*.cjs
       - name: Verify installed wheel outside checkout
         run: |
           python -m pip wheel --no-deps . --wheel-dir "${{ runner.temp }}/autocue-wheels"
           python -m pip install --no-deps --force-reinstall "${{ runner.temp }}"/autocue-wheels/*.whl
           python scripts/verify_worker_install.py
+          python scripts/verify_studio_install.py

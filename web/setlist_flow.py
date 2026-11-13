@@ -219,7 +219,7 @@ class SetlistFlow:
                 "selected_file_id": selected.get("id") if selected and is_fulfilled else None,
             })
         recommendations = [
-            {"song_identity": asdict(item.song_identity), "track": copy.deepcopy(clean_track(item.track)),
+            {"song_identity": asdict(item.song_identity), "track": clean_track(item.track),
              "score": item.score, "reasons": item.reasons, "badges": item.badges,
              "version_label": version_label(item.track)}
             for item in result if item.song_identity not in held - fulfilled

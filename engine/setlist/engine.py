@@ -2,6 +2,8 @@
 from collections import defaultdict
 from collections.abc import Mapping
 import copy
+from functools import lru_cache
+from heapq import nsmallest
 import json
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -123,9 +125,9 @@ def _candidate_identity(track):
     return song_identity(track.get("title"), track.get("artist"))
 
 
-def _resolve_request(request: SongRequest, category: str, library_records):
+def _resolve_request(request: SongRequest, category: str, library_records, prepared=None):
     """Resolve song identity first, then select an exact local playback version."""
-    matched = _match(request, library_records)
+    matched = prepared._match(request) if prepared is not None else _match(request, library_records)
     alternatives = tuple(dict(item) for item in matched.candidates)
     if matched.status != "matched" or not matched.matched_track:
         return None, RequestDiagnostic(
@@ -210,6 +212,16 @@ class PreparedLibrary:
     def __init__(self, library):
         self._records = copy.deepcopy(_sorted_library(library))
         self._representatives = _representatives(self._records)
+        @lru_cache(maxsize=512)
+        def match(title, artist, version, confirmed_file_id):
+            request = SongRequest(title=title, artist=artist, version=version,
+                                  metadata={"confirmed_file_id": confirmed_file_id})
+            return _match(request, self._records)
+        self._cached_match = match
+
+    def _match(self, request):
+        return copy.deepcopy(self._cached_match(
+            request.title, request.artist, request.version, request.metadata.get("confirmed_file_id")))
 
 
 def _moment_key(value: Optional[str]) -> str:
@@ -272,19 +284,15 @@ def _diagnostic_alternative_identities(diagnostic):
     return identities
 
 
-def _resolution_for_category(requests, category, library_records):
+def _resolution_for_category(requests, category, library_records, prepared=None):
     resolved = []
     diagnostics = []
     for request in requests:
-        result, diagnostic = _resolve_request(request, category, library_records)
+        result, diagnostic = _resolve_request(request, category, library_records, prepared)
         diagnostics.append(diagnostic)
         if result:
             resolved.append((request, *result))
     return resolved, diagnostics
-
-
-def _file_tie_key(track):
-    return _file_key(track)
 
 
 def _rank(
@@ -322,7 +330,7 @@ def _rank(
     resolution_diagnostics = []
     for category, requests in positive_requests:
         resolved_by_category[category], diagnostics = _resolution_for_category(
-            requests, category, library_records
+            requests, category, library_records, library if isinstance(library, PreparedLibrary) else None
         )
         resolution_diagnostics.extend(diagnostics)
 
@@ -359,14 +367,19 @@ def _rank(
     selected_tracks = {}
     selected_versions = {}
     categories = ("must_play", "song_cue", "play_if_possible", "guest_request")
+    entries_by_category = {}
+    for category in categories:
+        groups = defaultdict(list)
+        for entry in resolved_by_category.get(category, ()):
+            groups[entry[1]].append(entry)
+        entries_by_category[category] = groups
     for identity in representatives:
         if identity in excluded:
             continue
         for category in categories:
             if prep and category == "guest_request":
                 continue
-            entries = [entry for entry in resolved_by_category.get(category, ())
-                       if entry[1] == identity]
+            entries = entries_by_category[category].get(identity, ())
             if category == "song_cue":
                 entries = [entry for entry in entries if entry[3]]
             if not entries:
@@ -407,9 +420,9 @@ def _rank(
         if prep and category == "guest_request":
             continue
         applicable_by_category[category] = {
-            identity for identity in representatives if identity not in excluded
-            and any(request_matches_selected(entry, identity)
-                    for entry in resolved_by_category.get(category, ()))
+            entry[1] for entry in resolved_by_category.get(category, ())
+            if entry[1] in representatives and entry[1] not in excluded
+            and request_matches_selected(entry, entry[1])
         }
 
     for diagnostic in resolution_diagnostics:
@@ -459,26 +472,45 @@ def _rank(
 
     current_track = _track_dict(now_playing) if now_playing is not None else None
     current_identity = _track_identity(current_track)
-    ranked = []
-    for identity, representative in representatives.items():
-        if identity in excluded:
-            continue
-        selected = selected_tracks.get(identity, representative)
-        score, reasons = score_candidate(
-            identity,
-            selected,
-            context,
-            phase,
-            settings,
-            now_playing=current_track,
-            playing_identity=current_identity,
-            must_play=identity in must_identities,
-            play_if_possible=identity in play_if_identities,
-            relevant_song_cue=identity in cue_identities,
-            explain_song_cue=identity in cue_label_identities,
-            guest_requested=identity in guest_identities,
-            floor_filler=identity in fillers,
-        )
+    def scored():
+        for identity, representative in representatives.items():
+            if identity in excluded:
+                continue
+            selected = selected_tracks.get(identity, representative)
+            score, reasons = score_candidate(
+                identity,
+                selected,
+                context,
+                phase,
+                settings,
+                now_playing=current_track,
+                playing_identity=current_identity,
+                must_play=identity in must_identities,
+                play_if_possible=identity in play_if_identities,
+                relevant_song_cue=identity in cue_identities,
+                explain_song_cue=identity in cue_label_identities,
+                guest_requested=identity in guest_identities,
+                floor_filler=identity in fillers,
+            )
+            yield identity, selected, score, reasons
+
+    # There is exactly one recommendation per identity; no file tie remains.
+    def order(item):
+        return -item[2], item[0].artist, item[0].title
+
+    if prep:
+        required, other = [], []
+        for item in scored():
+            (required if item[0] in required_tracks else other).append(item)
+        required.sort(key=order)
+        chosen = required + (sorted(other, key=order) if limit is None else
+                             nsmallest(max(0, limit - len(required)), other, key=order))
+    else:
+        chosen = (sorted(scored(), key=order)
+                  if limit is None or limit >= len(representatives)
+                  else nsmallest(limit, scored(), key=order))
+    selected_recommendations = []
+    for identity, selected, score, reasons in chosen:
         badges = []
         if (identity in must_identities or identity in play_if_identities
                 or identity in cue_label_identities):
@@ -487,19 +519,8 @@ def _rank(
             badges.append("customer")
         if identity in crate_identities:
             badges.append("in_crate")
-        ranked.append(Recommendation(identity, selected, score, reasons, tuple(badges)))
-
-    ranked.sort(key=lambda item: (-item.score, item.song_identity.artist,
-                                  item.song_identity.title, _file_tie_key(item.track)))
-    if prep:
-        required = [item for item in ranked if item.song_identity in required_tracks]
-        other = [item for item in ranked if item.song_identity not in required_tracks]
-        if limit is None:
-            selected_recommendations = required + other
-        else:
-            selected_recommendations = required + other[:max(0, limit - len(required))]
-    else:
-        selected_recommendations = ranked if limit is None else ranked[:limit]
+        owned_track = copy.deepcopy(selected) if isinstance(library, PreparedLibrary) else selected
+        selected_recommendations.append(Recommendation(identity, owned_track, score, reasons, tuple(badges)))
     capacity_overflow = None
     if (prep and limit is not None and len(selected_recommendations) > limit):
         capacity_overflow = CapacityOverflow(

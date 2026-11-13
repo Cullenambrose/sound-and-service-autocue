@@ -167,4 +167,17 @@ category/version priorities. Unconfirmed requests keep their existing behavior.
 Repeated callers can construct `PreparedLibrary(library)` once per library load
 and pass that snapshot to either ranker. It precomputes the same sorted identity
 records and representatives used by iterable inputs; rebuild it after metadata
-changes. Ranking results and the inclusive 0.6 cutoff remain unchanged.
+changes. It also keeps a bounded, per-snapshot cache of up to 512 matcher results,
+keyed by exact title, artist, requested version and confirmed file ID. Matcher
+evidence is copied before use so returned diagnostics cannot modify the cache.
+Request IDs, guest metadata, categories, phase, settings, hard exclusions and
+version priorities are resolved again on each ranking call, not cached. New
+snapshots start with an empty cache; Live library additions rebuild the snapshot.
+Ranking results and the inclusive 0.6 cutoff remain unchanged.
+Returned prepared-snapshot tracks are also independently copied, including
+ordinary representatives, so a consumer cannot mutate later ranking evidence.
+Finite Live results use bounded top-k selection with the same exact ordering
+as a full sort. Prep still returns all required must-plays before other songs,
+including explicit capacity overflow; it never truncates a must-play to fit.
+Request applicability uses resolved identity groups, not repeated full-library
+scans. Dynamic scoring and hard exclusions remain unchanged.

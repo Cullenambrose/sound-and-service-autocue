@@ -1,5 +1,22 @@
 # Sound & Service AutoCue
 
+**Commercial product roadmap (November 12, 2026):** see the
+[AI library, crate and set-building plan](docs/COMMERCIAL-PRODUCT-PLAN.md)
+for researched Crate Hackers workflows, the current capability gaps, staged
+implementation, commercial release requirements and acceptance gates.
+
+**Opt-in Studio alpha:** `./run-studio.sh` launches a separate catalog-backed
+workspace for typed/local-AI search, reviewed AI set briefs, smart rules,
+approved exact-file crates, phase-aware set planning/repair, existing cue evidence,
+explicit play-window/overlap estimates, an acquisition inbox, opt-in incremental
+folder monitoring, atomic bulk crate approval and existing-crate edits/undo, reversible Studio exclusions,
+experimental grounded conversations/DJ feedback, indexed health/history and isolated Live suggestions.
+See [Studio setup and boundaries](docs/STUDIO.md) and the
+[six-stage delivery checklist](docs/SIX-STAGE-IMPLEMENTATION.md).
+This is not a finished commercial release or connected-provider certification.
+An Apple Silicon development app/DMG build is documented in [desktop packaging](docs/DESKTOP.md);
+signing, notarization and independent release certification remain pending.
+
 **Personal DJ app foundation (November 4, 2026):** the supported app is
 `web/server.py` with the Python `engine/analyze.py` worker, launched by `./run.sh`.
 Cue review saves now use a transactional SQLite journal, idempotent receipts,
@@ -21,7 +38,8 @@ python3 -m venv /path/to/disposable-worker-env
 This fixture uses declared beat observations, **not model inference or musical
 accuracy evidence**. See the [worker handoff](docs/WORKER.md) for request/result
 schemas, optional analyzers, cache isolation, cancellation and verification.
-The wheel packages the worker, not the web app or historical research tools.
+The wheel packages the worker and the opt-in Studio web assets/entrypoint.
+It is not a signed desktop installer and does not bundle models or music.
 
 The web app now also has a catalog snapshot browser, selected-folder read-only
 index and explicitly reviewed exact-file matches. Start with the

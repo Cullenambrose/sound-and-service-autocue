@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoCue Studio - Library and set planning</title>
+  <link rel="stylesheet" href="/studio.css">
+</head>
+<body>
+  <a class="skip" href="#workspace">Skip to workspace</a>
+  <header><h1>AutoCue Studio <small>LOCAL ALPHA</small></h1>
+    <p>Search your indexed music, build reviewed crates and plan a set. No source audio, tags or DJ databases are changed.</p>
+    <nav aria-label="Workspace"><a href="#library">Library</a><a href="#planning">Set planner</a><a href="#crates">Crates</a><a href="#operations">Health and history</a><a href="#readiness">Release readiness</a></nav>
+  </header>
+  <main id="workspace">
+    <p id="status" role="status" tabindex="-1">Connecting to the local workspace...</p>
+    <aside id="pending" hidden aria-label="Pending durable action">
+      <p>An unacknowledged action is retained in this browser. Resolve it before another save.</p>
+      <button id="retry">Retry exact action</button><button id="download-pending">Download pending action</button>
+      <button id="discard">Discard browser retry (does not undo a committed action)</button>
+    </aside>
+    <section id="library">
+      <h2>1. Search and organize your library</h2>
+      <details><summary>Index an explicitly selected folder</summary>
+        <p>Only the folder you submit is scanned, read-only. No music is copied or analyzed. Up to 10,000 files per root.</p>
+        <label for="root">Absolute music folder path</label><input id="root" placeholder="/absolute/path/to/selected/music">
+        <button id="scan">Start selected read-only scan</button><button id="scan-refresh">Refresh scan progress</button>
+        <pre id="scan-status"></pre>
+      </details>
+      <div class="columns">
+        <article>
+          <h3>Optional local AI</h3>
+          <p id="ai-status"></p>
+          <label for="prompt">Describe a search or new crate</label>
+          <textarea id="prompt" rows="3" placeholder="Build 20 tagged-clean R&amp;B tracks below 95 BPM"></textarea>
+          <button id="interpret">Translate to filters (does not save)</button>
+          <p>AI translates only. Review every filter and correct missing restrictions. Unsupported requests fail explicitly.</p>
+        </article>
+        <details>
+          <summary>Conversational local assistant</summary>
+          <label for="ai-model">Already installed local Ollama model tag (empty disables)</label>
+          <input id="ai-model" placeholder="qwen2.5:7b">
+          <button id="ai-configure">Save local model setting</button>
+          <p>Saving does not install/start a runtime or download weights. Run a local-only Ollama
+            service first; configuration is not a quality certification.</p>
+          <p>One saved draft per message; at most three bounded local-model calls
+            (optional routing, then two extractions for a new timed plan).
+            Auto keeps the current tool; use the tool selector to switch explicitly. It can refine search, set or bulk-crate
+            drafts, never approve or modify source files. Review each returned draft.
+            Explanatory facts come from the app's retrieved index, not model prose.</p>
+          <label for="conversation-id">Conversation ID (keep to resume)</label><input id="conversation-id">
+          <button id="conversation-new">New conversation</button><button id="conversation-load">Load conversation</button>
+          <label for="share-evidence"><input id="share-evidence" type="checkbox">
+            Retrieve up to 12 scoped metadata records; share at most 3 with the local model on initial/tool-change
+            search/build/organize drafts (no paths, audio or private notes; no metadata sent on timed plans or compatible follow-ups)</label>
+          <label for="chat-message">Message or follow-up</label><textarea id="chat-message" rows="3"></textarea>
+          <label for="chat-action">Assistant tool (Auto keeps the current conversation's tool)</label>
+          <select id="chat-action"><option value="auto">Auto / current tool</option>
+            <option value="search">Search</option><option value="build">One new crate</option>
+            <option value="plan">Timed set</option><option value="organize">Multiple new crates</option></select>
+          <button id="chat-send">Send reviewed assistant request</button>
+          <button id="chat-apply" disabled>Apply latest draft to forms (does not save)</button>
+          <pre id="chat-changes"></pre>
+          <pre id="conversation"></pre>
+        </details>
+        <article>
+          <h3>Visible rule builder</h3>
+          <label for="name">Crate or smart-rule name</label><input id="name" value="My reviewed crate">
+          <label for="folder">Smart-rule folder/category</label><input id="folder" value="My crates">
+          <label for="template">Original recipe</label><select id="template"><option value="">Choose an optional starting rule</option></select>
+          <label for="rule">Typed filters (JSON; usable without AI)</label>
+          <textarea id="rule" rows="6" spellcheck="false">{"q":"","clean_only":false,"limit":100,"sort":"title"}</textarea>
+          <details><summary>Supported filter fields</summary><p>q, artist, genre, bpm_min, bpm_max, energy_min, energy_max (0..1), clean_only, never_played, scope_ids, sort (title/bpm/energy/last_played), limit (1..1000). Numeric bounds exclude unknown values. Clean means tagged clean, not verified audible content.</p></details>
+          <button id="search">Search current index</button><button id="rule-save">Save smart rule</button>
+          <button id="rule-new">Save next rule as new</button>
+        </article>
+      </div>
+      <p id="search-summary"></p>
+      <div class="scroll"><table><caption>Exact indexed files - select the files to include in a new crate</caption>
+        <thead><tr><th scope="col">Include</th><th scope="col">Track / version</th><th scope="col">Evidence</th><th scope="col">File</th></tr></thead>
+        <tbody id="results"></tbody>
+      </table></div>
+      <button id="propose">Preview new static crate from checked files</button>
+      <article id="proposal" hidden tabindex="-1" aria-label="Exact-file approval preview">
+        <h3>Review before saving</h3><p id="proposal-summary"></p><ol id="proposal-tracks"></ol>
+        <p>Approving confirms these exact indexed file selections. Bytes and current index evidence are rechecked. This creates a new personal crate; no originals are changed.</p>
+        <button id="approve">Approve exact files and save new crate</button>
+      </article>
+    </section>
+    <section id="planning">
+      <h2>2. Plan an entire set</h2>
+      <p>Uses the current search rule and shared event matcher. Full-track duration is not mixed elapsed time. Unknown durations cannot prove a target.</p>
+      <details>
+        <summary>Translate a timed set brief with local AI</summary>
+        <label for="plan-prompt">Describe the set duration and optional phases</label>
+        <textarea id="plan-prompt" rows="3" placeholder="Plan 30 minutes: 10 minutes low-energy dinner, then 20 minutes open dancing. Use tagged-clean tracks."></textarea>
+        <button id="interpret-plan">Translate set brief (does not generate or save)</button>
+        <p>Requires your existing local model. Review the translated draft first.
+          Defaults when unspecified: 3-minute global tolerance, 20 tracks maximum,
+          1-minute tolerance per phase. No library data or file IDs are sent.</p>
+        <pre id="ai-plan-output"></pre>
+        <button id="apply-ai-plan" disabled>Apply reviewed translation to new planning draft</button>
+        <p>Applying replaces unsaved search/timing preferences. It retains source scope,
+          existing event lists, global exact-file must-plays, exclusions and pins.
+          Schedules containing phase-specific exact must-plays must be edited manually.
+          Saved crates are never changed. Generation and approval remain separate.</p>
+      </details>
+      <div class="columns">
+        <div><label for="event">Event requirements (existing event JSON schema)</label>
+          <textarea id="event" rows="8" spellcheck="false">{"music_lists":{"must_play":[],"do_not_play":[]}}</textarea>
+          <p>Each request uses title, artist and optional version. Do Not Play wins. Resolve ambiguous or unavailable must-plays first.</p></div>
+        <div><label for="policy">Explicit planner policy</label>
+          <textarea id="policy" rows="8" spellcheck="false">{"target_minutes":30,"tolerance_minutes":3,"max_tracks":20,"clean_only":false,"must_include":[],"exclude":[],"pinned":[]}</textarea>
+          <p>IDs are exact file IDs from search. Pins use {"position":0,"file_id":"..."}.
+          Optional bpm_min, bpm_max and energy_target are explicit requirements/preferences.</p></div>
+      </div>
+      <details>
+        <summary>Build an ordered phase schedule</summary>
+        <p>Every phase needs at least one full track and its own duration tolerance.
+          Phase constraints add to global constraints; they never weaken them.
+          Energy targets are preferences, not audible-quality guarantees.
+          Apply explicitly to the policy below before generating alternatives.</p>
+        <button id="phase-add">Add phase</button>
+        <button id="phase-load">Load schedule from policy</button>
+        <button id="phase-apply">Apply phase schedule to policy</button>
+        <div id="phase-editor"></div>
+        <p>Targets/tolerances in this editor use tenths of a minute. Exact must-play IDs
+          come from search. Advanced policies can still be edited directly as JSON.
+          Applying sets the global target to the sum of phase targets, keeping its
+          tolerance, exclusions, must-plays and pins unchanged.</p>
+      </details>
+      <details>
+        <summary>Reviewed play windows and transition evidence</summary>
+        <p>Optional timing overlay, not a change to full-track phase feasibility.
+          Inspect the existing cues for each exact file, audition it yourself, and
+          supply explicit entry/exit seconds with its indexed content hash.
+          Mark reviewed only after your own review. Specify each adjacent overlap,
+          including zero for an intentional cut. Missing evidence leaves mixed elapsed time unavailable.</p>
+        <label for="playback">Reviewed playback assumptions (JSON)</label>
+        <textarea id="playback" rows="8" spellcheck="false">{"windows":[],"overlaps":[]}</textarea>
+        <p>Window: {"file_id":"...","content_hash":"...","entry_s":0,"exit_s":120,"reviewed":false}.
+          Overlap: {"from_id":"...","to_id":"...","seconds":0}.
+          No speed changes, loop extensions, padding or automatic vocal/phrase safety are assumed.</p>
+      </details>
+      <button id="plan">Generate constrained alternatives</button><div id="plans" aria-live="polite"></div>
+      <details><summary>Isolated Live next-song suggestions</summary>
+        <p>Manual inputs only, no deck connection. Suggestions never modify saved Prep or play history.</p>
+        <label for="now-playing">Now-playing file</label><select id="now-playing"><option value="">No current track</option></select>
+        <label for="phase">Actual phase</label><select id="phase"><option value="dinner">Dinner</option><option value="open_dancing">Open dancing</option><option value="first_dance">First dance</option><option value="cocktail">Cocktail</option><option value="ceremony">Ceremony</option><option value="generic">Generic</option></select>
+        <label for="played">Already-played file IDs (JSON array)</label><textarea id="played" rows="2">[]</textarea>
+        <button id="live">Get read-only Live suggestions</button><ol id="live-results"></ol>
+      </details>
+    </section>
+    <section id="crates">
+      <h2>3. Saved smart rules and personal crates</h2>
+      <button id="refresh">Refresh saved state</button>
+      <h3>Smart rules</h3><div id="rules"></div>
+      <h3>Static personal crates</h3><div id="saved-crates"></div>
+      <details>
+        <summary>Bulk crate organization</summary>
+        <p>Create 1-8 new static crates in one atomic approval, up to 500 selected entries.
+          Existing crates/rules and original audio are unchanged. Shared tracks may appear in multiple crates.</p>
+        <label for="batch-rules">Named crate rules (JSON array)</label>
+        <textarea id="batch-rules" rows="7">[{"name":"Clean dinner","rule":{"clean_only":true,"bpm_max":95,"limit":40}},{"name":"Rediscovery","rule":{"never_played":true,"limit":40}}]</textarea>
+        <button id="batch-preview">Preview exact files for all crates</button>
+        <button id="batch-approve" disabled>Approve entire reviewed batch</button>
+        <pre id="batch-preview-output"></pre>
+        <h4>Recovered batch receipts</h4><pre id="batch-history"></pre>
+      </details>
+      <details>
+        <summary>Edit existing crates together, with undo</summary>
+        <p>App-owned crates only. Rename, merge (copy or move), move selected membership
+          occurrences, remove occurrences or reorder. Originals and external DJ references
+          stay unchanged. Repeated songs remain distinct. Preview every change before approval.
+          Undo refuses to overwrite newer crate edits.</p>
+        <label for="edit-operations">Existing-crate operations (JSON array)</label>
+        <textarea id="edit-operations" rows="7">[]</textarea>
+        <button id="edit-preview">Preview existing-crate edits</button>
+        <button id="edit-approve" disabled>Approve reviewed edits together</button>
+        <pre id="edit-output"></pre>
+        <h4>Existing-crate edit recovery</h4><div id="edit-history"></div>
+      </details>
+      <article id="saved-evidence" hidden>
+        <h3>Historical creation evidence</h3>
+        <p id="saved-evidence-note"></p><div id="saved-evidence-phases"></div>
+        <button id="evidence-replan" disabled>Load as new planning draft (does not change saved crate)</button>
+        <button id="evidence-download">Download creation evidence JSON</button>
+      </article>
+      <p>Refresh a smart rule to search current evidence; freeze checked results through a new proposal. Existing static crates do not change automatically.</p>
+      <article id="export" hidden>
+        <h3>Export preview</h3><p id="export-summary"></p>
+        <button id="export-download" disabled>Reverify and download playlist ZIP</button>
+        <p>No audio is included. Extract the ZIP, import M3U8 manually and verify the actual DJ software count/order/playback.</p>
+      </article>
+      <h3>Historical exports</h3><div id="exports"></div>
+    </section>
+    <section id="operations">
+      <h2>4. Indexed health and explicit play history</h2>
+      <p>Reports describe the published index, not fresh disk availability. Identical hashes prove whole-file bytes only. Related edits are not disposable duplicates. No cleanup or move action is enabled.</p>
+      <pre id="health"></pre>
+      <h3>Database recovery</h3>
+      <p>This private backup contains saved app state and indexed evidence, not audio,
+        exported ZIPs or browser pending actions. Restore only into a new data directory
+        using the documented Studio command; the active library is never overwritten.</p>
+      <button id="backup-download">Download private database backup</button>
+      <h3>Acquisition inbox and selected-folder monitoring</h3>
+      <p>New or changed indexed evidence returns to the inbox. This is not a download service.
+        Enabled monitors poll only your explicitly indexed roots while Studio runs.
+        Scans reuse unchanged files; they do not analyze, move or copy original audio.
+        Review metadata/versions yourself; inbox review is not event fulfillment.</p>
+      <button id="ingest-refresh">Refresh inbox and monitor state</button>
+      <div id="monitors"></div><div id="inbox"></div>
+      <h3>Recoverable Studio exclusions</h3>
+      <p>Exclusion hides an exact hash-bound file from new Studio searches/plans only.
+        It does not delete/quarantine audio, repair DJ references or alter saved crates.
+        Changed bytes invalidate an old exclusion. Restore below to undo.</p>
+      <div id="exclusions"></div>
+      <details><summary>Find a missing song through your normal provider</summary>
+        <label for="provider-artist">Requested artist</label><input id="provider-artist">
+        <label for="provider-title">Requested title</label><input id="provider-title">
+        <label for="provider-version">Requested version</label><input id="provider-version">
+        <button id="provider-lookup">Show browser search links</button>
+        <p>These are outbound links, not connected accounts or downloads. After acquiring music yourself, index its selected folder and review the exact file.</p>
+        <div id="providers"></div>
+      </details>
+      <label for="history-file">Record an observed play of a search result</label><select id="history-file"></select>
+      <label for="history-note">Optional DJ note (not inferred crowd success)</label><input id="history-note">
+      <button id="record-play">Record observed play now</button><div id="history"></div>
+      <p>Select exact observations to preview removal from active history and rediscovery.
+        Original observations remain in recovery journals; this is not permanent privacy
+        erasure. Audio, saved crates and explicit DJ preferences are untouched.
+        Showing up to 100 most recent active observations.</p>
+      <button id="history-download">Download displayed active history JSON</button>
+      <button id="history-preview-button">Preview selected history removal</button>
+      <pre id="history-preview"></pre>
+      <button id="history-approve" disabled>Approve reviewed history removal</button>
+      <h3>History removal recovery</h3><div id="history-edits"></div>
+    </section>
+    <section id="readiness">
+      <h2>5. Commercial readiness and 6. destination parity</h2>
+      <p>This is a local alpha, not a certified commercial release. Unsupported destinations are not connected.</p>
+      <div id="destinations"></div><h3>Outstanding commercial release gates</h3><div id="gates"></div>
+      <button id="diagnostics">Download path-free release-readiness report</button>
+    </section>
+  </main>
+  <script src="/catalog-state.js"></script>
+  <script src="/studio.js"></script>
+</body>
+</html>

@@ -67,7 +67,7 @@ def detail(db, crate_id):
     return {**dict(row), "entries": entries}
 
 
-def save(db, body, dataset):
+def save(db, body, dataset, *, begin=True):
     fields = {"request_id", "dataset_id", "crate_id", "base_revision", "name", "entries"}
     if not isinstance(body, dict) or set(body) != fields:
         raise ValueError("Crate save requires request_id, dataset_id, crate_id, base_revision, name and ordered entries.")
@@ -89,7 +89,8 @@ def save(db, body, dataset):
     if body["dataset_id"] != dataset:
         raise catalog.Conflict("Personal crate belongs to a different dataset; reload the app.")
     encoded = catalog.canonical(body)
-    db.execute("BEGIN IMMEDIATE")
+    if begin:
+        db.execute("BEGIN IMMEDIATE")
     receipt = db.execute("SELECT * FROM personal_crate_receipts WHERE request_id=?",
                          (body["request_id"],)).fetchone()
     if receipt:

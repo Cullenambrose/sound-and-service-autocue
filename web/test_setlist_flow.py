@@ -274,6 +274,17 @@ def test_prepared_library_preserves_complete_ranking_and_builds_only_once(flow):
         assert actual == expected
 
 
+def test_live_view_track_mutation_cannot_change_prepared_library(tmp_path):
+    source = [{"id": "nested", "title": "Nested Song", "artist": "Demo Artist",
+               "metadata": {"tags": ["original"]}}]
+    flow = workflow.SetlistFlow(tmp_path, library=source, output_prefix="06")
+    view = flow.view("live")
+    view["recommendations"][0]["track"]["metadata"]["tags"].append("caller mutation")
+    next_view = flow.view("live")
+    assert next_view["recommendations"][0]["track"]["metadata"]["tags"] == ["original"]
+    assert flow.prepared_library._records[0][1]["metadata"]["tags"] == ["original"]
+
+
 def test_typed_diagnostics_reused_after_confirmation_and_invalidated_for_new_guests(tmp_path):
     flow = review_flow(tmp_path, "Shake It", artist="Demo Artist")
     row = flow.view("live")["needs_review"][0]

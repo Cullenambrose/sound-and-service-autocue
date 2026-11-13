@@ -17,6 +17,7 @@ from library.event_sync_schema import parse_event
 from setlist import (
     CapacityOverflow,
     GENRES,
+    PreparedLibrary,
     SetlistContext,
     SetlistSettings,
     SongCue,
@@ -39,6 +40,127 @@ def identities(recommendations):
 
 
 class SetlistEngineTests(unittest.TestCase):
+    def test_bounded_ranking_exactly_matches_full_order_and_required_overflow(self):
+        library = [track(f"Song {index}", f"Artist {index % 7}", id=str(index),
+                         bpm=90 + index, energy=index / 50) for index in range(50)]
+        context = SetlistContext(
+            must_play=(SongRequest("Song 49", "Artist 0"), SongRequest("Song 1", "Artist 1")),
+            guest_requests=(SongRequest("Song 33", "Artist 5"),),
+            do_not_play=(SongRequest("Song 7", "Artist 0"),),
+            explicit_phase="open_dancing", energy_target=.4)
+        prepared = PreparedLibrary(library)
+        for ranker in (rank_next_song, rank_prep_crate):
+            full = ranker(context, prepared, limit=None)
+            for limit in (0, 1, 2, 7, 20, 49, 50, 100):
+                result = ranker(context, prepared, limit=limit)
+                with self.subTest(ranker=ranker.__name__, limit=limit):
+                    self.assertEqual(result, ranker(context, list(reversed(library)), limit=limit))
+                    self.assertEqual(result.items, full.items[:max(2, limit)] if ranker is rank_prep_crate
+                                     else full.items[:limit])
+                    self.assertEqual(result.resolution_diagnostics, full.resolution_diagnostics)
+                    self.assertEqual(result.conflicting_requests, full.conflicting_requests)
+                    if ranker is rank_prep_crate and limit < 2:
+                        self.assertEqual(result.capacity_overflow.resulting_count, 2)
+
+    def test_live_full_limit_uses_full_ordering_and_small_limit_uses_top_k(self):
+        from setlist import engine
+
+        library = [track(f"Song {index}", "Artist", id=str(index)) for index in range(25)]
+        prepared = PreparedLibrary(library)
+        context = SetlistContext()
+        with patch.object(engine, "nsmallest", wraps=engine.nsmallest) as top_k:
+            complete = rank_next_song(context, prepared, limit=len(library))
+            top_k.assert_not_called()
+            limited = rank_next_song(context, prepared, limit=3)
+            top_k.assert_called_once()
+        self.assertEqual(complete.items[:3], limited.items)
+        self.assertEqual(complete, rank_next_song(context, library, limit=len(library)))
+
+    def test_prepared_match_cache_reuses_only_identity_evidence(self):
+        from setlist import engine
+        library = [
+            track("Dance (Clean)", "Singer", id="clean", version="Clean"),
+            track("Dance (Extended Mix)", "Singer", id="extended", version="Extended Mix"),
+            track("Other Song", "Other", id="other"),
+        ]
+        prepared = PreparedLibrary(library)
+        contexts = [
+            SetlistContext(must_play=(SongRequest("Dance", "Singer", version="Clean"),)),
+            SetlistContext(guest_requests=(SongRequest("Dance", "Singer", version="Extended Mix"),)),
+            SetlistContext(must_play=(SongRequest("Dance", "Singer"),),
+                           do_not_play=(SongRequest("Dance", "Singer"),)),
+            SetlistContext(guest_requests=(SongRequest("Dance", "Singer"),),
+                           already_played=frozenset({song_identity("Dance", "Singer")})),
+            SetlistContext(guest_requests=(SongRequest("Dance", "Singer"),),
+                           already_placed=frozenset({song_identity("Dance", "Singer")})),
+            SetlistContext(must_play=(SongRequest("Dance", "Singer", version="Clean"),),
+                           guest_requests=(SongRequest("Dance", "Singer", version="Extended Mix"),)),
+            SetlistContext(guest_requests=(SongRequest("Dance", "Singer", id="second",
+                metadata={"first_name": "Another guest"}),), explicit_phase="dinner", energy_target=0),
+        ]
+        for context in contexts:
+            for ranker in (rank_prep_crate, rank_next_song):
+                expected = ranker(context, library)
+                with self.subTest(context=context, ranker=ranker.__name__):
+                    self.assertEqual(ranker(context, prepared), expected)
+                    self.assertEqual(ranker(context, prepared), expected)
+        request = SongRequest("Dance", "Singer", version="Clean")
+        prepared = PreparedLibrary(library)
+        with patch.object(engine, "_match", wraps=engine._match) as match:
+            first = rank_next_song(SetlistContext(guest_requests=(request,)), prepared)
+            second_request = SongRequest("Dance", "Singer", version="Clean", id="new",
+                                         metadata={"first_name": "New guest"})
+            second = rank_next_song(SetlistContext(guest_requests=(second_request,)), prepared)
+            self.assertEqual(match.call_count, 1)
+        self.assertEqual(first.items, second.items)
+        self.assertEqual(second.resolution_diagnostics[0].request, second_request)
+        self.assertEqual(second.resolution_diagnostics[0].request.metadata, {"first_name": "New guest"})
+
+    def test_prepared_match_cache_does_not_share_mutable_evidence_or_snapshots(self):
+        library = [track("Dance (Clean)", "Singer", id="clean", version="Clean",
+                         file={"path": "/demo/clean.mp3"})]
+        prepared = PreparedLibrary(library)
+        context = SetlistContext(guest_requests=(SongRequest("Dance", "Singer"),))
+        first = rank_next_song(context, prepared)
+        first.resolution_diagnostics[0].alternatives[0]["file"]["path"] = "/tampered"
+        first.items[0].track["title"] = "Changed by consumer"
+        library[0]["title"] = "Changed source"
+        second = rank_next_song(context, prepared)
+        self.assertEqual(second.items[0].track["title"], "Dance (Clean)")
+        self.assertEqual(second.resolution_diagnostics[0].alternatives[0]["file"]["path"], "/demo/clean.mp3")
+        rebuilt = rank_next_song(context, PreparedLibrary(library))
+        self.assertEqual(rebuilt, rank_next_song(context, library))
+        self.assertNotEqual(rebuilt.resolution_diagnostics[0].status, "matched")
+        ordinary = rank_next_song(SetlistContext(), prepared)
+        ordinary.items[0].track["file"]["path"] = "/changed representative"
+        self.assertEqual(rank_next_song(SetlistContext(), prepared).items[0].track["file"]["path"],
+                         "/demo/clean.mp3")
+
+    def test_prepared_match_cache_separates_confirmed_files_and_is_bounded(self):
+        from setlist import engine
+        library = [track("Dance", "Singer", id="one", version="Clean"),
+                   track("Dance", "Singer", id="two", version="Clean")]
+        prepared = PreparedLibrary(library)
+        for file_id in ("one", "two"):
+            request = SongRequest("Dance", "Singer", metadata={"confirmed_file_id": file_id})
+            context = SetlistContext(guest_requests=(request,))
+            result = rank_next_song(context, prepared)
+            self.assertEqual(result, rank_next_song(context, library))
+            self.assertEqual(result.items[0].track["id"], file_id)
+        with self.assertRaisesRegex(ValueError, "Confirmed file"):
+            rank_next_song(SetlistContext(guest_requests=(SongRequest(
+                "Dance", "Singer", metadata={"confirmed_file_id": "missing"}),)), prepared)
+        prepared = PreparedLibrary(library)
+        with patch.object(engine, "_match", wraps=engine._match) as match:
+            for index in range(513):
+                prepared._match(SongRequest(f"Missing {index}"))
+            info = prepared._cached_match.cache_info()
+            self.assertEqual((info.maxsize, info.currsize), (512, 512))
+            prepared._match(SongRequest("Missing 512"))
+            self.assertEqual(match.call_count, 513)
+            prepared._match(SongRequest("Missing 0"))
+            self.assertEqual(match.call_count, 514)
+
     def test_different_whole_song_cannot_fulfill_any_positive_request(self):
         cases = (
             (SongRequest("Corazon", "Demo Artist 15"),
