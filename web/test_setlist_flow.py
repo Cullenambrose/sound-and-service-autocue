@@ -93,7 +93,7 @@ def review_flow(tmp_path, title, *, version=None, artist=None):
     ("Not In Library", "Ghost Band", None, "missing", set()),
     ("Midnight Signal", "Kilo Avenue", "Radio Edit", "version_unavailable", {"clean"}),
 ])
-def test_02_review_only_rows_add_nothing_until_exact_confirmation(
+def test_02_review_only_rows_leave_candidates_eligible_until_exact_confirmation(
     tmp_path, title, artist, version, status, candidates,
 ):
     flow = review_flow(tmp_path, title, version=version, artist=artist)
@@ -102,7 +102,9 @@ def test_02_review_only_rows_add_nothing_until_exact_confirmation(
     assert row["request"]["title"] == title and row["request"]["version"] == version
     assert row["status"] == status and not row["fulfilled"]
     assert {track["id"] for track in row["candidates"]} == candidates
-    assert not candidates.intersection(item["track"]["id"] for item in view["recommendations"])
+    picks = {item["track"]["id"]: item for item in view["recommendations"]}
+    assert candidates <= picks.keys()
+    assert all("Pending review" in picks[file_id]["reasons"] for file_id in candidates)
     assert all(not {"requested", "customer"}.intersection(item["badges"]) for item in view["recommendations"])
     assert all("Must-play request" not in item["reasons"] for item in view["recommendations"])
     if status == "missing":
@@ -118,9 +120,9 @@ def test_02_review_only_rows_add_nothing_until_exact_confirmation(
         assert confirmed["requests"][0]["fulfilled"]
         assert confirmed["requests"][0]["request"]["title"] == title
         assert confirmed["requests"][0]["selected_file_id"] == selected
-        assert not (candidates - {selected}).intersection(
-            item["track"]["id"] for item in confirmed["recommendations"]
-        )
+        confirmed_picks = {item["track"]["id"]: item for item in confirmed["recommendations"]}
+        assert candidates <= confirmed_picks.keys()
+        assert all("Pending review" not in item["reasons"] for item in confirmed_picks.values())
 
 
 def test_02b_confirmation_keeps_exact_duplicate_file_and_normal_version_priority(tmp_path):
@@ -290,19 +292,19 @@ def test_typed_diagnostics_reused_after_confirmation_and_invalidated_for_new_gue
     row = flow.view("live")["needs_review"][0]
     with patch.object(flow, "_rank", wraps=flow._rank) as ranker:
         result = command(flow, "confirm", mode="live", key=row["key"], file_id="up")
-        # One validation view plus the prospective response, never a second original rank.
-        assert ranker.call_count == 2
+        # Validation, confirmed evidence, then normal positions for the reviewed request.
+        assert ranker.call_count == 3
         assert result["requests"][0]["request"]["title"] == "Shake It"
         assert result["requests"][0]["selected_file_id"] == "up"
     with patch.object(flow, "_rank", wraps=flow._rank) as ranker:
         result = command(flow, "guest", mode="live", first_name="Demo", song="Shake It")
-        assert ranker.call_count == 1
+        assert ranker.call_count == 2
     assert result["requests"][-1]["status"] == "ambiguous"
     assert result["requests"][-1]["request"]["title"] == "Shake It"
     cached = flow._typed_diagnostics["live"]
     with patch.object(flow, "_rank", wraps=flow._rank) as ranker:
         flow.view("live")
-        assert ranker.call_count == 1
+        assert ranker.call_count == 2
         assert flow._typed_diagnostics["live"] is cached
 
 
@@ -440,7 +442,109 @@ def test_confirmed_identity_can_resolve_artist_ambiguity_without_ignoring_the_fi
     assert row["status"] == "ambiguous"
     result = command(flow, "confirm", key=row["key"], file_id="b")
     assert result["requests"][0]["fulfilled"]
-    assert [item["track"]["id"] for item in result["recommendations"]] == ["b"]
+    assert [item["track"]["id"] for item in result["recommendations"]] == ["a", "b"]
+    assert result["requests"][0]["selected_file_id"] == "b"
+
+
+@pytest.mark.parametrize("mode", ["live", "prep"])
+@pytest.mark.parametrize("decision", ["dismiss", "confirm"])
+def test_unclear_request_notes_never_remove_or_reorder_other_picks(tmp_path, mode, decision):
+    event = fixture("mock-wedding-event.json")
+    flow = workflow.SetlistFlow(tmp_path, event=event)
+    before = flow.view(mode)
+    expected_ids = [item["track"]["id"] for item in before["recommendations"]]
+    if mode == "live":
+        pending = command(flow, "guest", mode=mode, first_name="Synthetic", song="Porch Ligh")
+        request_id = next(row["request"]["id"] for row in pending["requests"]
+                          if row["request"]["title"] == "Porch Ligh")
+    else:
+        flow.event["music_lists"]["must_play"].append({"id": "unclear-prep", "title": "Porch Ligh"})
+        request_id = "unclear-prep"
+        pending = flow.view(mode)
+    row = next(row for row in pending["requests"] if row["request"]["id"] == request_id)
+    assert not row["fulfilled"] and row["needs_review"]
+    assert {item["id"] for item in row["candidates"]} == {"trk-005", "trk-036"}
+    assert [item["track"]["id"] for item in pending["recommendations"]] == expected_ids
+    note = "Pending guest request" if mode == "live" else "Pending review"
+    picks = {item["track"]["id"]: item for item in pending["recommendations"]}
+    assert all(note in picks[file_id]["reasons"] for file_id in ("trk-005", "trk-036"))
+    assert [item["score"] for item in pending["recommendations"]] == [
+        item["score"] for item in before["recommendations"]]
+    changed = command(flow, decision, mode=mode, key=row["key"],
+                      **({"file_id": "trk-005"} if decision == "confirm" else {}))
+    assert [item["track"]["id"] for item in changed["recommendations"]] == expected_ids
+    changed_row = next(row for row in changed["requests"] if row["request"]["id"] == request_id)
+    assert changed_row["fulfilled"] == (decision == "confirm")
+    assert changed_row["selected_file_id"] == ("trk-005" if decision == "confirm" else None)
+    assert not any(note in item["reasons"] for item in changed["recommendations"]
+                   if item["track"]["id"] in {"trk-005", "trk-036"})
+    assert not {"trk-016", "trk-017", "trk-019", "trk-020", "trk-021"}.intersection(expected_ids)
+    assert workflow.canonical(changed) == workflow.canonical(flow.view(mode))
+    reopened = workflow.SetlistFlow(tmp_path, event=flow.event)
+    assert workflow.canonical(reopened.view(mode)) == workflow.canonical(changed)
+    if mode == "prep":
+        assert [item["track"]["id"] for item in changed["crate_entries"]] == expected_ids
+        exported = finish_prep(flow)
+        assert exported["verification"]["mismatches"] == 0
+        assert flow.export_path.read_text().splitlines()[1:] == [
+            item["track"]["path"] for item in exported["saved"]["entries"]]
+    else:
+        played = command(flow, "played", mode="live", file_id="trk-005")
+        assert "trk-005" not in [item["track"]["id"] for item in played["recommendations"]]
+        assert "trk-036" in [item["track"]["id"] for item in played["recommendations"]]
+
+
+@pytest.mark.parametrize("valid_row", [True, False])
+@pytest.mark.parametrize("file_id", ["invented", None, [], {}, True])
+def test_rejected_confirm_is_http_400_and_does_not_change_state(tmp_path, file_id, valid_row):
+    flow = review_flow(tmp_path, "Shake It")
+    before = copy.deepcopy(flow.state)
+    row = flow.view("prep")["needs_review"][0]
+    server = demo_server(flow)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=30)
+    try:
+        connection.request("GET", "/api/session")
+        response = connection.getresponse()
+        token = json.loads(response.read())["token"]
+        connection.request("POST", "/api/command", json.dumps({
+            "request_id": "bad-confirm", "base_revision": 0, "mode": "prep",
+            "action": "confirm", "key": row["key"] if valid_row else "unknown-row", "file_id": file_id}),
+            {"X-Setlist-Token": token, "Content-Type": "application/json"})
+        response = connection.getresponse()
+        error = json.loads(response.read())
+        assert response.status == 400
+        assert ("available, unblocked candidate" if valid_row else "no longer pending") in error["error"]
+        assert flow.state == before
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize("decision", ["dismiss", "confirm"])
+def test_source_scope_pending_candidates_keep_normal_crate_positions(tmp_path, decision):
+    flow = workflow.SetlistFlow(tmp_path, event={})
+    upload = {"format": "csv", "name": "Synthetic pending source", "crate_id": "",
+              "text": "id,title,artist,path,version\n"
+                      "trk-005,Porch Light,Dusty Rivers,/Demo/Music/Dusty Rivers - Porch Light.mp3,\n"
+                      "trk-036,Northern Lights,Demo Artist 13,/Demo/Music/Demo Artist 13 - Northern Lights.mp3,\n"}
+    preview = workflow.set_intake.preview(upload, flow.library)
+    command(flow, "portable_import", upload=upload, preview_id=preview["id"])
+    before = command(flow, "prep_mode", value="source")
+    expected = [item["track"]["id"] for item in before["crate_entries"]]
+    flow.event["music_lists"] = {"must_play": [{"id": "source-typo", "title": "Porch Ligh"}]}
+    pending = flow.view("prep")
+    assert [item["track"]["id"] for item in pending["crate_entries"]] == expected
+    assert all("Pending review" in item["reasons"] for item in pending["recommendations"])
+    row = pending["needs_review"][0]
+    resolved = command(flow, decision, key=row["key"],
+                       **({"file_id": "trk-005"} if decision == "confirm" else {}))
+    assert not resolved["out_of_pool"]
+    assert [item["track"]["id"] for item in resolved["crate_entries"]] == expected
+    assert all("Pending review" not in item["reasons"] for item in resolved["recommendations"])
 
 
 def test_storage_failure_is_explicit_and_never_acknowledges_guest_success(flow):

@@ -176,7 +176,24 @@ class SetlistFlow:
             self._typed_diagnostics[mode] = (event_key, guest_keys, typed_diagnostics)
         if len(result.resolution_diagnostics) != len(typed_diagnostics):
             raise ValueError("Confirmation changed the request list; reload the session.")
-        rows, held, fulfilled = [], set(), set()
+        review_confirmations = {
+            request_key(typed.category, typed.request) for typed in typed_diagnostics
+            if typed.status != "matched" and state[mode + "_decisions"].get(
+                request_key(typed.category, typed.request), {}).get("action") == "confirm"
+        }
+        review_state = {**state, mode + "_decisions": {
+            key: value for key, value in state[mode + "_decisions"].items()
+            if key not in review_confirmations
+        }}
+
+        def preserve_review_order(ranked, normal):
+            # Resolving uncertainty selects a file, not a new position for every other song.
+            positions = {item.song_identity: index for index, item in enumerate(normal)}
+            ranked.items.sort(key=lambda item: positions[item.song_identity])
+
+        if review_confirmations:
+            preserve_review_order(result, self._rank(mode, review_state))
+        rows, pending = [], set()
         for diagnostic, typed in zip(result.resolution_diagnostics, typed_diagnostics):
             key = request_key(typed.category, typed.request)
             decision = state[mode + "_decisions"].get(key)
@@ -188,14 +205,12 @@ class SetlistFlow:
             if not blocked and "version_conflict_not_selected" in conflicts:
                 status = "version_conflict"
             is_fulfilled = status == "matched"
-            if is_fulfilled and diagnostic.identity:
-                fulfilled.add(diagnostic.identity)
             alternatives = []
             for track in typed.alternatives:
                 track = clean_track(track)
                 identity = song_identity(track.get("title"), track.get("artist"))
-                if (not is_fulfilled or typed.status != "matched") and identity:
-                    held.add(identity)
+                if not is_fulfilled and not decision and not blocked and identity:
+                    pending.add(identity)
                 alternatives.append({**track, "version_label": version_label(track)})
             notes = {
                 "missing": "Not in your library", "ambiguous": "Choose the exact file to play",
@@ -218,11 +233,14 @@ class SetlistFlow:
                 "can_confirm": not blocked and status != "matched",
                 "selected_file_id": selected.get("id") if selected and is_fulfilled else None,
             })
+        pending_note = "Pending guest request" if mode == "live" else "Pending review"
         recommendations = [
             {"song_identity": asdict(item.song_identity), "track": clean_track(item.track),
-             "score": item.score, "reasons": item.reasons, "badges": item.badges,
+             "score": item.score,
+             "reasons": (*item.reasons, pending_note) if item.song_identity in pending else item.reasons,
+             "badges": item.badges,
              "version_label": version_label(item.track)}
-            for item in result if item.song_identity not in held - fulfilled
+            for item in result
         ]
         saved = state["saved"]
         source = state["serato_source"] if mode == "prep" else None
@@ -233,14 +251,19 @@ class SetlistFlow:
                 source.get("replacements", {}).get(entry["id"]) or entry["file_id"]
                 for entry in source["entries"] if entry["id"] in source["order"]}
             tracks = [track for track in self._library_snapshot(state)[0] if track["id"] in source_ids]
-            scoped_context = self._context("prep", state)
-            for field in ("must_play", "play_if_possible", "song_cues"):
-                setattr(scoped_context, field, tuple(
-                    replace(request, metadata={key: value for key, value in request.metadata.items()
-                                               if key != "confirmed_file_id"})
-                    if request.metadata.get("confirmed_file_id") not in source_ids else request
-                    for request in getattr(scoped_context, field)))
-            scoped = rank_prep_crate(scoped_context, tracks, limit=len(tracks))
+            def scoped_rank(current):
+                scoped_context = self._context("prep", current)
+                for field in ("must_play", "play_if_possible", "song_cues"):
+                    setattr(scoped_context, field, tuple(
+                        replace(request, metadata={key: value for key, value in request.metadata.items()
+                                                   if key != "confirmed_file_id"})
+                        if request.metadata.get("confirmed_file_id") not in source_ids else request
+                        for request in getattr(scoped_context, field)))
+                return rank_prep_crate(scoped_context, tracks, limit=len(tracks))
+
+            scoped = scoped_rank(state)
+            if review_confirmations:
+                preserve_review_order(scoped, scoped_rank(review_state))
             selected = {item.song_identity: item.track["id"] for item in scoped}
             outside_confirmations = set()
             for row, diagnostic in zip(rows, scoped.resolution_diagnostics):
@@ -254,9 +277,11 @@ class SetlistFlow:
                         row["selected_file_id"] = selected[diagnostic.identity]
             recommendations = [
                 {"song_identity": asdict(item.song_identity), "track": copy.deepcopy(clean_track(item.track)),
-                 "score": item.score, "reasons": item.reasons, "badges": item.badges,
+                 "score": item.score,
+                 "reasons": (*item.reasons, pending_note) if item.song_identity in pending else item.reasons,
+                 "badges": item.badges,
                  "version_label": version_label(item.track)}
-                for item in scoped if item.song_identity not in (held - fulfilled) | outside_confirmations]
+                for item in scoped if item.song_identity not in outside_confirmations]
             crate_entries = recommendations
         elif mode == "prep" and state["prep_mode"] == "library":
             crate_entries = recommendations
@@ -605,10 +630,13 @@ class SetlistFlow:
                 view = self._view(mode, state)
                 row = next((row for row in view["requests"] if row["key"] == body.get("key")), None)
                 if not row or not row["needs_review"]:
+                    if action == "confirm":
+                        raise ValueError("This review row is no longer pending; reload before confirming.")
                     raise FlowConflict("This review row is no longer pending.")
                 decision = {"action": action}
                 if action == "confirm":
-                    if not row["can_confirm"] or body.get("file_id") not in {t["id"] for t in row["candidates"]}:
+                    if (not row["can_confirm"] or not isinstance(body.get("file_id"), str)
+                            or body["file_id"] not in {t["id"] for t in row["candidates"]}):
                         raise ValueError("Choose an available, unblocked candidate from this review row.")
                     decision["file_id"] = body["file_id"]
                 state[mode + "_decisions"][row["key"]] = decision
