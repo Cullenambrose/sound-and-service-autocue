@@ -45,7 +45,7 @@ event-context or search-budget override. IDs are nonblank strings or nonboolean
 integers: `1` and `"1"` are distinct. Missing excluded IDs are harmless; missing
 required or pinned IDs are conflicts.
 
-### Ordered phases (planner 1.1)
+### Ordered phases (planner 1.2)
 
 Each phase has required `phase`, `target_minutes` and `tolerance_minutes`.
 Supported phase names are `ceremony`, `cocktail`, `dinner`, `first_dance`,
@@ -82,10 +82,11 @@ with different labels/targets to express warm-up, peak and closing energy
 steps. Missing energy is not invented and energy preferences are not hard
 bounds. Omitting `phases` preserves the previous single-set behavior.
 
-These are relative full-track budgets, not a wall-clock event scheduler.
-There is no silence padding, skipped phase, truncated track or invented mix
-overlap to meet a budget. A globally correct runtime cannot excuse an empty or
-out-of-budget phase.
+By default, these are relative full-track budgets, not a wall-clock event
+scheduler. With the opt-in reviewed-playback mode below, phase budgets use
+estimated elapsed time instead. Neither mode adds silence padding, skips a
+phase or truncates a track. A globally correct runtime cannot excuse an empty
+or out-of-budget phase.
 
 Tracks must be an iterable of at most 10,000 unique-ID mappings. Each needs
 `id`, nonblank `title`, `artist`, `path`, and string-or-null `version`. All record
@@ -96,8 +97,10 @@ The path is a reference, not evidence that the file exists or is playable.
 ## Hard constraints and missing evidence
 
 - Every returned alternative has at least one track and at most `max_tracks`.
-- Sum of **full file durations** must be within the inclusive target/tolerance
-  interval. No mix-overlap, trimming or invented durations are assumed.
+- By default, the sum of **full file durations** must be within the inclusive
+  target/tolerance interval. No mix-overlap, trimming or invented durations
+  are assumed. Playback optimization must be explicitly enabled and meet the
+  reviewed-evidence contract below.
   Comparisons use exact rational arithmetic over decimal number spellings;
   JSON output durations/deltas are ordinary numbers, rounded to float precision.
 - Missing, nonpositive, boolean or string duration values are ineligible, even
@@ -124,7 +127,7 @@ The return value is JSON-friendly:
 
 ```text
 {
-  planner_version: "1.1",
+  planner_version: "1.2",
   feasible: boolean,
   alternatives: [{
     tracks: [complete original file records, in playback order],
@@ -226,8 +229,9 @@ alternate edits, phase bounds and decimal-exact timing.
 
 `setlist.transitions.transition_report(ordered_tracks, playback=None)` is a
 separate pure service. Studio attaches its result as `transition_evidence` to
-each returned alternative and recomputes it for approval. `plan_set` itself
-does not change its full-track constraints or use the overlay to relax timing.
+each returned alternative and recomputes it for approval. By default, `plan_set`
+does not use this overlay to alter full-track constraints. The opt-in mode below
+uses the same validated evidence during search.
 `validate_playback` rejects unknown fields, duplicates, nonfinite/negative
 numbers, invalid hashes and malformed window/pair shapes.
 
@@ -257,5 +261,43 @@ The result includes:
 
 `estimated_elapsed_s` equals `sum(play windows) - sum(overlaps)`, without
 tempo changes, loop extensions, silence padding or render/playback proof.
-The report is descriptive evidence, not mixed-duration feasibility
+The report alone is descriptive evidence, not mixed-duration feasibility
 optimization or an assertion that the source has been auditioned.
+
+### Opt-in reviewed-playback optimization (planner 1.2)
+
+`plan_set(tracks, policy, playback=...)` optionally uses the same strict
+playback document to search for a set whose estimated elapsed time meets the
+global and phase budgets. Omitting `playback` preserves full-file behavior.
+This mode requires string file IDs because playback evidence is keyed by exact
+file ID.
+Every eligible candidate needs a reviewed, hash-matching, in-file window.
+Every adjacent transition in a returned plan needs its own explicit overlap,
+including an explicit zero for a cut; a missing or invalid overlap is never
+assumed. Invalid/missing windows are reported in `diagnostics.filtered`, and
+missing or out-of-bounds transitions are summarized in
+`diagnostics.playback_evidence`.
+
+In this mode, `duration_s` and `delta_s` refer to the estimated elapsed time.
+The result also includes `duration_basis`, `full_file_duration_s`,
+`play_window_subtotal_s` and the recomputed `transition_evidence`. Phase
+boundaries start at the incoming track; the transition overlap is charged to
+the outgoing track's phase so phase durations add to the estimated set time.
+Combined incoming/outgoing overlaps cannot exceed a middle track's reviewed
+window. These remain arithmetic estimates, not measured playback, musical
+compatibility or transition-safety claims.
+
+### Event-local wall-clock projection
+
+Studio accepts an optional `event_start_time` in strict local `HH:MM` or
+`HH:MM:SS` form. It converts each alternative's relative track intervals to
+clock labels and explicit day offsets when a plan crosses midnight. Full-file
+mode uses cumulative full-file durations with no overlap. Reviewed-playback
+mode uses the complete reviewed-window/explicit-overlap timeline; incomplete
+evidence is not replaced with full-file timings. The projection has no event
+date or time zone, does not account for measured playback or schedule drift,
+and does not change the selected set. Studio's separate `plan/reforecast`
+preview can shift a projection by anchoring one exact planned track to its
+observed local start time and day offset. This manual constant shift preserves
+order/durations; it does not skip or trim tracks, move fixed event moments, or
+observe deck state.

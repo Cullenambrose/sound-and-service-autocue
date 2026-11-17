@@ -38,6 +38,8 @@ class SetlistSettings:
     guest_request_weight: float = 35.0
     floor_filler_weight: float = 18.0
     markov_weight: float = 20.0
+    curated_playlist_weight: float = 45.0
+    curated_playlist_sequence_weight: float = 30.0
     bpm_weight: float = 12.0
     camelot_weight: float = 8.0
     energy_slope_weight: float = 10.0
@@ -51,6 +53,7 @@ class SetlistSettings:
         for name in (
             "must_play_weight", "play_if_possible_weight", "song_cue_weight",
             "guest_request_weight", "floor_filler_weight", "markov_weight",
+            "curated_playlist_weight", "curated_playlist_sequence_weight",
             "bpm_weight", "camelot_weight", "energy_slope_weight",
             "genre_continuity_weight",
         ):
@@ -185,53 +188,132 @@ def score_candidate(
     floor_filler: bool,
     explain_song_cue: bool = True,
 ) -> Tuple[float, Tuple[str, ...]]:
-    """Score one eligible track and explain every applied rule term."""
+    """Score one eligible track and return its human-readable reasons."""
+    score, reasons, _ = score_candidate_with_terms(
+        identity, track, context, phase, settings, now_playing=now_playing,
+        playing_identity=playing_identity, must_play=must_play,
+        play_if_possible=play_if_possible, relevant_song_cue=relevant_song_cue,
+        guest_requested=guest_requested, floor_filler=floor_filler,
+        explain_song_cue=explain_song_cue,
+    )
+    return score, reasons
+
+
+def score_candidate_with_terms(
+    identity: SongIdentity,
+    track: Mapping[str, Any],
+    context: SetlistContext,
+    phase: PhaseState,
+    settings: SetlistSettings,
+    *,
+    now_playing: Optional[Mapping[str, Any]],
+    playing_identity: Optional[SongIdentity],
+    must_play: bool,
+    play_if_possible: bool,
+    relevant_song_cue: bool,
+    guest_requested: bool,
+    floor_filler: bool,
+    explain_song_cue: bool = True,
+):
+    """Score one eligible track and return its applied numeric terms and evidence."""
     score = 0.0
     reasons = []
+    terms = []
+
+    def add_term(factor, label, weight, fit, evidence=None):
+        nonlocal score
+        points = float(weight) * float(fit)
+        score += points
+        terms.append({
+            "factor": factor, "label": label, "points": points,
+            "weight": float(weight), "fit": float(fit), "evidence": evidence or {},
+        })
+
     boosts = (
-        (must_play, settings.must_play_weight, "Must-play request"),
-        (play_if_possible, settings.play_if_possible_weight, "Play-if-possible request"),
-        (relevant_song_cue, settings.song_cue_weight,
+        (must_play, "must_play", settings.must_play_weight, "Must-play request"),
+        (play_if_possible, "play_if_possible", settings.play_if_possible_weight,
+         "Play-if-possible request"),
+        (relevant_song_cue, "song_cue", settings.song_cue_weight,
          f"Song cue fits {phase.name.replace('_', ' ')}" if explain_song_cue else None),
-        (guest_requested, settings.guest_request_weight, "Live guest request"),
-        (floor_filler, settings.floor_filler_weight, "DJ-memory floor-filler"),
+        (guest_requested, "live_guest_request", settings.guest_request_weight, "Live guest request"),
+        (floor_filler, "dj_memory_floor_filler", settings.floor_filler_weight,
+         "DJ-memory floor-filler"),
     )
-    for enabled, weight, reason in boosts:
+    for enabled, factor, weight, reason in boosts:
         if enabled:
-            score += weight
+            add_term(factor, reason or factor, weight, 1.0)
             if reason is not None:
                 reasons.append(reason)
+
+    playlist_count = context.curated_playlist_support.get(identity, 0)
+    if playlist_count > 0:
+        playlist_fit = min(1.0, 0.75 + 0.125 * (playlist_count - 1))
+        add_term(
+            "curated_playlist_presence", "DJ-curated CSV playlist support",
+            settings.curated_playlist_weight, playlist_fit,
+            {"matching_playlists": playlist_count, "fit": playlist_fit},
+        )
+        reasons.append("Included in DJ-curated CSV playlists")
 
     if now_playing is not None:
         transition_probability = _markov_probability(identity, playing_identity, context)
         if transition_probability is not None:
-            score += settings.markov_weight * transition_probability
+            add_term("played_next_memory", "Observed played-next memory",
+                     settings.markov_weight, transition_probability,
+                     {"probability": transition_probability})
             if transition_probability > 0:
                 reasons.append("Played-next transition memory")
 
+        playlist_outgoing = context.curated_playlist_next.get(playing_identity, {})
+        playlist_total = sum(max(0.0, _number(value) or 0.0)
+                             for value in playlist_outgoing.values())
+        playlist_transition_count = max(
+            0.0, _number(playlist_outgoing.get(identity)) or 0.0
+        )
+        if playlist_total > 0:
+            playlist_transition_probability = playlist_transition_count / playlist_total
+            add_term(
+                "curated_playlist_sequence", "DJ-curated CSV sequence precedent",
+                settings.curated_playlist_sequence_weight,
+                playlist_transition_probability,
+                {"probability": playlist_transition_probability},
+            )
+            if playlist_transition_count > 0:
+                reasons.append("DJ-curated CSV sequence precedent")
+
         bpm_fit = _bpm_fit(track, now_playing, settings)
         if bpm_fit is not None:
-            score += settings.bpm_weight * bpm_fit
+            add_term("bpm", "BPM transition fit", settings.bpm_weight, bpm_fit,
+                     {"candidate_bpm": _bpm(track), "playing_bpm": _bpm(now_playing),
+                      "window_fraction": settings.bpm_window})
             reasons.append("BPM fits preferred transition window" if bpm_fit else
                            "BPM outside preferred window; still eligible")
 
         key_fit = _camelot_fit(track, now_playing)
         if key_fit is not None:
-            score += settings.camelot_weight * key_fit
+            add_term("camelot_key", "Camelot key compatibility", settings.camelot_weight, key_fit,
+                     {"candidate_key": camelot_key(track), "playing_key": camelot_key(now_playing)})
             reasons.append("Camelot-compatible key" if key_fit else "No close Camelot key match")
 
         playing_genre, candidate_genre = _genre(now_playing), _genre(track)
         if playing_genre and candidate_genre:
             if playing_genre == candidate_genre:
-                score += settings.genre_continuity_weight
+                add_term("genre_continuity", "Genre continuity", settings.genre_continuity_weight,
+                         1.0, {"candidate_genre": candidate_genre,
+                               "playing_genre": playing_genre})
                 reasons.append(f"Genre continuity: {candidate_genre}")
             else:
-                score -= settings.genre_continuity_weight * 0.25
+                add_term("genre_shift", "Genre shift", settings.genre_continuity_weight,
+                         -0.25, {"candidate_genre": candidate_genre,
+                                 "playing_genre": playing_genre})
                 reasons.append(f"Genre shift: {playing_genre} to {candidate_genre}")
 
     energy_fit = _energy_fit(track, now_playing, phase)
     if energy_fit is not None:
-        score += settings.energy_slope_weight * energy_fit
+        add_term("energy", "Energy target fit", settings.energy_slope_weight, energy_fit,
+                 {"candidate_energy": _energy(track), "phase_target": phase.energy_target,
+                  "energy_stage": phase.energy_stage,
+                  "playing_energy": _energy(now_playing) if now_playing is not None else None})
         if phase.energy_stage:
             reasons.append(f"{phase.energy_stage.replace('_', ' ').title()} energy target")
         else:
@@ -239,4 +321,4 @@ def score_candidate(
 
     if not reasons:
         reasons.append(f"Eligible local-library track for {phase.name.replace('_', ' ')} phase")
-    return score, tuple(reasons)
+    return score, tuple(reasons), tuple(terms)

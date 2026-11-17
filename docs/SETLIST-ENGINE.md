@@ -75,8 +75,28 @@ unresolved; an absent artist remains absent and is never fabricated.
   Live-only. Changing `guest_requests` does not change `rank_prep_crate()`.
 - Scoring is additive and deterministic. `SetlistSettings` exposes weights for
   must-play (100), play-if-possible (30), relevant song cue (25), guest request
-  (35), DJ-memory floor-filler (18), played-next Markov prior (20), BPM (12),
-  Camelot (8), energy slope (10), and genre continuity (6).
+  (35), DJ-memory floor-filler (18), played-next Markov prior (20), DJ-curated
+  CSV playlist membership (45), DJ-curated CSV sequence precedent (30), BPM
+  (12), Camelot (8), energy slope (10), and genre continuity (6). Each
+  recommendation now includes numeric `score_terms` with the applied points,
+  weight, fit and available evidence; terms sum to the recommendation score.
+- Imported CSV playlists are separate, high-weight DJ curation evidence, not
+  observed play history. The verified manifest-backed catalog source is
+  `crate-hackers-manifest-csv`. A song in one
+  playlist receives 75% of the membership weight; three or more distinct
+  playlists reach the full 45 points. Only the latest imported snapshot per
+  source contributes, so importing a revised snapshot does not multiply the
+  same playlist's weight. Planner explanations name the source playlists behind
+  membership and selected adjacent-sequence evidence. An ordered adjacent
+  transition counts at most once per source playlist, then contributes its
+  normalized outgoing probability times 30 points. This influences ranking and
+  sequencing but never overrides do-not-play, file eligibility or explicit
+  event constraints.
+- Whole-set event planning requires confidently matched booking must-plays and
+  special-moment cues. Ambiguous, missing, unavailable-version or prohibited
+  requirements stop generation with diagnostics instead of silently vanishing.
+  Matched play-if-possible requests remain soft preferences and their exact
+  local-file rationale is shown on the selected track.
 - The BPM window defaults to 8%. Outside-window BPM gets no compatibility
   points but never excludes a song. Half/double-time matching is off by default.
   Played-next transition weights are normalized as probabilities across the
@@ -111,11 +131,18 @@ existing crate planner/writer as a separate step. Any tag change must use
 `tag_gate`; existing dry-run, explicit-apply, and Serato-closed safeguards
 remain downstream. The Python matcher remains the source of truth.
 
-No events API route was changed. The current events API may only provide
-must-play, play-if-possible, and do-not-play; sending special moments, timeline
-song metadata, guest requests, or DJ-memory data through that route is later
-integration work. Synthetic in-memory tests establish software behavior, not
-musical quality, cue accuracy, or real-world transition quality.
+Booking event JSON may include `music_lists.client_playlists`, an array of
+`{id?, title, songs:[{title, artist, version?}]}` records. Each song becomes a
+soft `play_if_possible` request, retaining playlist title and original item
+position for explanation; list order does not lock the generated set. Raw Studio
+payloads and the legacy event-sync parser validate these structures rather than
+silently dropping malformed lists. The existing events API route itself was not
+changed, and Studio does not fetch events directly from the booking service, so
+the upstream booking API must emit this contract before the handoff is end to
+end. Other special moments, timeline song metadata, guest requests, and
+DJ-memory data are not thereby enabled through that route. Synthetic tests
+establish software behavior, not musical quality, cue accuracy, or real-world
+transition quality.
 
 The shared matcher now scores normalized song identities without playback-version
 text or preference bonuses. Confidence remains 60% title similarity plus 40%

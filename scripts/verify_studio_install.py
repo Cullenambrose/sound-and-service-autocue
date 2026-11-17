@@ -52,7 +52,8 @@ def main():
                 else:
                     raise RuntimeError("Installed Studio did not become responsive.")
                 for path, marker in (("/", b"at most three bounded local-model calls"), ("/studio.js", b"api/studio"),
-                                     ("/studio.css", b"color-scheme")):
+                                     ("/studio.css", b"color-scheme"),
+                                     ("/studio-plan-view.js", b"trackReasons")):
                     with urllib.request.urlopen(base + path) as response:
                         assert marker in response.read(), path
                 request = urllib.request.Request(base + "/api/studio/search",

@@ -10,11 +10,11 @@ from library.matcher import MatchConfig, extract_version_tags, rank_candidates
 
 from .inputs import song_identity
 from .phase import select_phase
-from .scoring import SetlistSettings, score_candidate
+from .scoring import SetlistSettings, score_candidate_with_terms
 from .types import SetlistContext
 
 
-PLANNER_VERSION = "1.1"
+PLANNER_VERSION = "1.2"
 MAX_TRACKS = 60
 MAX_INPUT_TRACKS = 10_000
 MAX_TARGET_MINUTES = 1440
@@ -201,16 +201,50 @@ class _State:
     phase_index: int = 0
     phase_duration: Fraction = Fraction(0)
     phase_ends: tuple = ()
+    score_terms: tuple = ()
 
 
-def plan_set(tracks, policy):
+def plan_set(tracks, policy, *, playback=None, curated_playlist_support=None,
+             curated_playlist_next=None, play_if_possible_ids=()):
     """Return feasible exact-file alternatives, or explicit conflict/search evidence.
 
     No event interpretation, filesystem access, clock, random source, or writes.
     The caller must prefilter event scope and song-level/event prohibitions.
+    Optional playback timing is accepted only from explicit reviewed windows.
     """
     policy = validate_policy(policy)
     records = _records(tracks)
+    playback_enabled = playback is not None
+    playback_windows, playback_overlaps, playback_spans = {}, {}, {}
+    if playback_enabled:
+        from .transitions import transition_report, validate_playback
+        playback = validate_playback(playback)
+        if any(not isinstance(record["id"], str) for record in records):
+            raise ValueError("reviewed playback planning requires string file IDs")
+        playback_windows = {item["file_id"]: item for item in playback["windows"]}
+        playback_overlaps = {
+            (item["from_id"], item["to_id"]): Fraction(str(item["seconds"]))
+            for item in playback["overlaps"]
+        }
+
+        def playback_filter(record):
+            window = playback_windows.get(record["id"])
+            if window is None:
+                return "missing_play_window"
+            if window["content_hash"] != record.get("content_hash"):
+                return "window_hash_mismatch"
+            if not window["reviewed"]:
+                return "window_not_reviewed"
+            duration = _duration(record)
+            if duration is None or Fraction(str(window["exit_s"])) > duration:
+                return "window_outside_file"
+            playback_spans[record["id"]] = (
+                Fraction(str(window["exit_s"])) - Fraction(str(window["entry_s"])))
+            return None
+
+    def planning_duration(record):
+        return (playback_spans[record["id"]] if playback_enabled else _duration(record))
+
     target = Fraction(str(policy["target_minutes"])) * 60
     tolerance = Fraction(str(policy["tolerance_minutes"])) * 60
     lower, upper = max(Fraction(0), target - tolerance), target + tolerance
@@ -238,7 +272,12 @@ def plan_set(tracks, policy):
         unresolved.append({"code": code, **details})
 
     by_id = {record["id"]: record for record in records}
-    filtered = {record["id"]: _banned(record, policy) for record in records}
+    filtered = {}
+    for record in records:
+        reason = _banned(record, policy)
+        if reason is None and playback_enabled:
+            reason = playback_filter(record)
+        filtered[record["id"]] = reason
     diagnostics["filtered"] = dict(sorted(Counter(
         reason for reason in filtered.values() if reason
     ).items()))
@@ -302,33 +341,54 @@ def plan_set(tracks, policy):
     groups = defaultdict(list)
     for record in eligible:
         groups[song_identity(record["title"], record["artist"])].append(record)
-    maxima = sorted((max(_duration(record) for record in group)
+    maxima = sorted((max(planning_duration(record) for record in group)
                      for group in groups.values()), reverse=True)
     if (len(groups) < min_count or sum(maxima[:policy["max_tracks"]], Fraction(0)) < lower
-            or sum((_duration(by_id[file_id]) for file_id in required), Fraction(0)) > upper):
+            or (not playback_enabled
+                and sum((_duration(by_id[file_id]) for file_id in required), Fraction(0)) > upper)):
         conflict("duration_or_capacity_impossible")
         return finish([])
 
-    contexts = [SetlistContext(explicit_phase=phase["phase"],
-                              energy_target=phase.get("energy_target", policy.get("energy_target")))
+    curated_playlist_support = curated_playlist_support or {}
+    curated_playlist_next = curated_playlist_next or {}
+    preferred_ids = frozenset(play_if_possible_ids)
+    if any(not isinstance(file_id, str) or file_id not in {record["id"] for record in records}
+           for file_id in preferred_ids):
+        raise ValueError("play_if_possible_ids must refer to exact candidate file IDs.")
+    contexts = [SetlistContext(
+                    explicit_phase=phase["phase"],
+                    energy_target=phase.get("energy_target", policy.get("energy_target")),
+                    curated_playlist_support=curated_playlist_support,
+                    curated_playlist_next=curated_playlist_next,
+                )
                 for phase in phases]
     scoring_phases = [select_phase(context) for context in contexts]
     settings = SetlistSettings()
 
     def score(record, previous, phase_index=0):
-        points, reasons = score_candidate(
+        points, reasons, terms = score_candidate_with_terms(
             song_identity(record["title"], record["artist"]), record, contexts[phase_index],
             scoring_phases[phase_index], settings,
             now_playing=previous,
             playing_identity=(song_identity(previous["title"], previous["artist"])
                               if previous is not None else None),
-            must_play=False, play_if_possible=False, relevant_song_cue=False,
+            must_play=False, play_if_possible=record["id"] in preferred_ids, relevant_song_cue=False,
             guest_requested=False, floor_filler=False,
         )
         rating = record.get("dj_rating", 0)
         if policy.get("use_feedback") and type(rating) is int and rating in (-1, 1):
-            return points + rating * 5, tuple(reasons) + ("Explicit DJ preference: " + str(rating),)
-        return points, reasons
+            preference_points = rating * 5
+            terms += ({
+                "factor": "explicit_dj_preference",
+                "label": "Explicit DJ preference",
+                "points": float(preference_points),
+                "weight": 5.0,
+                "fit": float(rating),
+                "evidence": {"rating": rating},
+            },)
+            return (points + preference_points,
+                    tuple(reasons) + ("Explicit DJ preference: " + str(rating),), terms)
+        return points, reasons, terms
 
     preferences = {}
     for group in groups.values():
@@ -346,14 +406,49 @@ def plan_set(tracks, policy):
         slots = MAX_CANDIDATES - len(selected)
         selected.extend(other[:slots // 2])
         remaining = sorted(other[slots // 2:],
-                           key=lambda record: (_duration(record), _id_key(record["id"])))
+                           key=lambda record: (planning_duration(record), _id_key(record["id"])))
         slots = MAX_CANDIDATES - len(selected)
         selected.extend(remaining[index * len(remaining) // slots] for index in range(slots))
         eligible = selected
     candidates = sorted(eligible, key=lambda record: _id_key(record["id"]))
     diagnostics["candidate_count"] = len(candidates)
     identities = [song_identity(record["title"], record["artist"]) for record in candidates]
-    durations = [_duration(record) for record in candidates]
+    durations = [planning_duration(record) for record in candidates]
+    if playback_enabled:
+        possible_pairs = [
+            (left, right) for left in range(len(candidates))
+            for right in range(len(candidates)) if identities[left] != identities[right]
+        ]
+        missing_pairs = sum(
+            (candidates[left]["id"], candidates[right]["id"]) not in playback_overlaps
+            for left, right in possible_pairs
+        )
+        invalid_pairs = sum(
+            (candidates[left]["id"], candidates[right]["id"]) in playback_overlaps
+            and playback_overlaps[(candidates[left]["id"], candidates[right]["id"])]
+            > min(durations[left], durations[right])
+            for left, right in possible_pairs
+        )
+        index_by_file_id = {record["id"]: index for index, record in enumerate(candidates)}
+        incoming, outgoing = defaultdict(list), defaultdict(list)
+        for (from_id, to_id), seconds in playback_overlaps.items():
+            if from_id in index_by_file_id and to_id in index_by_file_id:
+                from_index, to_index = index_by_file_id[from_id], index_by_file_id[to_id]
+                outgoing[from_index].append((to_index, seconds))
+                incoming[to_index].append((from_index, seconds))
+        combined_overlap_conflicts = sum(
+            incoming_seconds + outgoing_seconds > durations[middle]
+            for middle in range(len(candidates))
+            for left, incoming_seconds in incoming[middle]
+            for right, outgoing_seconds in outgoing[middle]
+            if identities[left] != identities[right]
+        )
+        diagnostics["playback_evidence"] = {
+            "candidate_directed_pairs": len(possible_pairs),
+            "missing_overlap_pairs": missing_pairs,
+            "overlaps_exceed_play_windows": invalid_pairs,
+            "combined_overlap_conflicts": combined_overlap_conflicts,
+        }
     index_by_id = {record["id"]: index for index, record in enumerate(candidates)}
     required_indices = frozenset(index_by_id[file_id] for file_id in required)
     pin_indices = {position: index_by_id[file_id] for position, file_id in pins.items()}
@@ -382,7 +477,8 @@ def plan_set(tracks, policy):
             candidates[index]["id"] for index in state.path[start:]
         }
         if (state.phase_index + 1 < len(phases) and len(state.path) > start and not pending
-                and phase_lower <= state.phase_duration <= phase_upper):
+                and (playback_enabled
+                     or phase_lower <= state.phase_duration <= phase_upper)):
             yield state.phase_index + 1, Fraction(0), state.phase_ends + (len(state.path),)
 
     for position in range(policy["max_tracks"]):
@@ -404,30 +500,55 @@ def plan_set(tracks, policy):
                             and phase_required[candidates[index]["id"]] != phase_index)
                         or ("phases" in policy and _banned(candidates[index], phases[phase_index]))):
                     continue
-                duration = state.duration + durations[index]
-                local_duration = phase_duration + durations[index]
+                previous = state.path[-1] if state.path else None
+                overlap = Fraction(0)
+                if playback_enabled and previous is not None:
+                    pair = (candidates[previous]["id"], candidates[index]["id"])
+                    overlap = playback_overlaps.get(pair)
+                    if overlap is None or overlap > min(durations[previous], durations[index]):
+                        continue
+                    if len(state.path) > 1:
+                        earlier_id = candidates[state.path[-2]]["id"]
+                        previous_id = candidates[previous]["id"]
+                        incoming = playback_overlaps[(earlier_id, previous_id)]
+                        if incoming + overlap > durations[previous]:
+                            continue
+                increment = durations[index] - overlap
+                duration = state.duration + increment
+                phase_changed = phase_index != state.phase_index
+                if playback_enabled and phase_changed:
+                    completed_phase_duration = state.phase_duration - overlap
+                    if not phase_bounds[state.phase_index][0] <= completed_phase_duration \
+                            <= phase_bounds[state.phase_index][1]:
+                        continue
+                    local_duration = durations[index]
+                else:
+                    local_duration = phase_duration + increment
                 path = state.path + (index,)
                 pending = required_indices.difference(path)
                 slots_left = policy["max_tracks"] - len(path)
-                if (duration > upper or local_duration > phase_bounds[phase_index][1]
+                if (duration > upper
+                        or (not playback_enabled and local_duration > phase_bounds[phase_index][1])
                         or slots_left < len(phases) - phase_index - 1
                         or len(pending) > slots_left
                         or duration + max_duration * slots_left < lower
-                        or duration + sum((durations[i] for i in pending), Fraction(0)) > upper):
+                        or (not playback_enabled
+                            and duration + sum((durations[i] for i in pending), Fraction(0)) > upper)):
                     continue
-                previous = state.path[-1] if state.path else None
                 cache_key = (phase_index, previous, index)
                 if cache_key not in score_cache:
                     score_cache[cache_key] = score(
                         candidates[index], candidates[previous] if previous is not None else None,
                         phase_index)
-                points, reasons = score_cache[cache_key]
+                points, reasons, score_terms = score_cache[cache_key]
                 child = _State(path, state.used | {identities[index]}, duration,
                                state.score + points, state.reasons + (reasons,),
-                               phase_index, local_duration, phase_ends)
+                               phase_index, local_duration, phase_ends,
+                               state.score_terms + (score_terms,))
                 if (len(path) >= min_count and not pending and lower <= duration <= upper
                         and phase_index == len(phases) - 1
-                        and phase_bounds[phase_index][0] <= local_duration):
+                        and phase_bounds[phase_index][0] <= local_duration
+                        <= phase_bounds[phase_index][1]):
                     found[(path, phase_ends)] = child
                     if len(found) > MAX_ALTERNATIVES:
                         del found[max(found, key=lambda key: order(found[key]))]
@@ -452,6 +573,11 @@ def plan_set(tracks, policy):
     alternatives = []
     for state in sorted(found.values(), key=order):
         chosen = [candidates[index] for index in state.path]
+        full_file_duration = sum((_duration(record) for record in chosen), Fraction(0))
+        planned_duration = sum((planning_duration(record) for record in chosen), Fraction(0))
+        if playback_enabled:
+            for left, right in zip(chosen, chosen[1:]):
+                planned_duration -= playback_overlaps[(left["id"], right["id"])]
         # Recheck the public contract independently of search heuristics.
         chosen_ids = {record["id"] for record in chosen}
         chosen_identities = {song_identity(record["title"], record["artist"])
@@ -462,18 +588,40 @@ def plan_set(tracks, policy):
                 or any(position >= len(chosen) or chosen[position]["id"] != file_id
                        for position, file_id in pins.items())
                 or any(_banned(record, policy) for record in chosen)
-                or not lower <= sum((_duration(record) for record in chosen), Fraction(0)) <= upper):
+                or planned_duration != state.duration
+                or not lower <= planned_duration <= upper):
             raise AssertionError("planner produced an invalid alternative")
-        alternatives.append({
+        alternative = {
             "tracks": chosen, "duration_s": float(state.duration),
             "delta_s": float(state.duration - target), "score": state.score,
-            "reasons": ["All hard constraints satisfied; duration uses full file lengths.",
-                        "Ordered by duration fit, then shared transition/energy score."],
+            "reasons": [
+                ("All hard constraints satisfied; duration uses explicit reviewed play windows "
+                 "and overlaps." if playback_enabled else
+                 "All hard constraints satisfied; duration uses full file lengths."),
+                "Ordered by duration fit, then shared transition, energy, explicit DJ-feedback "
+                "and imported DJ-curated CSV playlist evidence score."],
             "track_reasons": [
                 {"file_id": record["id"], "reasons": list(reasons)}
                 for record, reasons in zip(chosen, state.reasons)
             ],
-        })
+            "track_score_terms": [
+                {"file_id": record["id"], "terms": list(terms)}
+                for record, terms in zip(chosen, state.score_terms)
+            ],
+        }
+        if playback_enabled:
+            timing = transition_report(chosen, playback)
+            if (timing["status"] != "estimated"
+                    or Fraction(str(timing["estimated_elapsed_s"])) != state.duration):
+                raise AssertionError("planner produced incomplete reviewed-playback timing evidence")
+            alternative.update({
+                "duration_basis": "reviewed_playback_estimate",
+                "full_file_duration_s": float(full_file_duration),
+                "play_window_subtotal_s": timing["play_window_subtotal_s"],
+                "estimated_elapsed_s": timing["estimated_elapsed_s"],
+                "transition_evidence": timing,
+            })
+        alternatives.append(alternative)
         if "phases" in policy:
             schedule = []
             start = 0
@@ -481,7 +629,14 @@ def plan_set(tracks, policy):
             for phase_index, end in enumerate(state.phase_ends + (len(chosen),)):
                 phase_tracks = chosen[start:end]
                 phase_policy = phases[phase_index]
-                duration = sum((_duration(record) for record in phase_tracks), Fraction(0))
+                duration = sum((planning_duration(record) for record in phase_tracks), Fraction(0))
+                if playback_enabled:
+                    for position in range(start, end - 1):
+                        duration -= playback_overlaps[
+                            (chosen[position]["id"], chosen[position + 1]["id"])]
+                    if end < len(chosen):
+                        duration -= playback_overlaps[
+                            (chosen[end - 1]["id"], chosen[end]["id"])]
                 if (not phase_tracks or not phase_bounds[phase_index][0] <= duration <= phase_bounds[phase_index][1]
                         or any(_banned(record, phase_policy) for record in phase_tracks)
                         or not set(phase_policy["must_include"]) <= {record["id"] for record in phase_tracks}):

@@ -3,16 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AutoCue Studio - Library and set planning</title>
+  <title>BOOTH BUDDY Studio - Library and set planning</title>
   <link rel="stylesheet" href="/studio.css">
 </head>
 <body>
   <a class="skip" href="#workspace">Skip to workspace</a>
-  <header><h1>AutoCue Studio <small>LOCAL ALPHA</small></h1>
-    <p>Search your indexed music, build reviewed crates and plan a set. No source audio, tags or DJ databases are changed.</p>
-    <nav aria-label="Workspace"><a href="#library">Library</a><a href="#planning">Set planner</a><a href="#crates">Crates</a><a href="#operations">Health and history</a><a href="#readiness">Release readiness</a></nav>
+  <header class="sidebar">
+    <a class="brand" href="#library" aria-label="BOOTH BUDDY Studio home">
+      <span class="brand-mark" aria-hidden="true">BB</span>
+      <span class="brand-copy"><strong>BOOTH BUDDY</strong><small>STUDIO</small></span>
+    </a>
+    <p class="sidebar-description">Build better event crates from your music library.</p>
+    <nav aria-label="Workspace">
+      <a href="#library"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>Library</a>
+      <a href="#planning"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 9h18M12 13v4l3 2"/></svg>Set planner</a>
+      <a href="#crates"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5M12 13v8"/></svg>Crates</a>
+      <a href="#operations"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>History &amp; health</a>
+      <a href="#readiness"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v5c0 5-3.4 8.3-8 10-4.6-1.7-8-5-8-10V6l8-3Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>Readiness</a>
+    </nav>
+    <div class="sidebar-footer"><span class="local-dot" aria-hidden="true"></span>LOCAL ALPHA</div>
   </header>
   <main id="workspace">
+    <div class="topbar">
+      <span class="topbar-title">AutoCue Studio</span>
+      <span class="local-status"><span class="local-dot" aria-hidden="true"></span>ON THIS MAC</span>
+    </div>
     <p id="status" role="status" tabindex="-1">Connecting to the local workspace...</p>
     <aside id="pending" hidden aria-label="Pending durable action">
       <p>An unacknowledged action is retained in this browser. Resolve it before another save.</p>
@@ -20,7 +35,7 @@
       <button id="discard">Discard browser retry (does not undo a committed action)</button>
     </aside>
     <section id="library">
-      <h2>1. Search and organize your library</h2>
+      <h2>Library</h2>
       <details><summary>Index an explicitly selected folder</summary>
         <p>Only the folder you submit is scanned, read-only. No music is copied or analyzed. Up to 10,000 files per root.</p>
         <label for="root">Absolute music folder path</label><input id="root" placeholder="/absolute/path/to/selected/music">
@@ -70,7 +85,7 @@
           <label for="template">Original recipe</label><select id="template"><option value="">Choose an optional starting rule</option></select>
           <label for="rule">Typed filters (JSON; usable without AI)</label>
           <textarea id="rule" rows="6" spellcheck="false">{"q":"","clean_only":false,"limit":100,"sort":"title"}</textarea>
-          <details><summary>Supported filter fields</summary><p>q, artist, genre, bpm_min, bpm_max, energy_min, energy_max (0..1), clean_only, never_played, scope_ids, sort (title/bpm/energy/last_played), limit (1..1000). Numeric bounds exclude unknown values. Clean means tagged clean, not verified audible content.</p></details>
+          <details><summary>Supported filter fields</summary><p>q, artist, genre, bpm_min, bpm_max, energy_min, energy_max (0..1), clean_only, never_played, scope_ids, sort (title/bpm/energy/last_played), limit (1..1000). Combine typed filters with bounded nested <code>all</code>/<code>any</code> arrays (up to 8 children each, 3 nested levels, 32 total rule nodes). Example: <code>{"all":[{"genre":"House"},{"any":[{"bpm_min":120},{"clean_only":true}]}]}</code>. Numeric bounds exclude unknown values. Clean means tagged clean, not verified audible content.</p></details>
           <button id="search">Search current index</button><button id="rule-save">Save smart rule</button>
           <button id="rule-new">Save next rule as new</button>
         </article>
@@ -88,17 +103,20 @@
       </article>
     </section>
     <section id="planning">
-      <h2>2. Plan an entire set</h2>
+      <h2>Set planner</h2>
       <p>Uses the current search rule and shared event matcher. Full-track duration is not mixed elapsed time. Unknown durations cannot prove a target.</p>
       <details>
         <summary>Translate a timed set brief with local AI</summary>
         <label for="plan-prompt">Describe the set duration and optional phases</label>
         <textarea id="plan-prompt" rows="3" placeholder="Plan 30 minutes: 10 minutes low-energy dinner, then 20 minutes open dancing. Use tagged-clean tracks."></textarea>
         <button id="interpret-plan">Translate set brief (does not generate or save)</button>
-        <p>Requires your existing local model. Review the translated draft first.
+        <p>Requires your existing local model. Review the read-back and source quotes first.
           Defaults when unspecified: 3-minute global tolerance, 20 tracks maximum,
           1-minute tolerance per phase. No library data or file IDs are sent.</p>
+        <div id="ai-plan-summary" aria-live="polite"></div>
+        <details><summary>Inspect structured translation</summary>
         <pre id="ai-plan-output"></pre>
+        </details>
         <button id="apply-ai-plan" disabled>Apply reviewed translation to new planning draft</button>
         <p>Applying replaces unsaved search/timing preferences. It retains source scope,
           existing event lists, global exact-file must-plays, exclusions and pins.
@@ -106,14 +124,22 @@
           Saved crates are never changed. Generation and approval remain separate.</p>
       </details>
       <div class="columns">
-        <div><label for="event">Event requirements (existing event JSON schema)</label>
-          <textarea id="event" rows="8" spellcheck="false">{"music_lists":{"must_play":[],"do_not_play":[]}}</textarea>
-          <p>Each request uses title, artist and optional version. Do Not Play wins. Resolve ambiguous or unavailable must-plays first.</p></div>
+        <div><label for="event">Booking event data (existing event JSON schema)</label>
+          <textarea id="event" rows="8" spellcheck="false">{"music_lists":{"must_play":[],"do_not_play":[],"client_playlists":[]}}</textarea>
+          <p>Client playlists use {title,songs:[{title,artist,version?}]}; their songs become soft requests, not guaranteed plays or a locked sequence. Do Not Play wins. Resolve ambiguous or unavailable must-plays first.</p></div>
         <div><label for="policy">Explicit planner policy</label>
           <textarea id="policy" rows="8" spellcheck="false">{"target_minutes":30,"tolerance_minutes":3,"max_tracks":20,"clean_only":false,"must_include":[],"exclude":[],"pinned":[]}</textarea>
           <p>IDs are exact file IDs from search. Pins use {"position":0,"file_id":"..."}.
           Optional bpm_min, bpm_max and energy_target are explicit requirements/preferences.</p></div>
       </div>
+      <label for="event-start-time">Optional event-local start time</label>
+      <input id="event-start-time" type="time" step="1">
+      <p>When supplied, each plan gets a read-only clock projection from its full-file
+        runtime or reviewed playback estimate. It does not adapt to live delays or
+        infer an event date or time zone; a next-day offset is shown when needed.</p>
+      <p>For a live delay, reforecast from the observed start of the current track.
+        This shifts the remaining clock forecast for review; it never skips, shortens
+        or reorders tracks automatically.</p>
       <details>
         <summary>Build an ordered phase schedule</summary>
         <p>Every phase needs at least one full track and its own duration tolerance.
@@ -131,11 +157,17 @@
       </details>
       <details>
         <summary>Reviewed play windows and transition evidence</summary>
-        <p>Optional timing overlay, not a change to full-track phase feasibility.
+        <p>By default this is evidence only; whole-set and phase constraints use full-file durations.
           Inspect the existing cues for each exact file, audition it yourself, and
           supply explicit entry/exit seconds with its indexed content hash.
           Mark reviewed only after your own review. Specify each adjacent overlap,
           including zero for an intentional cut. Missing evidence leaves mixed elapsed time unavailable.</p>
+        <label><input id="optimize-playback" type="checkbox">
+          Optimize whole-set and phase targets using these reviewed playback estimates</label>
+        <p>Opt-in planning excludes files without valid reviewed windows and requires
+          an explicit valid overlap for every selected transition. Phase boundaries
+          begin at the incoming track; overlap time is charged to the outgoing phase.
+          Estimates do not certify sound, safety or actual playback.</p>
         <label for="playback">Reviewed playback assumptions (JSON)</label>
         <textarea id="playback" rows="8" spellcheck="false">{"windows":[],"overlaps":[]}</textarea>
         <p>Window: {"file_id":"...","content_hash":"...","entry_s":0,"exit_s":120,"reviewed":false}.
@@ -152,7 +184,7 @@
       </details>
     </section>
     <section id="crates">
-      <h2>3. Saved smart rules and personal crates</h2>
+      <h2>Crates and smart rules</h2>
       <button id="refresh">Refresh saved state</button>
       <h3>Smart rules</h3><div id="rules"></div>
       <h3>Static personal crates</h3><div id="saved-crates"></div>
@@ -195,9 +227,21 @@
       <h3>Historical exports</h3><div id="exports"></div>
     </section>
     <section id="operations">
-      <h2>4. Indexed health and explicit play history</h2>
-      <p>Reports describe the published index, not fresh disk availability. Identical hashes prove whole-file bytes only. Related edits are not disposable duplicates. No cleanup or move action is enabled.</p>
+      <h2>History and library health</h2>
+      <p>Reports describe the published index, not fresh disk availability. Identical hashes prove whole-file bytes only. Related edits are not disposable duplicates. AutoCue catalog references are counted, but external DJ crates and playlists are not inspected. No cleanup or move action is enabled.</p>
       <pre id="health"></pre>
+      <h3>Repair AutoCue links between exact duplicates</h3>
+      <p>This changes only reviewed AutoCue catalog matches after a fresh whole-file hash check.
+        It does not move audio or inspect/repair Serato, other DJ databases, or external playlists.
+        Keep the original file until a separately reviewed cleanup workflow exists.</p>
+      <label for="repair-source">Source file ID whose AutoCue links should be reassigned</label>
+      <input id="repair-source" autocomplete="off">
+      <label for="repair-keeper">Exact-hash keeper file ID</label>
+      <input id="repair-keeper" autocomplete="off">
+      <button id="repair-preview-button">Preview catalog reference repair</button>
+      <button id="repair-approve" disabled>Approve reviewed catalog repair</button>
+      <pre id="repair-preview"></pre>
+      <div id="repair-history"></div>
       <h3>Database recovery</h3>
       <p>This private backup contains saved app state and indexed evidence, not audio,
         exported ZIPs or browser pending actions. Restore only into a new data directory
@@ -230,6 +274,18 @@
         Original observations remain in recovery journals; this is not permanent privacy
         erasure. Audio, saved crates and explicit DJ preferences are untouched.
         Showing up to 100 most recent active observations.</p>
+      <details>
+        <summary>Post-gig review: compare selected play observations with a saved planned set</summary>
+        <p>Choose the saved set and the exact history entries that belong to this gig.
+          AutoCue does not infer event boundaries. A planned track absent from your selected
+          observations is not assumed to have been skipped or disliked. Comparisons are read-only
+          unless you separately save an explicit private event assessment. Personal per-track
+          preferences remain separate from this event-specific assessment.</p>
+        <label for="gig-review-crate">Saved set crate</label><select id="gig-review-crate"></select>
+        <button id="review-gig">Compare selected observations</button>
+        <div id="gig-review-output" aria-live="polite"></div>
+        <h3>Saved event-specific DJ assessments</h3><div id="gig-review-history"></div>
+      </details>
       <button id="history-download">Download displayed active history JSON</button>
       <button id="history-preview-button">Preview selected history removal</button>
       <pre id="history-preview"></pre>
@@ -237,13 +293,14 @@
       <h3>History removal recovery</h3><div id="history-edits"></div>
     </section>
     <section id="readiness">
-      <h2>5. Commercial readiness and 6. destination parity</h2>
+      <h2>Product readiness</h2>
       <p>This is a local alpha, not a certified commercial release. Unsupported destinations are not connected.</p>
       <div id="destinations"></div><h3>Outstanding commercial release gates</h3><div id="gates"></div>
       <button id="diagnostics">Download path-free release-readiness report</button>
     </section>
   </main>
   <script src="/catalog-state.js"></script>
+  <script src="/studio-plan-view.js"></script>
   <script src="/studio.js"></script>
 </body>
 </html>

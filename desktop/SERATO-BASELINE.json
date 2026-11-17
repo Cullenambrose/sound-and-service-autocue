@@ -1,0 +1,20 @@
+{
+  "scope": "Read-only metadata baseline; no audio opened, imported, moved or edited. Not Serato UI/import/playback acceptance.",
+  "observed_at": "2026-11-16T20:04:02.597362+00:00",
+  "serato_version": "5.1.0",
+  "serato_build": "5.1.0.25",
+  "crates": [
+    {
+      "entry_count": 94,
+      "distinct_paths": 94,
+      "available_files": 94,
+      "extensions": {
+        ".m4a": 77,
+        ".mp3": 17
+      },
+      "crate_sha256": "f31b9ffdacd121115d6e20c4c9c9a0501e3c5925f55fffd6dc43c0e7195eece9"
+    }
+  ],
+  "database_sha256": "2d1bcdccd2553beb06fd7466612789381abe6226a6d6d16895f049fd40b3de6a",
+  "ui_inspection": "Timed out; no UI action completed."
+}

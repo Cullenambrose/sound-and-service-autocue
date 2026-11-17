@@ -12,6 +12,7 @@ MAX_HISTORY_LIMIT = 500
 MAX_ID_LENGTH = 256
 MAX_NOTE_LENGTH = 1000
 MAX_ERROR_DETAILS = 100
+MAX_REFERENCE_DETAILS = 20
 
 
 def initialize(db):
@@ -48,7 +49,56 @@ def _indexed_state(root, file):
     return "available_at_last_scan"
 
 
-def _file_summary(root, file, metadata):
+def _catalog_references(db, present):
+    required = {"catalog_match_decisions", "catalog_memberships"}
+    if not required <= present:
+        return {}, False
+    counts = {
+        row["file_id"]: {
+            "reviewed_song_links": row["reviewed_song_links"],
+            "crate_memberships": row["crate_memberships"],
+            "items": [],
+            "items_omitted": max(0, row["reviewed_song_links"] - MAX_REFERENCE_DETAILS),
+        }
+        for row in db.execute("""
+        SELECT d.file_id,COUNT(*) AS reviewed_song_links,
+               SUM(COALESCE(m.memberships,0)) AS crate_memberships
+        FROM catalog_match_decisions d
+        LEFT JOIN (
+            SELECT snapshot_id,song_id,COUNT(*) AS memberships
+            FROM catalog_memberships GROUP BY snapshot_id,song_id
+        ) m ON m.snapshot_id=d.snapshot_id AND m.song_id=d.song_id
+        WHERE d.file_id IS NOT NULL
+        GROUP BY d.file_id
+    """)
+    }
+    details = db.execute("""
+        WITH ranked AS (
+            SELECT d.file_id,d.snapshot_id,d.song_id,s.artist,s.title,s.version,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY d.file_id ORDER BY d.snapshot_id,d.song_id
+                   ) AS reference_rank
+            FROM catalog_match_decisions d
+            JOIN catalog_songs s
+              ON s.snapshot_id=d.snapshot_id AND s.source_id=d.song_id
+            WHERE d.file_id IS NOT NULL
+        )
+        SELECT file_id,snapshot_id,song_id,artist,title,version
+        FROM ranked WHERE reference_rank<=?
+        ORDER BY file_id,snapshot_id,song_id
+    """, (MAX_REFERENCE_DETAILS,))
+    for row in details:
+        counts[row["file_id"]]["items"].append({
+            "snapshot_id": row["snapshot_id"],
+            "song_id": row["song_id"],
+            "song": {"artist": row["artist"], "title": row["title"], "version": row["version"]},
+        })
+    return counts, True
+
+
+def _file_summary(root, file, metadata, references, reference_audit_available):
+    references = references or {"reviewed_song_links": 0, "crate_memberships": 0,
+                                "items": [], "items_omitted": 0}
     return {
         "file_id": file["id"],
         "root_id": file["root_id"],
@@ -58,6 +108,10 @@ def _file_summary(root, file, metadata):
         "content_hash": file["content_hash"],
         "metadata": metadata,
         "error": file["error"],
+        "autocue_catalog_references": {
+            "state": "available" if reference_audit_available else "unavailable",
+            **references,
+        },
     }
 
 
@@ -119,10 +173,12 @@ def health(db):
         if error:
             metadata_errors[file["id"]] = error
 
+    catalog_references, reference_audit_available = _catalog_references(db, present)
     exact, related = {}, {}
     for file in files:
         root = roots.get(file["root_id"], {"error": "Indexed root record is missing."})
-        record = _file_summary(root, file, metadata_by_id[file["id"]])
+        record = _file_summary(root, file, metadata_by_id[file["id"]],
+                               catalog_references.get(file["id"], []), reference_audit_available)
         if file["id"] in metadata_errors:
             record["metadata_error"] = metadata_errors[file["id"]]
         if file["content_hash"]:
@@ -171,6 +227,11 @@ def health(db):
         "state": "ok",
         "basis": "indexed_snapshot_only",
         "fresh_validation_performed": False,
+        "reference_scope": {
+            "autocue_catalog": "reviewed_match_decisions_only",
+            "external_dj_crates_and_playlists": "not_inspected",
+            "audit_available": reference_audit_available,
+        },
         "counts": {
             "snapshots": db.execute("SELECT COUNT(*) FROM catalog_snapshots").fetchone()[0],
             "crates": db.execute("SELECT COUNT(*) FROM catalog_crates").fetchone()[0],

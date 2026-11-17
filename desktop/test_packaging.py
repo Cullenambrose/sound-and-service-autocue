@@ -27,6 +27,12 @@ def main():
     assert inventory["commercial_rights_cleared"] is False and inventory["bundled_models"] == []
     assert any(component["name"] == "mutagen" and component["license_expression"] == "GPL-2.0-or-later"
                for component in inventory["components"])
+    sbom_info = inventory["sbom"]
+    sbom_path = resources / sbom_info["path"]
+    assert hashlib.sha256(sbom_path.read_bytes()).hexdigest() == sbom_info["sha256"]
+    sbom = json.loads(sbom_path.read_text())
+    assert sbom["spdxVersion"] == "SPDX-2.3"
+    assert "not a complete shipped-binary SBOM" in sbom["comment"]
     for component in inventory["components"]:
         for notice in component["notices"]:
             assert hashlib.sha256((resources / notice["path"]).read_bytes()).hexdigest() == notice["sha256"]
@@ -74,7 +80,8 @@ def main():
     try:
         session = wait_ready(process)
         for path, marker in (("/", b"share at most 3"), ("/studio.js", b"api/studio"),
-                             ("/studio.css", b"color-scheme"), ("/catalog-state.js", b"")):
+                             ("/studio.css", b"color-scheme"), ("/catalog-state.js", b""),
+                             ("/studio-plan-view.js", b"trackReasons")):
             with urllib.request.urlopen(base + path, timeout=5) as response:
                 assert marker in response.read(), path
         with urllib.request.urlopen(base + "/api/studio/state", timeout=5) as response:

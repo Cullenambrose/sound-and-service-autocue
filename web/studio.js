@@ -1,6 +1,31 @@
 (() => {
   "use strict";
   const $ = id => document.getElementById(id);
+  const workspaceSections = [...document.querySelectorAll("#workspace > section[id]")];
+  const workspaceLinks = [...document.querySelectorAll(".sidebar nav a[href^='#']")];
+  function activateWorkspace(id) {
+    const active = workspaceSections.find(section => section.id === id) || workspaceSections[0];
+    if (!active) return;
+    for (const section of workspaceSections) section.hidden = section !== active;
+    for (const link of workspaceLinks) {
+      if (link.hash === `#${active.id}`) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    }
+    $(".topbar-title").textContent = active.querySelector("h2")?.textContent || "Studio";
+  }
+  for (const link of workspaceLinks) {
+    link.addEventListener("click", event => {
+      event.preventDefault();
+      if (location.hash !== link.hash) history.pushState(null, "", link.hash);
+      activateWorkspace(link.hash.slice(1));
+      window.scrollTo(0, 0);
+    });
+  }
+  window.addEventListener("popstate", () => {
+    activateWorkspace(location.hash.slice(1));
+    window.scrollTo(0, 0);
+  });
+  activateWorkspace(location.hash.slice(1));
   let session, state, results = [], proposal = null, savedRule = null, exportRequest = null;
   let outbox = null, busy = false;
   let savedEvidence = null, phaseSerial = 0;
@@ -8,6 +33,8 @@
   let batchPreview = null, conversationState = null;
   let editPreview = null;
   let historyPreview = null;
+  let fileRepairPreview = null;
+  let activeAuditionStop = null;
   const json = id => JSON.parse($(id).value);
   const message = (text, failed = false) => {
     $("status").textContent = text;
@@ -74,6 +101,10 @@
       historyPreview = null; $("history-approve").disabled = true;
       $("history-preview").textContent = "";
     }
+    if (endpoint === "/api/studio/file-repair/approve" || endpoint === "/api/studio/file-repair/undo") {
+      fileRepairPreview = null; $("repair-approve").disabled = true;
+      $("repair-preview").textContent = "";
+    }
     showPending();
     message("Action acknowledged. Refreshing saved state.");
     await refresh();
@@ -84,7 +115,9 @@
     showPending();
     return retry();
   }
-  function clearProposal() { proposal = null; $("proposal").hidden = true; }
+  function stopAudition() { if (activeAuditionStop) activeAuditionStop(); }
+  function clearProposal() { stopAudition(); proposal = null; $("proposal").hidden = true; }
+  window.addEventListener("pagehide", stopAudition);
   function phaseSummary(phases = []) {
     const list = node("ol");
     for (const phase of phases) {
@@ -93,6 +126,181 @@
         `positions ${phase.start_position + 1}-${phase.end_position}; energy target ${phase.energy_target ?? "unspecified"}.`));
     }
     return list;
+  }
+  function wallClockSummary(projection, tracks = []) {
+    if (!projection) return null;
+    const section = node("details");
+    section.append(node("summary", "Event-local clock projection"),
+      node("p", `${projection.status}: ${projection.note}`));
+    if (projection.status !== "estimated" && projection.status !== "reforecast") {
+      section.append(node("pre", JSON.stringify(projection.issues || [], null, 2)));
+      return section;
+    }
+    const byId = new Map(tracks.map(track => [track.id, track]));
+    const list = node("ol");
+    const label = (clock, day) => `${clock}${day > 0 ? ` (day +${day})` : day < 0 ? ` (day ${day})` : ""}`;
+    for (const item of projection.timeline) {
+      const track = byId.get(item.file_id);
+      const name = track ? `${track.artist} - ${track.title}` : item.file_id;
+      list.append(node("li", `${name}: ${label(item.start_clock, item.start_day_offset)} to ` +
+        `${label(item.end_clock, item.end_day_offset)}`));
+    }
+    section.append(node("p", `Starts at ${label(projection.event_local_start_time, projection.event_day_offset || 0)}; ` +
+      `basis: ${projection.basis}.${Number.isFinite(projection.shift_s) ? ` Shift: ${projection.shift_s}s.` : ""}`), list);
+    return section;
+  }
+  function reforecastControls(alternative) {
+    const projection = alternative.wall_clock_timeline;
+    if (projection?.status !== "estimated") return null;
+    const section = node("details"), select = node("select"), clock = node("input"), day = node("input");
+    section.append(node("summary", "Reforecast from the observed start of the current track"),
+      node("p", "Enter when the selected track actually started. The preview shifts all times by the observed difference; it does not skip, shorten, or reorder songs."));
+    for (const track of alternative.tracks) {
+      const option = node("option", `${track.artist} - ${track.title}`);
+      option.value = track.id; select.append(option);
+    }
+    clock.type = "time"; clock.step = "1";
+    clock.setAttribute("aria-label", "Actual local start time of current track");
+    day.type = "number"; day.min = "-1"; day.max = "2"; day.step = "1"; day.value = "0";
+    day.setAttribute("aria-label", "Actual day offset from event start");
+    const trackLabel = node("label", "Current track"); trackLabel.append(select);
+    const clockLabel = node("label", "Actual local start time"); clockLabel.append(clock);
+    const dayLabel = node("label", "Actual day offset from event start (-1 to 2)"); dayLabel.append(day);
+    const output = node("div"), run = node("button", "Preview shifted schedule");
+    section.append(trackLabel, clockLabel, dayLabel, run, output);
+    run.addEventListener("click", () => action(async () => {
+      if (!clock.value) throw new Error("Enter the actual start time of the current track.");
+      const actualDay = Number(day.value);
+      if (!Number.isInteger(actualDay)) throw new Error("Day offset must be a whole number.");
+      const result = await post("plan/reforecast", {projection, current_file_id: select.value,
+        actual_start_time: clock.value, actual_day_offset: actualDay});
+      output.replaceChildren(wallClockSummary(result, alternative.tracks));
+      message(`Forecast shifted by ${result.shift_s} seconds. The set order and track durations are unchanged.`);
+    }));
+    return section;
+  }
+  function transitionAuditions(alternative) {
+    const report = alternative.transition_evidence, tracks = alternative.tracks || [];
+    if (!report || tracks.length < 2) return null;
+    const section = node("details");
+    section.append(node("summary", "Local transition audition"),
+      node("p", "Audio streams from the exact indexed files in this browser only. Nothing is uploaded or changed. Verify the selected versions and listen yourself; audition does not mark timing reviewed."));
+    const selected = report.tracks || [];
+    for (let index = 0; index < tracks.length - 1; index++) {
+      const outgoing = tracks[index], incoming = tracks[index + 1];
+      const outEvidence = selected[index], inEvidence = selected[index + 1];
+      const card = node("details");
+      card.append(node("summary", `${outgoing.artist} - ${outgoing.title} to ${incoming.artist} - ${incoming.title}`));
+      const outAudio = node("audio"), inAudio = node("audio");
+      for (const [audio, track, label] of [[outAudio, outgoing, "Outgoing"], [inAudio, incoming, "Incoming"]]) {
+        audio.controls = true; audio.preload = "none";
+        audio.src = `/api/studio/audition/${encodeURIComponent(track.id)}`;
+        audio.setAttribute("aria-label", `${label} track audition: ${track.artist} - ${track.title}`);
+      }
+      card.append(node("p", `${outgoing.path} -> ${incoming.path}`), outAudio, inAudio);
+      const outWindow = outEvidence?.window, inWindow = inEvidence?.window;
+      const validWindow = (window, track) => window &&
+        window.content_hash === track.content_hash &&
+        Number.isFinite(window.entry_s) && Number.isFinite(window.exit_s) &&
+        window.entry_s >= 0 && window.exit_s > window.entry_s &&
+        Number.isFinite(track.duration_s) && window.exit_s <= track.duration_s;
+      const overlap = report.transitions[index]?.overlap_s;
+      const pairIssues = (report.issues || []).filter(issue =>
+        (issue.from_id === outgoing.id && issue.to_id === incoming.id) ||
+        ((issue.code === "combined_overlaps_exceed_window") &&
+          (issue.file_id === outgoing.id || issue.file_id === incoming.id)));
+      const canPreview = validWindow(outWindow, outgoing) && validWindow(inWindow, incoming) &&
+        Number.isFinite(overlap) && overlap >= 0 &&
+        overlap <= Math.min(outWindow.exit_s - outWindow.entry_s, inWindow.exit_s - inWindow.entry_s) &&
+        pairIssues.length === 0;
+      if (!canPreview) {
+        card.append(node("p", "Pair playback needs matching in-file windows and an explicit in-bounds overlap. Use the individual players to inspect audio; no timing is inferred."));
+      } else {
+        card.append(node("p", `Preview uses ${outWindow.reviewed && inWindow.reviewed ? "reviewed" : "unreviewed"} windows and ${overlap}s explicit overlap. Browser playback is only an audition, not a rendered or measured DJ mix.`));
+        const status = node("p"), audition = node("button", "Audition explicit overlap");
+        let timer = null, frame = 0, playing = false;
+        const stop = () => {
+          if (timer !== null) clearTimeout(timer);
+          if (frame) cancelAnimationFrame(frame);
+          timer = null; frame = 0; playing = false;
+          outAudio.pause(); inAudio.pause(); outAudio.volume = 1; inAudio.volume = 1;
+          audition.textContent = "Audition explicit overlap";
+          if (activeAuditionStop === stop) activeAuditionStop = null;
+        };
+        const metadata = audio => {
+          if (audio.readyState >= 1) return Promise.resolve();
+          return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => finish(new Error("Timed out loading audio metadata.")), 20000);
+            const finish = error => {
+              clearTimeout(timeout);
+              audio.removeEventListener("loadedmetadata", loaded);
+              audio.removeEventListener("error", failed);
+              if (error) reject(error); else resolve();
+            };
+            const loaded = () => finish();
+            const failed = () => finish(new Error("The selected indexed audio could not be decoded by this browser."));
+            audio.addEventListener("loadedmetadata", loaded, {once: true});
+            audio.addEventListener("error", failed, {once: true});
+            audio.load();
+          });
+        };
+        for (const audio of [outAudio, inAudio]) {
+          audio.addEventListener("play", () => {
+            if (activeAuditionStop && activeAuditionStop !== stop) activeAuditionStop();
+          });
+        }
+        audition.addEventListener("click", () => action(async () => {
+          if (playing) return stop();
+          if (activeAuditionStop) activeAuditionStop();
+          activeAuditionStop = stop;
+          try {
+            await Promise.all([metadata(outAudio), metadata(inAudio)]);
+            if (outWindow.exit_s >= outAudio.duration || inWindow.exit_s >= inAudio.duration) {
+              throw new Error("A reviewed window exceeds the browser-reported audio duration.");
+            }
+            outAudio.currentTime = outWindow.entry_s; inAudio.currentTime = inWindow.entry_s;
+            outAudio.volume = 1; inAudio.volume = 0;
+            await outAudio.play();
+          } catch (error) {
+            stop();
+            throw error;
+          }
+          playing = true; audition.textContent = "Stop audition";
+          const delay = Math.max(0, outWindow.exit_s - outWindow.entry_s - overlap);
+          timer = setTimeout(() => {
+            timer = null;
+            if (!playing) return;
+            if (overlap === 0) {
+              outAudio.pause(); inAudio.volume = 1;
+              inAudio.play().catch(error => { stop(); status.textContent = error.message; });
+              status.textContent = "Cut preview playing; not a rendered mix.";
+              return;
+            }
+            inAudio.play().then(() => {
+              const started = performance.now(), length = overlap * 1000;
+              const fade = now => {
+                if (!playing) return;
+                const progress = Math.min(1, (now - started) / length);
+                outAudio.volume = 1 - progress; inAudio.volume = progress;
+                if (progress < 1) frame = requestAnimationFrame(fade);
+                else {
+                  frame = 0; outAudio.pause(); inAudio.volume = 1;
+                  status.textContent = "Overlap preview playing; not a rendered mix.";
+                }
+              };
+              frame = requestAnimationFrame(fade);
+            }).catch(error => { stop(); status.textContent = error.message; });
+          }, delay * 1000);
+          status.textContent = "Playing outgoing track.";
+        }));
+        inAudio.addEventListener("ended", () => {
+          if (playing) { stop(); status.textContent = "Audition finished."; }
+        });
+        card.append(audition, status);
+      }
+      section.append(card);
+    }
+    return section;
   }
   function transitionSummary(report) {
     const section = node("details");
@@ -119,17 +327,110 @@
     }
     return section;
   }
+  function trackReasonDetails(reasons) {
+    if (!Array.isArray(reasons)) throw new Error("Planner scoring signals are missing for a selected file.");
+    const details = node("details"), list = node("ul");
+    details.append(node("summary", "Planner scoring signals"));
+    if (reasons.length) {
+      list.append(...reasons.map(reason => node("li", reason)));
+      details.append(node("p", "These are rule-based score contributions, not a prediction of crowd response."), list);
+    } else {
+      details.append(node("p", "No additional score contribution was recorded for this track."));
+    }
+    return details;
+  }
+  function scoreTermDetails(terms) {
+    if (!Array.isArray(terms) || !terms.length) return null;
+    const details = node("details"), list = node("ul");
+    details.append(node("summary", "Numeric score breakdown"));
+    list.append(...terms.map(term => {
+      if (!term || typeof term.label !== "string" || !Number.isFinite(term.points) ||
+          !Number.isFinite(term.weight) || !Number.isFinite(term.fit)) {
+        throw new Error("Planner returned an invalid numeric score term.");
+      }
+      const sign = term.points > 0 ? "+" : "";
+      const evidence = term.evidence && Object.keys(term.evidence).length
+        ? `; evidence ${JSON.stringify(term.evidence)}` : "";
+      return node("li", `${term.label}: ${sign}${term.points.toFixed(2)} points ` +
+        `(weight ${term.weight.toFixed(2)} × fit ${term.fit.toFixed(3)}${evidence})`);
+    }));
+    details.append(node("p", "These are the actual additive contributions for this exact file and preceding track; absent metadata contributes no points."), list);
+    return details;
+  }
+  function trackFeedbackDetails(track) {
+    const feedback = node("details"), note = node("input");
+    note.type = "text"; note.maxLength = 1000;
+    note.setAttribute("aria-label", `New private feedback note for ${track.title}`);
+    feedback.append(node("summary", `Explicit DJ rating: ${track.dj_rating ?? 0}`),
+      node("p", "Personal preference only, never inferred crowd response. New note replaces any previous private note."),
+      note);
+    for (const [label, rating] of [["Prefer", 1], ["Neutral", 0], ["Avoid softly", -1]]) {
+      feedback.append(button(label, async () => {
+        await durable("/api/studio/feedback/save", {file_id: track.id,
+          base_revision: track.feedback_revision || 0, rating, note: note.value});
+        await search();
+      }));
+    }
+    return feedback;
+  }
+  function renderPlanDraftSummary(payload) {
+    const summary = StudioPlanView.planDraftSummary(payload), article = node("article");
+    article.append(node("h3", "Read-back of your set brief"), node("p", summary.overview));
+    const appendList = (title, items, empty) => {
+      article.append(node("h4", title));
+      if (items.length) {
+        const list = node("ul");
+        list.append(...items.map(item => node("li", item)));
+        article.append(list);
+      } else article.append(node("p", empty));
+    };
+    appendList("Filters and preferences", summary.filters, "No additional library filters or preferences.");
+    appendList("Phases", summary.phases, "No separate phases.");
+    appendList("Source quotes used by this draft", summary.evidence, "No new source quotes were attached to this turn.");
+    appendList("Unsupported requests", summary.unsupported, "None reported.");
+    article.append(node("p", summary.caveat));
+    if (summary.note) article.append(node("p", summary.note));
+    $("ai-plan-summary").replaceChildren(article);
+  }
+  function alternativeReasonDetails(alternative) {
+    if (!Array.isArray(alternative.reasons) ||
+        alternative.reasons.some(reason => typeof reason !== "string" || !reason.trim())) {
+      throw new Error("Planner returned invalid set-selection reasons.");
+    }
+    const details = node("details"), list = node("ul");
+    details.append(node("summary", "How the planner selected this set"));
+    list.append(...alternative.reasons.map(reason => node("li", reason)));
+    details.append(list);
+    return details;
+  }
   function displayProposal(value) {
     proposal = value;
     $("proposal").hidden = false;
     $("proposal-summary").textContent = `${value.name}: ${value.tracks.length} exact files. Expires ${new Date(value.expires_at * 1000).toLocaleTimeString()}. ${value.note}`;
-    $("proposal-tracks").replaceChildren(...value.tracks.map(track =>
-      node("li", `${track.artist} - ${track.title} [${track.version || "version unknown"}] | ${track.path} | ${track.content_hash}`)));
+    const reasonsByFile = value.planning
+      ? new Map(StudioPlanView.trackReasons(value.planning.alternative).map(item => [item.file_id, item.reasons]))
+      : null;
+    $("proposal-tracks").replaceChildren(...value.tracks.map(track => {
+      const item = node("li", `${track.artist} - ${track.title} [${track.version || "version unknown"}] | ${track.path} | ${track.content_hash}`);
+      if (reasonsByFile) item.append(trackReasonDetails(reasonsByFile.get(track.id)));
+      return item;
+    }));
     if (value.planning?.alternative.phases) {
-      const item = node("li", "Verified full-track phase schedule:");
+      const item = node("li", value.planning.optimize_playback
+        ? "Verified phase schedule based on reviewed playback estimates:"
+        : "Verified full-track phase schedule:");
       item.append(phaseSummary(value.planning.alternative.phases)); $("proposal-tracks").append(item);
     }
     if (value.planning) {
+      const audition = transitionAuditions(value.planning.alternative);
+      if (audition) {
+        const item = node("li"); item.append(audition); $("proposal-tracks").append(item);
+      }
+      const clock = wallClockSummary(value.planning.alternative.wall_clock_timeline,
+        value.planning.alternative.tracks);
+      if (clock) {
+        const item = node("li"); item.append(clock); $("proposal-tracks").append(item);
+      }
       const item = node("li"); item.append(transitionSummary(value.planning.alternative.transition_evidence));
       $("proposal-tracks").append(item);
     }
@@ -146,7 +447,7 @@
       check.setAttribute("aria-label", `Include ${track.artist} - ${track.title} ${track.version || ""}`);
       select.append(check);
       row.append(select, node("td", `${track.artist} - ${track.title} [${track.version || "unknown version"}]`),
-        node("td", `BPM ${track.bpm || "unknown"} / key ${track.key || "unknown"} / energy ${track.energy ?? "unknown"} / ${track.play_count} observed plays`),
+        node("td", `${StudioPlanView.musicMetadataSummary(track)} / energy ${track.energy ?? "unknown"} / ${track.play_count} observed plays`),
         node("td", `${track.id} | ${track.path}`));
       const cues = node("details");
       cues.append(node("summary", "Existing cue evidence"),
@@ -154,20 +455,7 @@
           duration_s: track.duration_s, cue_evidence: track.cue_evidence,
           note: "Indexed evidence only. No automatic analysis, audition or source writes."}, null, 2)));
       row.children[2].append(cues);
-      const feedback = node("details"), note = node("input");
-      note.type = "text"; note.maxLength = 1000;
-      note.setAttribute("aria-label", `New private feedback note for ${track.title}`);
-      feedback.append(node("summary", `Explicit DJ rating: ${track.dj_rating ?? 0}`),
-        node("p", "Personal preference only, never inferred crowd response. New note replaces any previous private note."),
-        note);
-      for (const [label, rating] of [["Prefer", 1], ["Neutral", 0], ["Avoid softly", -1]]) {
-        feedback.append(button(label, async () => {
-          await durable("/api/studio/feedback/save", {file_id: track.id,
-            base_revision: track.feedback_revision || 0, rating, note: note.value});
-          await search();
-        }));
-      }
-      row.children[2].append(feedback);
+      row.children[2].append(trackFeedbackDetails(track));
       return row;
     }));
     for (const id of ["now-playing", "history-file"]) {
@@ -243,13 +531,15 @@
         $("saved-evidence-phases").replaceChildren(...(planning ? [
           node("p", `Recorded full-track runtime: ${planning.alternative.duration_s}s.`),
           phaseSummary(planning.alternative.phases),
+          wallClockSummary(planning.alternative.wall_clock_timeline, planning.alternative.tracks),
           transitionSummary(planning.alternative.transition_evidence),
-        ] : [node("p", "Static crate: no whole-set timing policy was certified.")]));
+        ].filter(Boolean) : [node("p", "Static crate: no whole-set timing policy was certified.")]));
       }));
       return article;
     }));
     $("health").textContent = JSON.stringify(state.health, null, 2);
     renderHistory();
+    renderFileRepairs();
     renderIngestion(state.ingestion);
     $("batch-history").textContent = JSON.stringify(state.batches, null, 2);
     $("edit-history").replaceChildren(...state.edits.map(edit => {
@@ -291,6 +581,15 @@
   function renderHistory() {
     historyPreview = null; $("history-approve").disabled = true;
     $("history-preview").textContent = "";
+    const crateSelect = $("gig-review-crate"), priorCrate = crateSelect.value;
+    crateSelect.replaceChildren(node("option", "Choose a saved crate"));
+    crateSelect.firstChild.value = "";
+    for (const crate of state.crates) {
+      const option = node("option", `${crate.name} (${crate.entries} tracks)`);
+      option.value = crate.id;
+      crateSelect.append(option);
+    }
+    if (state.crates.some(crate => crate.id === priorCrate)) crateSelect.value = priorCrate;
     $("history").replaceChildren(...state.history.map(event => {
       const article = node("article"), label = node("label"), selected = node("input");
       selected.type = "checkbox"; selected.value = event.request_id;
@@ -300,7 +599,22 @@
       });
       label.append(selected, document.createTextNode(
         ` ${event.played_at} | exact file ${event.file_id} | ${event.note || "no note"} | observation ${event.request_id}`));
-      article.append(label);
+      const reviewLabel = node("label"), review = node("input");
+      review.type = "checkbox"; review.value = event.request_id;
+      review.dataset.gigReviewEvent = "";
+      review.setAttribute("aria-label", `Include exact observation ${event.request_id} in post-gig review`);
+      reviewLabel.append(review, document.createTextNode(" Include in post-gig comparison"));
+      article.append(label, reviewLabel);
+      return article;
+    }));
+    $("gig-review-history").replaceChildren(...(state.event_reviews || []).map(review => {
+      const article = node("article"), details = node("details");
+      details.append(
+        node("summary", `${new Date(review.created_at * 1000).toLocaleString()} — ${review.assessment}`),
+        node("p", `Saved set ${review.crate_id}; observations: ${review.event_ids.join(", ")}`),
+        node("p", review.note || "No note."),
+      );
+      article.append(details);
       return article;
     }));
     $("history-edits").replaceChildren(...(state.history_edits || []).map(edit => {
@@ -312,6 +626,25 @@
       if (edit.approval && !edit.undo) article.append(button("Undo these history removals", async () => {
         if (!confirm("Restore only these exact observations? This refuses if newer changes affect them. Audio and preferences stay unchanged.")) return;
         await durable("/api/studio/history/undo", {edit_id: edit.edit_id, event_ids: edit.approval.event_ids});
+      }));
+      return article;
+    }));
+  }
+  function renderFileRepairs() {
+    $("repair-history").replaceChildren(...(state.file_repairs || []).map(edit => {
+      const article = node("article"), details = node("details");
+      const status = edit.undo ? "undone" : edit.approval ? "approved" : "preview only";
+      details.append(node("summary", `${edit.edit_id}: ${status}`),
+        node("pre", JSON.stringify(edit, null, 2)));
+      article.append(details, button("Download catalog repair journal", () =>
+        download("studio-file-repair-" + edit.edit_id + ".json", edit)));
+      if (edit.approval && !edit.undo) article.append(button("Undo catalog reference repair", async () => {
+        if (!confirm("Restore these exact AutoCue catalog links to the source file? This refuses if either file or any reviewed link changed. No audio or external crate will be changed.")) return;
+        await durable("/api/studio/file-repair/undo", {
+          edit_id: edit.edit_id,
+          source_file_id: edit.document.source.file_id,
+          keeper_file_id: edit.document.keeper.file_id,
+        });
       }));
       return article;
     }));
@@ -438,7 +771,10 @@
       batchPreview = null; $("batch-approve").disabled = true;
       $("batch-rules").focus();
     } else if (draft.action === "plan") {
-      aiPlanningDraft = draft; $("ai-plan-output").textContent = JSON.stringify(draft, null, 2);
+      const turn = conversationState.turns.at(-1);
+      aiPlanningDraft = draft;
+      $("ai-plan-output").textContent = JSON.stringify(draft, null, 2);
+      renderPlanDraftSummary({intent: draft, constraint_evidence: turn.constraint_evidence || [], note: turn.note});
       $("apply-ai-plan").disabled = false; $("apply-ai-plan").focus();
     } else {
       const rule = {...draft.rule}, previous = json("rule");
@@ -461,9 +797,11 @@
   bind("rule-new", () => { savedRule = null; message("Next smart-rule save will create a new rule."); });
   bind("interpret-plan", async () => {
     aiPlanningDraft = null; $("apply-ai-plan").disabled = true; $("ai-plan-output").textContent = "";
+    $("ai-plan-summary").replaceChildren();
     const value = await post("interpret/plan", {message: $("plan-prompt").value});
     aiPlanningDraft = value.intent;
     $("ai-plan-output").textContent = JSON.stringify(value, null, 2);
+    renderPlanDraftSummary(value);
     $("apply-ai-plan").disabled = false;
     message("AI translated a draft only. Review every filter, phase and default before applying; nothing was generated or saved.");
   });
@@ -564,7 +902,10 @@
     message("Phase schedule applied. Global hard constraints retained; generate new alternatives.");
   });
   function planningInput() {
-    return {rule: json("rule"), policy: json("policy"), event: json("event"), playback: json("playback")};
+    const body = {rule: json("rule"), policy: json("policy"), event: json("event"),
+      playback: json("playback"), optimize_playback: $("optimize-playback").checked};
+    if ($("event-start-time").value) body.event_start_time = $("event-start-time").value;
+    return body;
   }
   function assertPlanInputs(body) {
     if (JSON.stringify(planningInput()) !== JSON.stringify(body))
@@ -586,11 +927,20 @@
     const value = await post("plan", body);
     $("plans").replaceChildren(node("pre", JSON.stringify({
       diagnostics: value.diagnostics, unresolved: value.unresolved,
+      event_evidence: value.event_evidence,
     }, null, 2)));
     for (const [index, alternative] of (value.alternatives || []).entries()) {
       const article = node("article"), list = node("ol");
+      const reasonsByFile = new Map(StudioPlanView.trackReasons(alternative)
+        .map(item => [item.file_id, item.reasons]));
+      const termsByFile = new Map((alternative.track_score_terms || [])
+        .map(item => [item.file_id, item.terms]));
       list.append(...alternative.tracks.map((track, position) => {
         const item = node("li", `${track.artist} - ${track.title} [${track.version || "unknown"}]`);
+        item.append(node("p", StudioPlanView.musicMetadataSummary(track)));
+        item.append(trackReasonDetails(reasonsByFile.get(track.id)));
+        const scoreTerms = scoreTermDetails(termsByFile.get(track.id) || []);
+        if (scoreTerms) item.append(scoreTerms);
         item.append(button(`Pin position ${position + 1}`, () => {
           assertPlanInputs(body);
           $("policy").value = JSON.stringify(addPins(body.policy, [{position, file_id: track.id}]), null, 2);
@@ -611,10 +961,20 @@
         }));
         return item;
       }));
-      article.append(node("h3", `Alternative ${index + 1}`),
-        node("p", `${alternative.duration_s} seconds full-track runtime. Not a mixed elapsed-time certification.`),
-        phaseSummary(alternative.phases), list,
-        transitionSummary(alternative.transition_evidence),
+      const card = [node("h3", `Alternative ${index + 1}`),
+        node("p", alternative.duration_basis === "reviewed_playback_estimate"
+          ? `${alternative.duration_s} seconds estimated elapsed from reviewed windows and explicit overlaps ` +
+            `(full files ${alternative.full_file_duration_s}s). This is not measured playback.`
+          : `${alternative.duration_s} seconds full-track runtime. Not a mixed elapsed-time certification.`),
+        node("p", `Set score: ${alternative.score.toFixed(2)} additive points; duration differs from target by ${alternative.delta_s.toFixed(2)} seconds. Duration fit is optimized before score.`),
+        phaseSummary(alternative.phases), alternativeReasonDetails(alternative)];
+      const clock = wallClockSummary(alternative.wall_clock_timeline, alternative.tracks);
+      if (clock) card.push(clock);
+      const reforecast = reforecastControls(alternative);
+      if (reforecast) card.push(reforecast);
+      const audition = transitionAuditions(alternative);
+      if (audition) card.push(audition);
+      card.push(list, transitionSummary(alternative.transition_evidence),
         button("Prepare unreviewed full-file timing draft for this alternative", () => {
           assertPlanInputs(body);
           if (!confirm("Replace the current playback assumptions with unreviewed full-file windows and explicit zero-overlap cuts? Nothing is certified or saved.")) return;
@@ -633,6 +993,7 @@
           displayProposal(await post("plan/propose", {...body, dataset_id: session.dataset_id,
             name: $("name").value, alternative_index: index}));
         }));
+      article.append(...card);
       $("plans").append(article);
     }
     message(value.feasible ? "Constrained set proposals are ready for review." :
@@ -640,6 +1001,14 @@
         "Search budget exhausted without a verified set. This does not prove infeasibility.", !value.feasible);
   }
   bind("plan", generatePlan);
+  $("optimize-playback").addEventListener("change", () => {
+    clearProposal(); $("plans").replaceChildren();
+    message("Playback optimization mode changed. Generate new alternatives.");
+  });
+  $("event-start-time").addEventListener("change", () => {
+    clearProposal(); $("plans").replaceChildren();
+    message("Event start time changed. Generate new alternatives for a fresh clock projection.");
+  });
   bind("evidence-download", () => {
     if (!savedEvidence) throw new Error("Inspect a saved crate first.");
     download("studio-creation-evidence.json", savedEvidence);
@@ -652,6 +1021,8 @@
     $("rule").value = JSON.stringify(creation.rule, null, 2);
     $("event").value = JSON.stringify(planning.event, null, 2);
     $("playback").value = JSON.stringify(planning.playback || {windows: [], overlaps: []}, null, 2);
+    $("optimize-playback").checked = planning.optimize_playback === true;
+    $("event-start-time").value = planning.event_start_time || "";
     $("name").value = creation.name + " - replanned";
     $("phase-editor").replaceChildren();
     for (const phase of value.policy.phases || []) addPhase(phase);
@@ -669,6 +1040,94 @@
     if (!$("history-file").value) throw new Error("Search and select a file first.");
     return durable("/api/studio/history/record", {file_id: $("history-file").value,
       played_at: new Date().toISOString(), note: $("history-note").value});
+  });
+  bind("review-gig", async () => {
+    const crateId = $("gig-review-crate").value;
+    if (!crateId) throw new Error("Choose a saved planned set first.");
+    const requestIds = [...document.querySelectorAll("[data-gig-review-event]:checked")]
+      .map(input => input.value);
+    if (!requestIds.length) throw new Error("Select the exact play observations for this gig.");
+    const evidence = await post("crate/evidence", {crate_id: crateId});
+    const alternative = evidence.creation?.planning?.alternative;
+    if (!alternative) throw new Error("The selected crate has no saved whole-set plan to compare.");
+    const eventById = new Map(state.history.map(event => [event.request_id, event]));
+    const observations = requestIds.map(id => eventById.get(id));
+    if (observations.some(event => !event)) {
+      throw new Error("A selected play observation is no longer active; refresh history and retry.");
+    }
+    const comparison = StudioPlanView.compareObservedSet(alternative, observations);
+    const names = new Map(alternative.tracks.map(track =>
+      [track.id, `${track.artist} - ${track.title} [${track.version || "unknown version"}]`]));
+    const article = node("article");
+    article.append(node("h3", `Post-gig comparison: ${evidence.creation.name}`),
+      node("p", `${alternative.tracks.length} planned files; ${observations.length} selected play observations; ` +
+        `${comparison.planned_tracks.filter(item => item.selected_play_count).length} planned files appear in the selection; ` +
+        `${comparison.not_observed.length} planned files do not appear in the selection; ` +
+        `${comparison.outside_plan.length} selected plays are outside the plan; ` +
+        `${comparison.repeats.length} files were observed more than once.`),
+      node("p", "These are exact-file comparisons only. They do not establish crowd response or explain why a track was not observed."));
+    const actual = node("details"), actualList = node("ol");
+    actual.append(node("summary", "Selected observations in time order"));
+    actualList.append(...comparison.actual_order.map(event => node("li",
+      `${event.played_at}: ${names.get(event.file_id) || `Exact file ${event.file_id}`}`)));
+    actual.append(actualList);
+    const notObserved = node("details"), plannedList = node("ul");
+    notObserved.append(node("summary", "Planned tracks not present in the selected observations"));
+    plannedList.append(...comparison.not_observed.map(track => node("li",
+      `${track.artist} - ${track.title} [${track.version || "unknown version"}]`)));
+    notObserved.append(plannedList);
+    const outsidePlan = node("details"), outsideList = node("ul");
+    outsidePlan.append(node("summary", "Selected observations outside the planned set"));
+    outsideList.append(...comparison.outside_plan.map(event => node("li",
+      `${event.played_at}: Exact file ${event.file_id}`)));
+    outsidePlan.append(outsideList);
+    const repeats = node("details"), repeatList = node("ul");
+    repeats.append(node("summary", "Repeated exact files in selected observations"));
+    repeatList.append(...comparison.repeats.map(item =>
+      node("li", `${names.get(item.file_id) || `Exact file ${item.file_id}`}: ${item.count} observations`)));
+    repeats.append(repeatList);
+    const preferences = node("details"), preferenceList = node("ul");
+    preferences.append(node("summary", "Optional: update personal library preferences"),
+      node("p", "These are global per-file preferences, not ratings of the crowd or this event. Planner ranking uses them only when explicit DJ feedback is enabled in the policy."));
+    preferenceList.append(...comparison.planned_tracks.map(item => {
+      const track = item.track, row = node("li",
+        `${track.artist} - ${track.title} [${track.version || "unknown version"}] — ${item.selected_play_count} selected plays`);
+      row.append(trackFeedbackDetails(track));
+      return row;
+    }));
+    preferences.append(preferenceList);
+    if (!evidence.current_selection_matches) {
+      article.append(node("p", "Warning: the saved crate's current order or membership differs from the original planned set. This comparison uses the original creation-time plan."));
+    }
+    const assessmentLabel = node("label", "Your assessment of this planned set for this event");
+    const assessment = node("select");
+    assessment.append(node("option", "Choose an assessment"));
+    assessment.firstChild.value = "";
+    for (const [value, label] of [
+      ["worked", "Worked for this event"],
+      ["mixed", "Mixed result"],
+      ["needs_work", "Needs work for this event"],
+      ["cannot_tell", "Cannot tell"],
+    ]) {
+      const option = node("option", label); option.value = value; assessment.append(option);
+    }
+    assessmentLabel.append(assessment);
+    const assessmentNoteLabel = node("label", "Optional private event note");
+    const assessmentNote = node("textarea"); assessmentNote.maxLength = 1000; assessmentNote.rows = 2;
+    assessmentNoteLabel.append(assessmentNote);
+    const saveAssessment = button("Save event-specific DJ assessment", async () => {
+      if (!assessment.value) throw new Error("Choose an event-specific assessment first.");
+      await durable("/api/studio/review/save", {
+        dataset_id: session.dataset_id, crate_id: crateId, assessment: assessment.value,
+        note: assessmentNote.value, event_ids: requestIds,
+      });
+      message("Event-specific DJ assessment saved separately from global track preferences.");
+    });
+    article.append(actual, notObserved, outsidePlan, repeats, preferences);
+    article.append(node("p", "This is your explicit self-assessment, not inferred crowd telemetry. It is stored with this saved set and these exact observations; it does not alter ranking automatically."),
+      assessmentLabel, assessmentNoteLabel, saveAssessment);
+    $("gig-review-output").replaceChildren(article);
+    message("Post-gig comparison is ready. No history, crate, or preference was changed.");
   });
   bind("provider-lookup", async () => {
     const value = await post("providers", {title: $("provider-title").value,
@@ -725,6 +1184,34 @@
     if (!historyPreview) throw new Error("Preview selected history observations first.");
     if (!confirm("Remove these reviewed observations from active history and rediscovery? Recovery receipts remain; this is not permanent privacy erasure.")) return;
     await durable("/api/studio/history/approve", {edit_id: historyPreview.edit_id, event_ids: historyPreview.event_ids});
+  });
+  const invalidateFileRepair = () => {
+    fileRepairPreview = null;
+    $("repair-approve").disabled = true;
+    $("repair-preview").textContent = "File selection changed. Preview again before approval.";
+  };
+  $("repair-source").addEventListener("input", invalidateFileRepair);
+  $("repair-keeper").addEventListener("input", invalidateFileRepair);
+  bind("repair-preview-button", async () => {
+    fileRepairPreview = null; $("repair-approve").disabled = true;
+    const source_file_id = $("repair-source").value.trim();
+    const keeper_file_id = $("repair-keeper").value.trim();
+    if (!source_file_id || !keeper_file_id) throw new Error("Enter both exact indexed file IDs.");
+    fileRepairPreview = await post("file-repair/preview", {
+      dataset_id: session.dataset_id, source_file_id, keeper_file_id,
+    });
+    $("repair-preview").textContent = JSON.stringify(fileRepairPreview, null, 2);
+    $("repair-approve").disabled = false;
+    message("Review the exact AutoCue references above. No links or files have changed.");
+  });
+  bind("repair-approve", async () => {
+    if (!fileRepairPreview) throw new Error("Preview an exact-hash catalog repair first.");
+    if (!confirm("Apply this exact-hash repair to the listed AutoCue catalog links only? Audio and external DJ crates/playlists are not modified.")) return;
+    await durable("/api/studio/file-repair/approve", {
+      edit_id: fileRepairPreview.edit_id,
+      source_file_id: fileRepairPreview.source_file_id,
+      keeper_file_id: fileRepairPreview.keeper_file_id,
+    });
   });
   bind("history-download", () => download("studio-active-play-history.json", {
     dataset_id: session.dataset_id, observations: state.history,

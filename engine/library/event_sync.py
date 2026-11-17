@@ -23,6 +23,7 @@ from .event_sync_schema import (
     MusicItem,
     get_subcrate_for_timeline,
     get_subcrate_for_planner_moment,
+    validate_event_payload,
 )
 
 
@@ -108,10 +109,12 @@ def fetch_events(base_url: str, token: str) -> List[EventData]:
     events = []
     for event_data in response.get("events", []):
         try:
+            validate_event_payload(event_data)
             event = parse_event(event_data)
             events.append(event)
-        except Exception as e:
-            print(f"Warning: Failed to parse event {event_data.get('inquiry_id')}: {e}")
+        except (TypeError, ValueError) as e:
+            inquiry_id = event_data.get("inquiry_id") if isinstance(event_data, dict) else None
+            print(f"Warning: Failed to parse event {inquiry_id}: {e}")
     
     return events
 
@@ -141,27 +144,33 @@ def process_event(
     must_play_results = []
     play_if_possible_results = []
     do_not_play_results = []
+
+    def request_for(item):
+        request = {
+            "artist": item.artist or "",
+            "title": item.title or "",
+            "version": item.version or "",
+        }
+        request.update(item.metadata)
+        if item.id is not None:
+            request["id"] = item.id
+        return request
     
     # Match must-play list
     if event.music_lists and event.music_lists.must_play:
         for item in event.music_lists.must_play:
             if item.title or item.artist:
-                request = {
-                    "artist": item.artist or "",
-                    "title": item.title or "",
-                }
-                result = match_track(request, library_tracks, config)
+                result = match_track(request_for(item), library_tracks, config)
                 must_play_results.append(result)
     
     # Match play-if-possible list
-    if event.music_lists and event.music_lists.play_if_possible:
-        for item in event.music_lists.play_if_possible:
+    if event.music_lists:
+        play_if_possible_items = list(event.music_lists.play_if_possible)
+        for playlist in event.music_lists.client_playlists:
+            play_if_possible_items.extend(playlist.songs)
+        for item in play_if_possible_items:
             if item.title or item.artist:
-                request = {
-                    "artist": item.artist or "",
-                    "title": item.title or "",
-                }
-                result = match_track(request, library_tracks, config)
+                result = match_track(request_for(item), library_tracks, config)
                 play_if_possible_results.append(result)
     
     # Match do-not-play list
@@ -170,11 +179,7 @@ def process_event(
         dnp_config = MatchConfig(min_confidence=0.6)
         for item in event.music_lists.do_not_play:
             if item.title or item.artist:
-                request = {
-                    "artist": item.artist or "",
-                    "title": item.title or "",
-                }
-                result = match_track(request, library_tracks, dnp_config)
+                result = match_track(request_for(item), library_tracks, dnp_config)
                 do_not_play_results.append(result)
     
     return must_play_results, play_if_possible_results, do_not_play_results
@@ -359,8 +364,10 @@ def match_planner_cues(
                 request = {
                     "artist": cue.artist or "",
                     "title": cue.title or "",
+                    "version": cue.version or "",
                     "moment": cue.moment,  # Include moment for subcrate mapping
                 }
+                request.update(cue.metadata)
                 result = match_track(request, library_tracks, config)
                 results.append(result)
     

@@ -78,6 +78,33 @@ test("History removal and undo receipts bind exact reviewed observations and ope
     assert.equal(new StudioOutbox(store, "dataset").pending, null);
   }
 });
+test("Exact-hash file-repair receipts bind the catalog edit, source, keeper and operation across reload", () => {
+  for (const operation of ["approve", "undo"]) {
+    const store = storage(), outbox = new StudioOutbox(store, "dataset", () => "request");
+    const pending = outbox.prepare({endpoint:`/api/studio/file-repair/${operation}`, edit_id:"edit",
+      source_file_id:"source", keeper_file_id:"keeper"});
+    const receipt = {ok:true,request_id:pending.request_id,dataset_id:"dataset",edit_id:"edit",
+      operation,source_file_id:"source",keeper_file_id:"keeper",
+      references:[{snapshot_id:"snapshot",song_id:"song",revision:2,
+        file_id:operation === "undo" ? "source" : "keeper",content_hash:"hash"}]};
+    for (const change of [{edit_id:"other"}, {source_file_id:"other"}, {keeper_file_id:"other"},
+      {operation:operation === "undo" ? "approve" : "undo"}, {references:[]},
+      {references:[{...receipt.references[0],file_id:"other"}]}]) {
+      assert.throws(() => outbox.accept({...receipt,...change}), /acknowledgment/);
+      assert.deepEqual(new StudioOutbox(store,"dataset").pending,pending);
+    }
+    new StudioOutbox(store,"dataset").accept(receipt);
+    assert.equal(new StudioOutbox(store,"dataset").pending,null);
+  }
+});
+test("Reload rejects malformed retained file-repair requests", () => {
+  const store = storage();
+  store.setItem("autocue:catalog-studio:v1:dataset", JSON.stringify({
+    endpoint:"/api/studio/file-repair/approve",request_id:"request",dataset_id:"dataset",edit_id:"edit",
+    source_file_id:"same",keeper_file_id:"same",
+  }));
+  assert.throws(() => new StudioOutbox(store,"dataset"), /Retained file-repair action is invalid/);
+});
 test("Studio organization receipts bind exact batch and all child identities", () => {
   const store = storage(), outbox = new StudioOutbox(store, "dataset", () => "request");
   const pending = outbox.prepare({endpoint:"/api/studio/batch/approve",batch_id:"batch"});

@@ -8,8 +8,8 @@ claims. A local alpha is not the finished commercial product.
 |---|---|---|---|
 | 1. AI library management | Shared search, durable multi-turn drafts, optional bounded retrieval/transition evidence and explicit DJ feedback | Stale evidence/citations rejected; writes still need review/approval | Experimental alpha; real compact-model evaluation failed the production quality gate |
 | 2. Smart crates | Durable rules/snapshots, atomic bulk creation and reviewed existing-crate rename/merge/move/reorder/removal with undo | Stale previews/undo cannot overwrite newer edits; failures roll back every crate | Local alpha implemented; independent real-library/UX certification remains |
-| 3. Whole-set planning | Constrained phase-aware planner, exact-file pins/repair, cue provenance and explicit playback-timing overlay | Hard-policy and phase oracles; exact overlap arithmetic; rendered save/reload/export | Full-track planning and reviewed-window estimates implemented; mixed-duration optimization and automatic timeline conversion remain |
-| 4. Library operations | Indexed health, inbox, opt-in incremental root polling, reviewed play-history removal/undo and reversible Studio exclusions | No source writes; retry/restart/ambiguity cases | Alpha implemented; physical recoverable cleanup and reference repair remain |
+| 3. Whole-set planning | Constrained phase-aware planner, exact-file pins/repair, cue provenance and explicit playback-timing overlay | Hard-policy and phase oracles; exact overlap arithmetic; rendered save/reload/export | Read-only local audition and manual clock reforecast implemented; real-DJ audition acceptance and automatic overrun adaptation remain |
+| 4. Library operations | Indexed health/reference counts, inbox, opt-in incremental root polling, reviewed play-history removal/undo, exclusions and exact-hash AutoCue reference repair | No media/external-DJ writes; stale-link refusal and repair retry/undo | Alpha implemented; physical quarantine and external reference repair remain |
 | 5. Commercial readiness | Lightweight Studio, bundled Swift/Python Mac shell, distribution/diagnostics and release gates | Wheel/HTTP, native lifecycle and development DMG smoke checks | Apple Silicon development app/DMG built; signing, updates, billing and clean-machine QA remain |
 | 6. Broader parity | Destination capability registry, original templates, export, provider navigation and isolated Live foundation | Unsupported integrations stay visibly unavailable; saved Prep unchanged by Live | Local foundations implemented; connected services, Windows and licensed feeds remain |
 
@@ -151,11 +151,14 @@ not encryption, an authenticity signature, audio backup, in-place update
 rollback or a physical cleanup/reference-repair implementation.
 
 The development Mac build includes installed dependency/runtime notice files
-and a path-redacted inventory with notice/native-binary hashes. Missing/unsafe
-notice paths stop packaging. **Mutagen declares GPL-2.0-or-later**; the product
-license and applicable source/distribution obligations must be resolved before
-commercial publication. The inventory deliberately does not claim complete
-transitive SPDX coverage, model rights or legal clearance.
+and a path-redacted inventory with notice/native-binary hashes, plus a
+metadata-derived SPDX 2.3 Python dependency closure. Missing/unsafe notice
+paths stop packaging. The closure may include build-environment packages not
+embedded in the app and does not enumerate native components inside wheels, so
+it is not a complete shipped-binary SBOM. **Mutagen declares GPL-2.0-or-later**;
+the product license and applicable source/distribution obligations must be
+resolved before commercial publication. Model rights and legal clearance also
+remain unverified.
 
 The earlier regression was **1,156 Python tests**, **679 subtests**, 13
 dependency warnings and **90 browser-state tests**. The latest continuation
@@ -178,7 +181,7 @@ No failed experimental decoder was adopted; the previous **22/24** comparable
 gate remains the latest complete run, with application veto attribution and
 both residuals preserved. AI is still experimental.
 
-**Not finished:** physical cleanup/reference repair, mixed-duration planning,
+**Not finished:** physical cleanup/external reference repair, automatic live timeline adaptation,
 independent real-library/listening/software QA, production AI quality,
 authorized integrations, Windows certification, signed installers/updates,
 billing publication and rights/privacy/business approvals. These are not
@@ -451,8 +454,9 @@ Implemented after the phase/transition block:
   facts; retrieved-ID citation checks; drafts never approve themselves.
 - Persistent model-tag configuration and explicit DJ ratings. Feedback sorting
   and planner scoring are opt-in and never relax hard constraints.
-- Reversible exact-hash Studio exclusions with recovery receipts. This is
-  app-state cleanup only, **not physical quarantine/deletion or reference repair**.
+- Reversible exact-hash Studio exclusions and reviewed AutoCue catalog-link
+  repair with recovery receipts. These are app-state changes only, **not
+  physical quarantine/deletion or external DJ-reference repair**.
 - Apple Silicon Swift/AppKit/WKWebView development app and DMG with a frozen
   Python backend, native folder picker, private loopback readiness,
   app-data locking and owned-child shutdown/crash cleanup. Runtime/model weights
@@ -561,10 +565,12 @@ quality, real-library performance or commercial readiness.
 
 Implemented after the initial wave:
 
-- Planner 1.1 jointly searches exact-file order and nonempty contiguous phase
+- Planner 1.2 jointly searches exact-file order and nonempty contiguous phase
   partitions. Each phase has hard duration/BPM/clean requirements, optional
   exact must-plays and a shared-scoring energy target. Global constraints,
-  no-repeat identities and absolute pins still apply.
+  no-repeat identities and absolute pins still apply. An explicit reviewed
+  playback mode can optimize whole-set/phase budgets without changing the
+  default full-file behavior.
 - Studio has an ordered visual phase editor, exact-position pinning and
   replacement that retains all other positions. Conflicts and search-budget
   exhaustion are visibly distinct; neither silently relaxes requirements.
@@ -606,10 +612,14 @@ intermittent "Staged audio is not a regular file" response. That test passed
 in isolation and both subsequent full runs passed. Its unrelated staging
 implementation was not changed; this result is not proof the race is fixed.
 
-Still independently buildable: mixed-duration optimization and transition
-audition, automatic timeline adaptation, ingestion/watchers, recoverable cleanup,
-bulk organization and native distribution/licensing work. The roadmap is
-not reduced to externally gated accounts or certification.
+Remaining software work includes automatic live timeline adaptation and physical
+recoverable cleanup/external reference repair. Ingestion
+monitoring and bulk organization are implemented; the current synthetic
+packaging check also verifies the unsigned app/DMG path. Production AI quality,
+real-DJ/usability acceptance, source/media-cleanup policy, signing/notarization,
+complete release-rights clearance, authorized integrations, Windows support and
+billing operations remain separate gates. The roadmap does not treat local
+adapters or passing software tests as substitutes for those approvals.
 
 ## Cue and transition evidence follow-through
 
@@ -647,9 +657,45 @@ Verification:
   and existing worker verification.
 
 These are synthetic contract tests, not listening, real-model or actual DJ
-software playback certification. Mixed-duration target optimization, automatic
-cue selection, audio transition audition/rendering and wall-clock event
-adaptation remain future work.
+software playback certification. Automatic cue selection, audio transition
+audition/rendering and wall-clock event adaptation remain future work.
+
+## Opt-in reviewed-playback set optimization
+
+Planner 1.2 adds a separate opt-in mode that searches against hash-matching,
+reviewed play windows and explicit directed overlaps. The default continues to
+plan on full-file durations. Missing windows/overlaps and individual or
+combined overlap violations cannot become implicit defaults. Phase boundaries
+start at the incoming track, with cross-phase overlap charged to the outgoing
+phase; the result remains arithmetic evidence, not measured playback or a mix
+safety verdict. Studio exposes the choice and persists it in proposal evidence.
+
+Verification: **34 planner tests**, **45 Studio tests**, **1,189 full-suite
+Python tests** with 684 subtests and 13 existing warnings; **91 Node tests**;
+and **21 synthetic demo cases** passed. Tests include exact full-file versus
+estimated elapsed runtimes, order-specific transitions, phase-boundary
+allocation, missing/stale evidence, and combined-overlap rejection. No audio,
+tag or external crate belonging to a user was changed; fixtures and
+app-managed test state lived only in disposable directories.
+
+## Prep/Live uncertain-request ranking recovery
+
+The local Prep/Live correction keeps the alternatives of an unclear guest
+request at their ordinary rank with a pending note. Dismissal removes only the
+note; confirmation fulfills only the selected exact file; invalid confirmation
+returns a readable HTTP 400. Source-scope exclusions remain unchanged.
+
+Its acceptance rerun passed **1,183 Python tests**, with
+**684 subtests** and 13 existing warnings; **91 Node tests** and **21 synthetic
+demo cases** passed. The same 1,000-track/200-request run measured warm p95
+**95.96 ms** and p99 **112.95 ms**, with **199/200** requests under the existing
+200 ms target. The unchanged probe matched its saved reference byte-for-byte;
+export verification reported zero mismatches, and Do Not Play/already-played
+tracks were absent from picks. Full-page 1440 px Prep and Live captures were
+saved to the requested output directory. A later full regression after planner
+1.2 passed **1,189 Python tests**; the latency benchmark was not rerun with that
+later suite. These remain local synthetic results, not clean-machine
+certification.
 
 ## Boundaries
 

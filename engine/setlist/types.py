@@ -59,6 +59,8 @@ class SetlistContext:
     already_played: frozenset[SongIdentity] = field(default_factory=frozenset)
     already_placed: frozenset[SongIdentity] = field(default_factory=frozenset)
     played_next: Mapping[SongIdentity, Mapping[SongIdentity, float]] = field(default_factory=dict)
+    curated_playlist_support: Mapping[SongIdentity, int] = field(default_factory=dict)
+    curated_playlist_next: Mapping[SongIdentity, Mapping[SongIdentity, float]] = field(default_factory=dict)
     dj_memory_floor_fillers: frozenset[SongIdentity] = field(default_factory=frozenset)
     crate_identities: frozenset[SongIdentity] = field(default_factory=frozenset)
     explicit_phase: Optional[str] = None
@@ -129,6 +131,7 @@ class Recommendation:
     score: float
     reasons: Tuple[str, ...]
     badges: Tuple[str, ...] = ()
+    score_terms: Tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass

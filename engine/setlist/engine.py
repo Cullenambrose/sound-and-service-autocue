@@ -14,7 +14,7 @@ from library.model import Track
 
 from .inputs import song_identity
 from .phase import PhaseState, select_phase
-from .scoring import SetlistSettings, score_candidate
+from .scoring import SetlistSettings, score_candidate_with_terms
 from .types import (
     CapacityOverflow,
     DoNotPlayDiagnostic,
@@ -477,7 +477,7 @@ def _rank(
             if identity in excluded:
                 continue
             selected = selected_tracks.get(identity, representative)
-            score, reasons = score_candidate(
+            score, reasons, score_terms = score_candidate_with_terms(
                 identity,
                 selected,
                 context,
@@ -492,7 +492,7 @@ def _rank(
                 guest_requested=identity in guest_identities,
                 floor_filler=identity in fillers,
             )
-            yield identity, selected, score, reasons
+            yield identity, selected, score, reasons, score_terms
 
     # There is exactly one recommendation per identity; no file tie remains.
     def order(item):
@@ -510,7 +510,7 @@ def _rank(
                   if limit is None or limit >= len(representatives)
                   else nsmallest(limit, scored(), key=order))
     selected_recommendations = []
-    for identity, selected, score, reasons in chosen:
+    for identity, selected, score, reasons, score_terms in chosen:
         badges = []
         if (identity in must_identities or identity in play_if_identities
                 or identity in cue_label_identities):
@@ -520,7 +520,9 @@ def _rank(
         if identity in crate_identities:
             badges.append("in_crate")
         owned_track = copy.deepcopy(selected) if isinstance(library, PreparedLibrary) else selected
-        selected_recommendations.append(Recommendation(identity, owned_track, score, reasons, tuple(badges)))
+        selected_recommendations.append(
+            Recommendation(identity, owned_track, score, reasons, tuple(badges), score_terms)
+        )
     capacity_overflow = None
     if (prep and limit is not None and len(selected_recommendations) > limit):
         capacity_overflow = CapacityOverflow(

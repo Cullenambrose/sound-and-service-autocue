@@ -27,6 +27,15 @@ class MusicLists:
     play_if_possible: List[MusicItem] = field(default_factory=list)
     do_not_play: List[MusicItem] = field(default_factory=list)
     special_moments: List["PlannerSongCue"] = field(default_factory=list)
+    client_playlists: List["ClientPlaylist"] = field(default_factory=list)
+
+
+@dataclass
+class ClientPlaylist:
+    """Client-supplied playlist whose songs are soft event requests."""
+    id: Optional[str]
+    title: str
+    songs: List[MusicItem] = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +166,25 @@ def parse_event(data: Dict[str, Any]) -> EventData:
                 append_group(entry, moment)
         return cues
 
+    def client_playlists(value):
+        playlists = []
+        for playlist in as_list(value):
+            playlist = as_mapping(playlist)
+            title = playlist.get("title", "")
+            identity = playlist.get("id")
+            songs = []
+            for position, item in enumerate(as_list(playlist.get("songs"))):
+                parsed = music_item(item)
+                parsed.metadata = {
+                    **parsed.metadata,
+                    "client_playlist_id": identity,
+                    "client_playlist_title": title,
+                    "client_playlist_position": position,
+                }
+                songs.append(parsed)
+            playlists.append(ClientPlaylist(identity, title, songs))
+        return playlists
+
     music_lists = None
     if "music_lists" in data and data.get("music_lists") is not None:
         ml_data = as_mapping(data["music_lists"])
@@ -165,6 +193,7 @@ def parse_event(data: Dict[str, Any]) -> EventData:
             play_if_possible=[music_item(item) for item in as_list(ml_data.get("play_if_possible"))],
             do_not_play=[music_item(item) for item in as_list(ml_data.get("do_not_play"))],
             special_moments=song_cues(ml_data.get("special_moments", [])),
+            client_playlists=client_playlists(ml_data.get("client_playlists", [])),
         )
     
     # Parse event timelines
@@ -190,7 +219,7 @@ def parse_event(data: Dict[str, Any]) -> EventData:
                 if isinstance(item, dict)
             ]
         )
-    
+
     # Parse planner responses
     planner = None
     planner_data = as_mapping(data.get("planner"))
@@ -214,7 +243,7 @@ def parse_event(data: Dict[str, Any]) -> EventData:
     ) or (
         isinstance(planner_status, str) and planner_status.strip().casefold() in {"confirmed", "locked"}
     )
-    
+
     return EventData(
         inquiry_id=inquiry_id,
         event_date=data.get("event_date", ""),
@@ -227,6 +256,60 @@ def parse_event(data: Dict[str, Any]) -> EventData:
         event_timelines=event_timelines,
         planner=planner,
     )
+
+
+def validate_event_payload(data: Dict[str, Any]) -> None:
+    """Reject malformed event music inputs rather than letting tolerant parsing drop them."""
+    if not isinstance(data, dict):
+        raise ValueError("Event context must be a JSON object.")
+    music_lists = data.get("music_lists")
+    if music_lists is None:
+        return
+    if not isinstance(music_lists, dict):
+        raise ValueError("music_lists must be an object.")
+    for field in ("must_play", "play_if_possible", "do_not_play"):
+        entries = music_lists.get(field, [])
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list):
+            raise ValueError(f"music_lists.{field} must be an array.")
+        for position, item in enumerate(entries):
+            if not isinstance(item, dict) or not any(
+                    isinstance(item.get(key), str) and item[key].strip()
+                    for key in ("title", "artist")):
+                raise ValueError(
+                    f"music_lists.{field}[{position}] must include a title or artist."
+                )
+            if any(key in item and item[key] is not None and not isinstance(item[key], str)
+                   for key in ("title", "artist", "version")):
+                raise ValueError(
+                    f"music_lists.{field}[{position}] title, artist and version must be text."
+                )
+    playlists = music_lists.get("client_playlists", [])
+    if playlists is None:
+        playlists = []
+    if not isinstance(playlists, list):
+        raise ValueError("music_lists.client_playlists must be an array.")
+    for position, playlist in enumerate(playlists):
+        if not isinstance(playlist, dict) or not isinstance(playlist.get("title"), str) \
+                or not playlist["title"].strip() or not isinstance(playlist.get("songs"), list):
+            raise ValueError(
+                f"music_lists.client_playlists[{position}] requires a title and songs array."
+            )
+        for song_position, song in enumerate(playlist["songs"]):
+            if not isinstance(song, dict) or not any(
+                    isinstance(song.get(key), str) and song[key].strip()
+                    for key in ("title", "artist")):
+                raise ValueError(
+                    f"music_lists.client_playlists[{position}].songs[{song_position}] "
+                    "must include a title or artist."
+                )
+            if any(key in song and song[key] is not None and not isinstance(song[key], str)
+                   for key in ("title", "artist", "version")):
+                raise ValueError(
+                    f"music_lists.client_playlists[{position}].songs[{song_position}] "
+                    "title, artist and version must be text."
+                )
 
 
 def serialize_prep_status(status: EventPrepStatus) -> Dict[str, Any]:

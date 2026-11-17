@@ -99,9 +99,17 @@
         "/api/studio/inbox/review", "/api/studio/monitor/save", "/api/studio/exclusion/save",
         "/api/studio/feedback/save", "/api/studio/assistant/chat", "/api/studio/ai/configure",
         "/api/studio/edit/approve", "/api/studio/edit/undo",
-        "/api/studio/history/approve", "/api/studio/history/undo"].includes(request.endpoint) ||
+        "/api/studio/history/approve", "/api/studio/history/undo",
+        "/api/studio/file-repair/approve", "/api/studio/file-repair/undo"].includes(request.endpoint) ||
         typeof request.request_id !== "string" || !request.request_id) {
         throw new Error("Retained Studio action is invalid. Preserve browser storage before manual recovery.");
+      }
+      if (["/api/studio/file-repair/approve", "/api/studio/file-repair/undo"].includes(request.endpoint) &&
+          (typeof request.edit_id !== "string" || !request.edit_id ||
+           typeof request.source_file_id !== "string" || !request.source_file_id ||
+           typeof request.keeper_file_id !== "string" || !request.keeper_file_id ||
+           request.source_file_id === request.keeper_file_id)) {
+        throw new Error("Retained file-repair action is invalid. Preserve browser storage before manual recovery.");
       }
     }
     accept(receipt) {
@@ -151,6 +159,18 @@
               crate.entries.length === expected.entries.length && crate.entries.every((entry, position) =>
                 ["id", "snapshot_id", "song_id"].every(key => entry[key] === expected.entries[position][key]));
           });
+      } else if (["/api/studio/file-repair/approve", "/api/studio/file-repair/undo"].includes(request?.endpoint)) {
+        const undo = request.endpoint.endsWith("/undo");
+        valid = valid && receipt.edit_id === request.edit_id &&
+          receipt.operation === (undo ? "undo" : "approve") &&
+          receipt.source_file_id === request.source_file_id &&
+          receipt.keeper_file_id === request.keeper_file_id &&
+          Array.isArray(receipt.references) && receipt.references.length > 0 &&
+          receipt.references.length <= 100 && receipt.references.every(reference =>
+            reference.file_id === (undo ? request.source_file_id : request.keeper_file_id) &&
+            typeof reference.snapshot_id === "string" && typeof reference.song_id === "string" &&
+            Number.isInteger(reference.revision) && reference.revision > 0 &&
+            typeof reference.content_hash === "string");
       } else if (request?.endpoint === "/api/studio/ai/configure") {
         valid = valid && receipt.model === request.model && receipt.revision === request.base_revision + 1;
       } else if (request?.endpoint === "/api/studio/assistant/chat") {

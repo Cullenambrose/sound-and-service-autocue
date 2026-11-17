@@ -2,7 +2,7 @@
 from collections.abc import Mapping
 from typing import Any, Iterable, Optional
 
-from library.event_sync_schema import EventData, parse_event
+from library.event_sync_schema import EventData, parse_event, validate_event_payload
 from library.matcher import extract_featuring, extract_version_tags, normalize_text
 
 from .types import (
@@ -81,6 +81,16 @@ def _played_next(values: Optional[Mapping[Any, Mapping[Any, Any]]]):
     return result
 
 
+def _playlist_support(values: Optional[Mapping[Any, Any]]):
+    result = {}
+    for source, count in (values or {}).items():
+        identity = _coerce_identity(source)
+        if identity is None or type(count) is not int or count < 0:
+            continue
+        result[identity] = count
+    return result
+
+
 def context_from_event(
     event: Any,
     *,
@@ -88,6 +98,8 @@ def context_from_event(
     already_played: Iterable[Any] = (),
     already_placed: Iterable[Any] = (),
     played_next: Optional[Mapping[Any, Mapping[Any, Any]]] = None,
+    curated_playlist_support: Optional[Mapping[Any, Any]] = None,
+    curated_playlist_next: Optional[Mapping[Any, Mapping[Any, Any]]] = None,
     dj_memory_floor_fillers: Iterable[Any] = (),
     crate_identities: Iterable[Any] = (),
     phase: Optional[str] = None,
@@ -95,14 +107,22 @@ def context_from_event(
     energy_target: Optional[float] = None,
 ) -> SetlistContext:
     """Adapt EventData or raw event JSON; Live-only inputs remain separate arguments."""
-    parsed = parse_event(event) if isinstance(event, Mapping) else event
+    if isinstance(event, Mapping):
+        payload = dict(event)
+        validate_event_payload(payload)
+        parsed = parse_event(payload)
+    else:
+        parsed = event
     if not isinstance(parsed, EventData):
         raise TypeError("event must be EventData or a raw event mapping")
 
     music_lists = parsed.music_lists
     must_play = tuple(_request(item) for item in (music_lists.must_play if music_lists else ()))
-    play_if_possible = tuple(_request(item) for item in
-                             (music_lists.play_if_possible if music_lists else ()))
+    play_if_possible_items = list(music_lists.play_if_possible if music_lists else ())
+    if music_lists:
+        for playlist in music_lists.client_playlists:
+            play_if_possible_items.extend(playlist.songs)
+    play_if_possible = tuple(_request(item) for item in play_if_possible_items)
     do_not_play = tuple(_request(item) for item in
                         (music_lists.do_not_play if music_lists else ()))
 
@@ -157,6 +177,8 @@ def context_from_event(
         already_played=_identity_set(already_played),
         already_placed=_identity_set(already_placed),
         played_next=_played_next(played_next),
+        curated_playlist_support=_playlist_support(curated_playlist_support),
+        curated_playlist_next=_played_next(curated_playlist_next),
         dj_memory_floor_fillers=_identity_set(dj_memory_floor_fillers),
         crate_identities=_identity_set(crate_identities),
         explicit_phase=phase,

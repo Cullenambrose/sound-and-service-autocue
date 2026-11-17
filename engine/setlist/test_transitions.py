@@ -1,7 +1,8 @@
 import copy
 import unittest
 
-from setlist.transitions import transition_report, validate_playback
+from setlist.transitions import (full_file_timeline, project_wall_clock_timeline, transition_report,
+                                 rebase_wall_clock_timeline, validate_playback)
 
 
 def track(file_id, **changes):
@@ -21,6 +22,68 @@ def playback(ids=("a", "b", "c"), seconds=10):
 
 
 class TransitionTests(unittest.TestCase):
+    def test_wall_clock_projection_crosses_midnight_without_inference(self):
+        relative = full_file_timeline([
+            track("a", duration_s=90),
+            track("b", duration_s=60),
+        ])
+        projection = project_wall_clock_timeline(relative, "23:59:00", "full_file_duration")
+        self.assertEqual(projection["status"], "estimated")
+        self.assertEqual(projection["timeline"], [
+            {"file_id": "a", "start_s": 0.0, "end_s": 90.0,
+             "start_clock": "23:59:00", "start_day_offset": 0,
+             "end_clock": "00:00:30", "end_day_offset": 1},
+            {"file_id": "b", "start_s": 90.0, "end_s": 150.0,
+             "start_clock": "00:00:30", "start_day_offset": 1,
+             "end_clock": "00:01:30", "end_day_offset": 1},
+        ])
+        self.assertIn("No event date, time zone", projection["note"])
+
+    def test_wall_clock_projection_preserves_fractional_seconds_and_strict_inputs(self):
+        projection = project_wall_clock_timeline([
+            {"file_id": "a", "start_s": 0.25, "end_s": 1.5},
+        ], "12:00", "reviewed_playback_estimate")
+        self.assertEqual(projection["timeline"][0]["start_clock"], "12:00:00.25")
+        self.assertEqual(projection["timeline"][0]["end_clock"], "12:00:01.5")
+        for start_time in ("8:00", "24:00", "12:60", "12:00Z", "12:00:00."):
+            with self.subTest(start_time=start_time), self.assertRaises(ValueError):
+                project_wall_clock_timeline([], start_time, "full_file_duration")
+        for timeline in (
+            [{"file_id": "a", "start_s": True, "end_s": 1}],
+            [{"file_id": "a", "start_s": 2, "end_s": 1}],
+            [{"file_id": "a", "start_s": 0, "end_s": 1},
+             {"file_id": "a", "start_s": 1, "end_s": 2}],
+            [{"file_id": "a", "start_s": 0, "end_s": 172801}],
+        ):
+            with self.subTest(timeline=timeline), self.assertRaises(ValueError):
+                project_wall_clock_timeline(timeline, "12:00", "full_file_duration")
+
+    def test_live_reforecast_shifts_clock_only_from_an_exact_manual_anchor(self):
+        projection = project_wall_clock_timeline(
+            full_file_timeline([track("a", duration_s=90), track("b", duration_s=60)]),
+            "23:59", "full_file_duration")
+        result = rebase_wall_clock_timeline(projection, "b", "00:02", 1)
+        self.assertEqual(result["shift_s"], 90)
+        self.assertEqual(result["event_local_start_time"], "00:00:30")
+        self.assertEqual(result["event_day_offset"], 1)
+        self.assertEqual(result["timeline"][0]["start_day_offset"], 1)
+        self.assertEqual(result["timeline"][1]["start_clock"], "00:02:00")
+        self.assertIn("does not skip tracks", result["note"])
+        for changes in (
+            {"current_file_id": "missing"},
+            {"actual_day_offset": True},
+            {"actual_day_offset": 3},
+            {"actual_start_time": "late"},
+        ):
+            arguments = {"current_file_id": "b", "actual_start_time": "00:02", "actual_day_offset": 1}
+            arguments.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                rebase_wall_clock_timeline(projection, **arguments)
+        tampered = {**projection, "timeline": [
+            {**projection["timeline"][0], "start_clock": "12:00:00"}, projection["timeline"][1]]}
+        with self.assertRaisesRegex(ValueError, "Projection changed"):
+            rebase_wall_clock_timeline(tampered, "b", "00:02", 1)
+
     def test_explicit_arithmetic_timeline_and_inputs_unchanged(self):
         tracks = [track(file_id) for file_id in ("a", "b", "c")]
         value = playback()

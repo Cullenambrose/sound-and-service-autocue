@@ -1,8 +1,14 @@
 """Explicit play-window arithmetic and evidence cards, never a mix-safety verdict."""
 from fractions import Fraction
 import math
+import re
+from decimal import Decimal, localcontext
 
 from .scoring import camelot_key
+
+
+_CLOCK_TIME = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?$")
+_MAX_PLAN_SECONDS = 172800
 
 
 def _number(value, name):
@@ -13,6 +19,168 @@ def _number(value, name):
     if not valid:
         raise ValueError(f"{name} must be a finite nonnegative number")
     return Fraction(str(value))
+
+
+def validate_wall_clock_start(value):
+    if not isinstance(value, str) or not _CLOCK_TIME.fullmatch(value):
+        raise ValueError("event_start_time must be a local 24-hour HH:MM or HH:MM:SS clock time.")
+    return value
+
+
+def _clock_seconds(value):
+    parts = validate_wall_clock_start(value).split(":")
+    total = Fraction(int(parts[0]) * 3600 + int(parts[1]) * 60)
+    if len(parts) == 3:
+        total += Fraction(parts[2])
+    return total
+
+
+def _clock_at(total):
+    day_offset = total.numerator // (total.denominator * 86400)
+    within_day = total - day_offset * 86400
+    hour = within_day.numerator // (within_day.denominator * 3600)
+    within_hour = within_day - hour * 3600
+    minute = within_hour.numerator // (within_hour.denominator * 60)
+    second = within_hour - minute * 60
+    whole_second = second.numerator // second.denominator
+    fractional_second = second - whole_second
+    clock = f"{hour:02d}:{minute:02d}:{whole_second:02d}"
+    if fractional_second:
+        with localcontext() as context:
+            context.prec = 400
+            fraction = Decimal(fractional_second.numerator) / Decimal(fractional_second.denominator)
+        clock += "." + format(fraction, "f").partition(".")[2].rstrip("0")
+    return clock, day_offset
+
+
+def full_file_timeline(tracks):
+    """Build relative no-overlap track intervals from exact full-file durations."""
+    if not isinstance(tracks, list) or len(tracks) > 60:
+        raise ValueError("tracks must be a list of at most 60 entries")
+    timeline = []
+    elapsed = Fraction(0)
+    for track in tracks:
+        if not isinstance(track, dict):
+            raise ValueError("each track must be an object")
+        file_id = _id(track.get("id"))
+        duration = _number(track.get("duration_s"), "duration_s")
+        if duration <= 0:
+            raise ValueError("duration_s must be positive")
+        end = elapsed + duration
+        timeline.append({"file_id": file_id, "start_s": float(elapsed), "end_s": float(end)})
+        elapsed = end
+    return timeline
+
+
+def project_wall_clock_timeline(timeline, start_time, basis):
+    """Project relative intervals to a local clock without inferring date or time zone."""
+    start_time = validate_wall_clock_start(start_time)
+    if not isinstance(basis, str) or basis not in {"full_file_duration", "reviewed_playback_estimate"}:
+        raise ValueError("basis must identify full-file duration or reviewed-playback estimate")
+    if not isinstance(timeline, list) or len(timeline) > 60:
+        raise ValueError("timeline must be a list of at most 60 entries")
+    base_seconds = _clock_seconds(start_time)
+
+    projected = []
+    seen = set()
+
+    previous_start = Fraction(-1)
+    for item in timeline:
+        if not isinstance(item, dict) or set(item) != {"file_id", "start_s", "end_s"}:
+            raise ValueError("each timeline entry needs file_id, start_s and end_s")
+        file_id = _id(item["file_id"])
+        if file_id in seen:
+            raise ValueError("timeline file IDs must be unique")
+        seen.add(file_id)
+        _number(item["start_s"], "start_s")
+        _number(item["end_s"], "end_s")
+        start = Fraction(str(item["start_s"]))
+        end = Fraction(str(item["end_s"]))
+        if start > _MAX_PLAN_SECONDS or end > _MAX_PLAN_SECONDS:
+            raise ValueError("timeline offsets exceed the planner's 48-hour maximum")
+        if end < start or start < previous_start:
+            raise ValueError("timeline offsets must be ordered and each end must follow its start")
+        previous_start = start
+        start_clock, start_day = _clock_at(base_seconds + start)
+        end_clock, end_day = _clock_at(base_seconds + end)
+        projected.append({
+            "file_id": file_id, "start_s": float(start), "end_s": float(end),
+            "start_clock": start_clock, "start_day_offset": start_day,
+            "end_clock": end_clock, "end_day_offset": end_day,
+        })
+
+    timing_note = (
+        "Full-file clock projection with no overlap or trimming assumed."
+        if basis == "full_file_duration" else
+        "Clock projection of reviewed-window arithmetic; not measured playback."
+    )
+    return {
+        "status": "estimated", "basis": basis, "event_local_start_time": start_time,
+        "timeline": projected,
+        "note": timing_note + " No event date, time zone, or live schedule correction is inferred.",
+    }
+
+
+def rebase_wall_clock_timeline(projection, current_file_id, actual_start_time, actual_day_offset=0):
+    """Shift a forecast by a manually observed current-track start; never edits its order."""
+    if (not isinstance(projection, dict)
+            or set(projection) != {"status", "basis", "event_local_start_time", "timeline", "note"}
+            or projection.get("status") != "estimated"):
+        raise ValueError("Only a complete estimated wall-clock projection can be rebased.")
+    if (not isinstance(projection.get("basis"), str)
+            or projection["basis"] not in {"full_file_duration", "reviewed_playback_estimate"}):
+        raise ValueError("Projection has an unsupported timing basis.")
+    if not isinstance(current_file_id, str) or not current_file_id.strip():
+        raise ValueError("current_file_id must be a nonblank exact file ID.")
+    if type(actual_day_offset) is not int or not -1 <= actual_day_offset <= 2:
+        raise ValueError("actual_day_offset must be an integer from -1 through 2.")
+    actual_start_time = validate_wall_clock_start(actual_start_time)
+    timeline = projection.get("timeline")
+    if not isinstance(timeline, list) or not timeline:
+        raise ValueError("Projection has no track intervals to rebase.")
+    if any(not isinstance(item, dict) or set(item) != {
+            "file_id", "start_s", "end_s", "start_clock", "start_day_offset",
+            "end_clock", "end_day_offset"} for item in timeline):
+        raise ValueError("Projection contains malformed track intervals.")
+    canonical = project_wall_clock_timeline([
+        {"file_id": item["file_id"], "start_s": item["start_s"], "end_s": item["end_s"]}
+        for item in timeline
+    ], projection["event_local_start_time"], projection["basis"])
+    if canonical != projection:
+        raise ValueError("Projection changed; regenerate it before rebasing.")
+    anchors = [item for item in timeline if isinstance(item, dict)
+               and item.get("file_id") == current_file_id]
+    if len(anchors) != 1:
+        raise ValueError("current_file_id must identify one exact track in the projection.")
+    anchor = anchors[0]
+    if type(anchor.get("start_day_offset")) is not int:
+        raise ValueError("Projected current-track day offset is invalid.")
+    planned_start = _clock_seconds(anchor.get("start_clock")) + anchor["start_day_offset"] * 86400
+    actual_start = _clock_seconds(actual_start_time) + actual_day_offset * 86400
+    shift = actual_start - planned_start
+    rebased = []
+    for item in timeline:
+        if (not isinstance(item, dict) or type(item.get("start_day_offset")) is not int
+                or type(item.get("end_day_offset")) is not int):
+            raise ValueError("Projection contains invalid day offsets.")
+        start = _clock_seconds(item.get("start_clock")) + item["start_day_offset"] * 86400 + shift
+        end = _clock_seconds(item.get("end_clock")) + item["end_day_offset"] * 86400 + shift
+        start_clock, start_day = _clock_at(start)
+        end_clock, end_day = _clock_at(end)
+        rebased.append({**item, "start_clock": start_clock, "start_day_offset": start_day,
+                        "end_clock": end_clock, "end_day_offset": end_day})
+    new_start, new_day = _clock_at(_clock_seconds(projection["event_local_start_time"]) + shift)
+    return {
+        "status": "reforecast", "basis": projection["basis"],
+        "event_local_start_time": new_start, "event_day_offset": new_day,
+        "timeline": rebased,
+        "anchor": {"file_id": current_file_id, "planned_start_clock": anchor["start_clock"],
+                   "planned_day_offset": anchor["start_day_offset"],
+                   "actual_start_clock": actual_start_time, "actual_day_offset": actual_day_offset},
+        "shift_s": float(shift),
+        "note": "Forecast shifted from a manually observed current-track start. Song order and durations are unchanged; "
+                "this does not skip tracks, shorten playback, or move fixed event moments.",
+    }
 
 
 def _id(value):

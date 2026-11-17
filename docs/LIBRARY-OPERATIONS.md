@@ -32,6 +32,16 @@ evidence group lists. It is intentionally a **database-only indexed snapshot**:
   per-file record. Identical hashes prove only that the complete bytes matched
   when indexed; they do not prove audio equivalence and never make a copy
   disposable.
+- Exact-hash and related-edit file records include a bounded count of direct
+  AutoCue catalog match decisions and their crate-membership count, plus up to
+  20 song details. This is only an index of AutoCue-owned references.
+  External DJ databases, crate files and playlists are not inspected, so zero
+  AutoCue references does not prove that a file is safe to move or quarantine.
+- Studio's `file-repair/preview`, `file-repair/approve` and `file-repair/undo`
+  can reassign reviewed AutoCue match decisions from one exact file ID to an
+  identical-hash keeper. Approval rechecks both files and every affected
+  decision (at most 100 per repair); undo refuses if either file or a decision
+  changed. It does not move media or inspect/write external crates and playlists.
 - `related_edit_groups` contains up to 100 groups using the catalog matcher's
   normalized artist and base-title identity. The group is metadata-family
   evidence, not an equivalence claim. It retains all exact file IDs and does

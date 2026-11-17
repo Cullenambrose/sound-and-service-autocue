@@ -4,6 +4,11 @@ Research and repository audit: November 12, 2026.
 Implementation baseline: `570b7b9`, branch `feat/prep-live-flow`.
 Status: proposed roadmap, not an implementation or compatibility certification.
 
+**BOOTH BUDDY is the customer-facing product.** AutoCue names a component in
+this repository, not the overall product identity. The core product advantage
+is connecting the booking website's client requests and playlists to the DJ's
+real library, event crate and set-planning workflow.
+
 An initial integrated local alpha now spans all six delivery areas. See the
 [implementation checklist and verification results](SIX-STAGE-IMPLEMENTATION.md)
 and [Studio launch guide](STUDIO.md). This does not mark the roadmap complete.
@@ -194,7 +199,7 @@ software-regression evidence, not commercial or musical acceptance.
 | Set sequencing | Phase grouping plus shared-engine rank; pinned positions retained | Whole-set optimization, duration feasibility, energy arcs and transition evidence |
 | AI | Opt-in Gemini second opinion for cue plans | No equivalent library-chat/tool-execution product |
 | Acquisition | Outbound actions for 25 destinations; selected-file verification pilot | Better verified search coverage, acquisition inbox and permitted connected providers |
-| Duplicate handling | Read-only multiple-file metadata groups; research grouping/splits | Evidence levels, keeper review, reference repair and recoverable cleanup |
+| Duplicate handling | Indexed exact/related groups and reviewed exact-hash AutoCue reference repair | Evidence levels, external-reference repair and recoverable cleanup |
 | DJ software | Serato read/write helpers and safeguards exist | Supported app integration and real closed-app/import/rollback certification |
 | rekordbox | Adapter is explicitly a stub | M3U compatibility first; native features only if separately supported |
 | Cue/analysis engine | Substantial worker, review, diagnostics and benchmark scaffolding | Held-out human musical evidence, model licensing and unresolved v7 gates |

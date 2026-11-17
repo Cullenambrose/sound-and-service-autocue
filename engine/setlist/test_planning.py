@@ -1,5 +1,6 @@
 """Synthetic whole-set planner contracts, including independent exhaustive oracles."""
 import copy
+import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -201,6 +202,91 @@ class WholeSetPlannerTests(unittest.TestCase):
         self.assertEqual(result["alternatives"][0]["duration_s"], 0.6)
         records[2]["duration_s"] = 0.30000000000000004
         self.assertFalse(planning.plan_set(records, rules)["feasible"])
+
+    def test_reviewed_playback_optimization_uses_exact_windows_and_directed_overlaps(self):
+        records = [track("a", 180, content_hash="a" * 64),
+                   track("b", 180, content_hash="b" * 64)]
+        playback = {
+            "windows": [{"file_id": row["id"], "content_hash": row["content_hash"],
+                         "entry_s": 0, "exit_s": 120, "reviewed": True} for row in records],
+            "overlaps": [{"from_id": "a", "to_id": "b", "seconds": 30}],
+        }
+        rules = policy(target_minutes=3.5, max_tracks=2, must_include=["a", "b"])
+        self.assertFalse(planning.plan_set(records, rules)["feasible"])
+        result = planning.plan_set(records, rules, playback=playback)
+        self.assertTrue(result["feasible"], result)
+        alternative = result["alternatives"][0]
+        self.assertEqual([row["id"] for row in alternative["tracks"]], ["a", "b"])
+        self.assertEqual(alternative["duration_basis"], "reviewed_playback_estimate")
+        self.assertEqual(alternative["duration_s"], 210)
+        self.assertEqual(alternative["full_file_duration_s"], 360)
+        self.assertEqual(alternative["play_window_subtotal_s"], 240)
+        self.assertEqual(alternative["estimated_elapsed_s"], 210)
+        self.assertEqual(alternative["transition_evidence"]["status"], "estimated")
+        self.assertEqual(result["diagnostics"]["playback_evidence"], {
+            "candidate_directed_pairs": 2, "missing_overlap_pairs": 1,
+            "overlaps_exceed_play_windows": 0, "combined_overlap_conflicts": 0})
+
+    def test_reviewed_playback_optimization_aligns_phase_boundaries_to_incoming_track(self):
+        records = [track("a", 180, content_hash="a" * 64),
+                   track("b", 180, content_hash="b" * 64)]
+        playback = {
+            "windows": [{"file_id": row["id"], "content_hash": row["content_hash"],
+                         "entry_s": 0, "exit_s": 120, "reviewed": True} for row in records],
+            "overlaps": [{"from_id": "a", "to_id": "b", "seconds": 30}],
+        }
+        rules = policy(target_minutes=3.5, max_tracks=2, phases=[
+            {"phase": "dinner", "target_minutes": 1.5, "tolerance_minutes": 0,
+             "must_include": ["a"]},
+            {"phase": "open_dancing", "target_minutes": 2, "tolerance_minutes": 0,
+             "must_include": ["b"]},
+        ])
+        result = planning.plan_set(records, rules, playback=playback)
+        self.assertTrue(result["feasible"], result)
+        phases = result["alternatives"][0]["phases"]
+        self.assertEqual([phase["duration_s"] for phase in phases], [90, 120])
+        self.assertEqual([(phase["start_s"], phase["end_s"]) for phase in phases],
+                         [(0, 90), (90, 210)])
+
+    def test_reviewed_playback_never_invents_missing_windows_or_overlaps(self):
+        records = [track("a", 180, content_hash="a" * 64),
+                   track("b", 180, content_hash="b" * 64)]
+        playback = {
+            "windows": [{"file_id": "a", "content_hash": "a" * 64,
+                         "entry_s": 0, "exit_s": 120, "reviewed": True}],
+            "overlaps": [],
+        }
+        result = planning.plan_set(
+            records, policy(target_minutes=3.5, max_tracks=2, must_include=["a", "b"]),
+            playback=playback)
+        self.assertFalse(result["feasible"])
+        self.assertEqual(result["diagnostics"]["filtered"], {"missing_play_window": 1})
+        self.assertEqual(result["unresolved"][0]["code"], "required_file_ineligible")
+
+        playback["windows"].append({
+            "file_id": "b", "content_hash": "b" * 64,
+            "entry_s": 0, "exit_s": 120, "reviewed": True,
+        })
+        result = planning.plan_set(
+            records, policy(target_minutes=3.5, max_tracks=2, must_include=["a", "b"]),
+            playback=playback)
+        self.assertFalse(result["feasible"])
+        self.assertEqual(result["diagnostics"]["playback_evidence"]["missing_overlap_pairs"], 2)
+
+    def test_reviewed_playback_rejects_combined_overlaps_that_exceed_middle_window(self):
+        records = [track(file_id, 180, content_hash=hashlib.sha256(file_id.encode()).hexdigest())
+                   for file_id in ("a", "b", "c")]
+        playback = {
+            "windows": [{"file_id": row["id"], "content_hash": row["content_hash"],
+                         "entry_s": 0, "exit_s": 120, "reviewed": True} for row in records],
+            "overlaps": [{"from_id": "a", "to_id": "b", "seconds": 61},
+                         {"from_id": "b", "to_id": "c", "seconds": 60}],
+        }
+        result = planning.plan_set(
+            records, policy(target_minutes=4, tolerance_minutes=0.05, max_tracks=3,
+                            must_include=["a", "b", "c"]), playback=playback)
+        self.assertFalse(result["feasible"])
+        self.assertEqual(result["diagnostics"]["playback_evidence"]["combined_overlap_conflicts"], 1)
 
     def test_phase_constraints_never_relax_global_rules_and_unknowns(self):
         records = [track("clean", title="Alpha", bpm=90),
@@ -430,7 +516,10 @@ class WholeSetPlannerTests(unittest.TestCase):
     def test_shared_scoring_explains_energy_key_and_continuity(self):
         records = [track(index, bpm=110, key="8A", genre="Pop", energy=0.8)
                    for index in range(3)]
-        with patch.object(planning, "score_candidate", wraps=planning.score_candidate) as scorer:
+        with patch.object(
+            planning, "score_candidate_with_terms",
+            wraps=planning.score_candidate_with_terms,
+        ) as scorer:
             result = planning.plan_set(records, policy(energy_target=0.8))
             self.assertTrue(scorer.called)
         reasons = [reason for entry in result["alternatives"][0]["track_reasons"]

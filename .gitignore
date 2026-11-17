@@ -71,6 +71,9 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+DerivedData/
+**/xcuserdata/
+*.xcuserstate
 
 # OS / editor
 .DS_Store

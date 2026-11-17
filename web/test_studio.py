@@ -64,6 +64,24 @@ class StudioTests(unittest.TestCase):
         with self.db:
             return studio_service.search(self.db, rule or {})
 
+    def test_search_distinguishes_file_tag_music_metadata_from_unverified_and_unknown(self):
+        track = self.search()["tracks"][0]
+        self.assertEqual(track["music_metadata_evidence"], {
+            "bpm": "unverified", "key": "unverified",
+        })
+        row = self.db.execute(
+            "SELECT metadata_json FROM library_files WHERE id=?", (track["id"],)
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata.update(provenance="file_tags", bpm="90", key="")
+        with self.db:
+            self.db.execute("UPDATE library_files SET metadata_json=? WHERE id=?",
+                            (json.dumps(metadata), track["id"]))
+        tagged = next(item for item in self.search()["tracks"] if item["id"] == track["id"])
+        self.assertEqual(tagged["music_metadata_evidence"], {
+            "bpm": "local_file_tag", "key": "unknown",
+        })
+
     @contextmanager
     def search_reader(self):
         reader = sqlite3.connect(self.root / "catalog.sqlite3")
@@ -197,10 +215,29 @@ class StudioTests(unittest.TestCase):
     def test_rules_strict_validation(self):
         bad = [{"sql": "DROP"}, {"limit": True}, {"limit": 0}, {"bpm_max": True},
                {"bpm_min": 100, "bpm_max": 90}, {"energy_max": 3}, {"bpm_min": float("nan")},
-               {"sort": []}, {"scope_ids": [{}]}, {"clean_only": 1}, {"never_played": "yes"}]
+               {"sort": []}, {"scope_ids": [{}]}, {"clean_only": 1}, {"never_played": "yes"},
+               {"all": []}, {"any": [{}]}, {"all": [{"sort": "bpm"}]},
+               {"all": [{"any": [{"all": [{"any": [{"all": [{"genre": "House"}]}]}]}]}]}]
         for rule in bad:
             with self.subTest(rule=rule), self.assertRaises(ValueError):
                 studio_service.validate_rule(rule)
+
+    def test_smart_rule_groups_apply_bounded_nested_and_or_logic(self):
+        rule = {"all": [
+            {"genre": "R&B"},
+            {"any": [{"bpm_max": 95}, {"clean_only": True}]},
+        ]}
+        self.assertEqual(
+            [track["title"] for track in self.search(rule)["tracks"]],
+            ["One", "Two"],
+        )
+        self.assertEqual(
+            [track["title"] for track in self.search({
+                "all": [{"genre": "R&B"}, {"any": [{"bpm_min": 101}, {"clean_only": True}]}],
+                "limit": 10,
+            })["tracks"]],
+            ["One", "Two"],
+        )
 
     def test_search_does_not_probe_media_or_change_state(self):
         before = self.db.total_changes
@@ -297,6 +334,113 @@ class StudioTests(unittest.TestCase):
                 **body, "dataset_id": self.dataset, "name": "Timed set", "alternative_index": 0}, self.dataset)
         self.assertEqual(preview["planning"]["alternative"]["duration_s"], 360)
         self.assertEqual(self.approve(preview)["entries"], 2)
+
+    def test_booking_client_playlist_reaches_set_plan_as_soft_request_with_explanation(self):
+        body = {
+            "rule": {},
+            "policy": {"target_minutes": 3, "tolerance_minutes": 0, "max_tracks": 1},
+            "event": {"inquiry_id": "inquiry-client-playlist", "music_lists": {
+                "client_playlists": [{
+                    "id": "client-list-1", "title": "Client dinner picks",
+                    "songs": [{"title": "Unlisted", "artist": "Invented"},
+                              {"title": "Three", "artist": "Invented"}],
+                }],
+            }},
+        }
+        with self.db:
+            planned = studio.dispatch(self.db, "plan", body, self.dataset)
+        alternative = planned["alternatives"][0]
+        self.assertEqual([track["id"] for track in alternative["tracks"]], [self.ids["Three"]])
+        reasons = {item["file_id"]: item["reasons"] for item in alternative["track_reasons"]}
+        self.assertIn("Booking client playlist (Client dinner picks, item 2): Invented - Three",
+                      reasons[self.ids["Three"]])
+
+    def test_imported_csv_playlists_influence_and_explain_event_set_plans(self):
+        snapshot = {
+            "schema_version": 1,
+            "source": "crate-hackers-manifest-csv",
+            "crates": [{"id": "curated", "title": "Synthetic DJ reference", "available": True,
+                        "songs": [
+                            {"id": "csv-one", "title": "One", "artist": "Invented", "version": ""},
+                            {"id": "csv-two", "title": "Two", "artist": "Invented", "version": ""},
+                        ]}],
+        }
+        with self.db:
+            catalog.import_snapshot(self.db, snapshot)
+            body = {"rule": {}, "policy": {"target_minutes": 6, "tolerance_minutes": 0,
+                                             "max_tracks": 2}, "event": {}}
+            planned = studio.dispatch(self.db, "plan", body, self.dataset)
+        alternative = planned["alternatives"][0]
+        self.assertEqual([track["title"] for track in alternative["tracks"]], ["One", "Two"])
+        self.assertEqual(planned["event_evidence"]["curated_csv_playlist_count"], 1)
+        terms = {item["file_id"]: item["terms"] for item in alternative["track_score_terms"]}
+        self.assertTrue(all(any(term["factor"] == "curated_playlist_presence" for term in terms[track["id"]])
+                            for track in alternative["tracks"]))
+        reasons = {item["file_id"]: item["reasons"] for item in alternative["track_reasons"]}
+        self.assertTrue(any("DJ-curated CSV" in reason for values in reasons.values() for reason in values))
+        self.assertTrue(any("DJ-curated CSV playlist membership: Synthetic DJ reference" in reason
+                            for reason in reasons[self.ids["One"]]))
+        self.assertTrue(any("DJ-curated CSV sequence precedent: Synthetic DJ reference" in reason
+                            for reason in reasons[self.ids["Two"]]))
+
+    def test_only_latest_imported_csv_snapshot_contributes_playlist_weight(self):
+        first = {
+            "schema_version": 1, "source": "crate-hackers-manifest-csv",
+            "crates": [{"id": "curated", "title": "Reference", "available": True,
+                        "songs": [{"id": "one", "title": "One", "artist": "Invented"},
+                                  {"id": "two", "title": "Two", "artist": "Invented"}]}],
+        }
+        latest = {
+            "schema_version": 1, "source": "crate-hackers-manifest-csv",
+            "crates": [{"id": "curated", "title": "Reference", "available": True,
+                        "songs": [{"id": "two", "title": "Two", "artist": "Invented"},
+                                  {"id": "three", "title": "Three", "artist": "Invented"}]}],
+        }
+        with self.db:
+            first_import = catalog.import_snapshot(self.db, first, begin=False)
+            latest_import = catalog.import_snapshot(self.db, latest, begin=False)
+            self.db.execute("UPDATE catalog_snapshots SET imported_at=1 WHERE id=?",
+                            (first_import["snapshot_id"],))
+            self.db.execute("UPDATE catalog_snapshots SET imported_at=2 WHERE id=?",
+                            (latest_import["snapshot_id"],))
+        evidence = studio_service.curated_playlist_evidence(self.db)
+        one = studio_service.song_identity("One", "Invented")
+        two = studio_service.song_identity("Two", "Invented")
+        three = studio_service.song_identity("Three", "Invented")
+        self.assertEqual(evidence["playlist_count"], 1)
+        self.assertNotIn(one, evidence["support"])
+        self.assertEqual(evidence["support"], {two: 1, three: 1})
+        self.assertNotIn(one, evidence["next"])
+        self.assertEqual(evidence["next"], {two: {three: 1}})
+
+    def test_unverified_csv_source_identifier_does_not_influence_playlist_evidence(self):
+        snapshot = {
+            "schema_version": 1, "source": "Synthetic csv import",
+            "crates": [{"id": "curated", "title": "Synthetic", "available": True,
+                        "songs": [{"id": "one", "title": "One", "artist": "Invented"}]}],
+        }
+        with self.db:
+            catalog.import_snapshot(self.db, snapshot)
+        evidence = studio_service.curated_playlist_evidence(self.db)
+        self.assertEqual(evidence["playlist_count"], 0)
+        self.assertEqual(evidence["support"], {})
+
+    def test_booking_special_moment_is_required_and_unresolved_cue_blocks_planning(self):
+        body = {"rule": {}, "policy": {"target_minutes": 6, "tolerance_minutes": 0,
+                                         "max_tracks": 2},
+                "event": {"planner": {"song_cues": [
+                    {"moment": "first_dance", "title": "Three", "artist": "Invented"}]}}}
+        with self.db:
+            planned = studio.dispatch(self.db, "plan", body, self.dataset)
+        alternative = planned["alternatives"][0]
+        self.assertIn(self.ids["Three"], {track["id"] for track in alternative["tracks"]})
+        reasons = {item["file_id"]: item["reasons"] for item in alternative["track_reasons"]}
+        self.assertTrue(any("Booking special moment (first_dance)" in reason
+                            for reason in reasons[self.ids["Three"]]))
+        unresolved = body | {"event": {"planner": {"song_cues": [
+            {"moment": "first_dance", "title": "Unlisted song", "artist": "Invented"}]}}}
+        with self.db, self.assertRaisesRegex(ValueError, "special-moment"):
+            studio.dispatch(self.db, "plan", unresolved, self.dataset)
 
     def test_phase_plan_evidence_survives_restart_and_reports_later_reorder(self):
         body = {"rule": {}, "event": {}, "policy": {
@@ -419,6 +563,39 @@ class StudioTests(unittest.TestCase):
             studio.dispatch(self.db, "plan/propose", {
                 **body, "dataset_id": self.dataset, "name": "Injected", "alternative_index": 0,
                 "transition_evidence": {"estimated_elapsed_s": 1}}, self.dataset)
+
+    def test_explicit_reviewed_playback_optimization_reaches_plan_and_saved_proposal(self):
+        tracks = self.search()["tracks"]
+        selected = [next(track for track in tracks if track["id"] == self.ids[name])
+                    for name in ("One", "Two")]
+        playback = {
+            "windows": [{"file_id": track["id"], "content_hash": track["content_hash"],
+                         "entry_s": 0, "exit_s": 120, "reviewed": True} for track in selected],
+            "overlaps": [{"from_id": selected[0]["id"], "to_id": selected[1]["id"], "seconds": 0}],
+        }
+        body = {"rule": {}, "event": {}, "playback": playback, "optimize_playback": True,
+                "policy": {"target_minutes": 4, "tolerance_minutes": 0, "max_tracks": 2,
+                           "must_include": [track["id"] for track in selected],
+                           "pinned": [{"position": position, "file_id": track["id"]}
+                                      for position, track in enumerate(selected)]}}
+        with self.db:
+            result = studio.dispatch(self.db, "plan", body, self.dataset)
+            preview = studio.dispatch(self.db, "plan/propose", {
+                **body, "dataset_id": self.dataset, "name": "Reviewed playback", "alternative_index": 0},
+                self.dataset)
+        alternative = result["alternatives"][0]
+        self.assertEqual(alternative["duration_s"], 240)
+        self.assertEqual(alternative["full_file_duration_s"], 360)
+        self.assertEqual(alternative["transition_evidence"]["estimated_elapsed_s"], 240)
+        self.assertTrue(preview["planning"]["optimize_playback"])
+        self.assertEqual(preview["planning"]["alternative"], alternative)
+
+        playback["windows"][0]["content_hash"] = "b" * 64
+        with self.db:
+            stale = studio.dispatch(self.db, "plan", body, self.dataset)
+        self.assertFalse(stale["feasible"])
+        self.assertEqual(stale["diagnostics"]["filtered"], {"window_hash_mismatch": 1,
+                                                             "missing_play_window": 1})
 
     def test_phase_must_versions_and_repair_never_override_event_or_pins(self):
         body = {"rule": {}, "event": {"music_lists": {"do_not_play": [
@@ -811,6 +988,54 @@ class StudioHTTPTests(unittest.TestCase):
         with response:
             return response.status, json.load(response)
 
+    def raw_get(self, path, headers):
+        request = urllib.request.Request(self.base + path, headers=headers)
+        try:
+            response = urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers, error.read()
+        with response:
+            return response.status, response.headers, response.read()
+
+    def test_planner_explanation_view_is_served_as_local_static_asset(self):
+        code, headers, body = self.raw_get("/studio-plan-view.js", {})
+        self.assertEqual(code, 200)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertIn(b"trackReasons", body)
+        code, _, page = self.raw_get("/", {})
+        self.assertEqual(code, 200)
+        self.assertIn(b'<script src="/studio-plan-view.js"></script>', page)
+        self.assertIn(b'id="gig-review-crate"', page)
+        self.assertIn(b'id="review-gig"', page)
+
+    def test_local_transition_audition_stream_is_index_bound_and_range_capable(self):
+        track = self.call("/api/studio/search", {"rule": {"limit": 1}})[1]["tracks"][0]
+        source = Path(track["path"])
+        original = source.read_bytes()
+        headers = {"Origin": self.base, "Sec-Fetch-Site": "same-origin", "Range": "bytes=0-31"}
+        code, response_headers, content = self.raw_get(f"/api/studio/audition/{track['id']}", headers)
+        self.assertEqual(code, 206)
+        self.assertEqual(response_headers["Content-Range"], f"bytes 0-31/{len(original)}")
+        self.assertEqual(response_headers["ETag"], f'"{track["content_hash"]}"')
+        self.assertEqual(content, original[:32])
+        code, _, _ = self.raw_get(f"/api/studio/audition/{track['id']}",
+                                  {"Origin": "https://elsewhere.invalid", "Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(code, 403)
+        code, _, _ = self.raw_get("/api/studio/audition/not-a-file-id",
+                                  {"Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(code, 400)
+        code, _, _ = self.raw_get(f"/api/studio/audition/{track['id']}",
+                                  {"Sec-Fetch-Site": "same-origin", "Range": "bytes=-"})
+        self.assertEqual(code, 416)
+
+    def test_local_transition_audition_rejects_stale_indexed_bytes(self):
+        track = self.call("/api/studio/search", {"rule": {"limit": 1}})[1]["tracks"][0]
+        Path(track["path"]).write_bytes(b"synthetic-changed-audio")
+        code, response = self.call(f"/api/studio/audition/{track['id']}", headers={
+            "Origin": self.base, "Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(code, 409, response)
+        self.assertIn("changed or is unavailable", response["error"])
+
     def test_release_filter_veto_is_visible_over_http_without_inference(self):
         prompt = "Plan 18 minutes of House songs released in 2007."
         with patch.object(urllib.request, "build_opener") as model:
@@ -896,7 +1121,8 @@ class StudioHTTPTests(unittest.TestCase):
             self.assertEqual(self.call("/api/studio/state")[0], 200)
 
     def test_phase_schedule_validation_plan_save_and_historical_evidence_over_http(self):
-        body = {"rule": {"clean_only": True, "limit": 4}, "event": {}, "policy": {
+        body = {"rule": {"clean_only": True, "limit": 4}, "event": {}, "event_start_time": "18:30",
+                "policy": {
             "target_minutes": 6, "tolerance_minutes": 0, "max_tracks": 2,
             "phases": [
                 {"phase": "dinner", "target_minutes": 3, "tolerance_minutes": 0, "energy_target": 0.2},
@@ -908,6 +1134,19 @@ class StudioHTTPTests(unittest.TestCase):
         self.assertEqual(code, 200, planned)
         self.assertTrue(planned["feasible"], planned)
         self.assertEqual(len(planned["alternatives"][0]["phases"]), 2)
+        clock = planned["alternatives"][0]["wall_clock_timeline"]
+        self.assertEqual(clock["basis"], "full_file_duration")
+        self.assertEqual(clock["timeline"][0]["start_clock"], "18:30:00")
+        self.assertEqual(clock["timeline"][0]["end_clock"], "18:33:00")
+        code, reforecast = self.call("/api/studio/plan/reforecast", {
+            "projection": clock, "current_file_id": planned["alternatives"][0]["tracks"][0]["id"],
+            "actual_start_time": "18:31", "actual_day_offset": 0})
+        self.assertEqual(code, 200, reforecast)
+        self.assertEqual(reforecast["shift_s"], 60)
+        self.assertEqual(reforecast["timeline"][1]["start_clock"], "18:34:00")
+        self.assertEqual(self.call("/api/studio/plan/reforecast", {
+            "projection": clock, "current_file_id": planned["alternatives"][0]["tracks"][0]["id"],
+            "actual_start_time": "18:31", "actual_day_offset": True})[0], 400)
         code, preview = self.call("/api/studio/plan/propose", {
             **body, "dataset_id": self.session["dataset_id"], "name": "HTTP phases", "alternative_index": 0})
         self.assertEqual(code, 200, preview)
@@ -918,8 +1157,57 @@ class StudioHTTPTests(unittest.TestCase):
         self.assertEqual(code, 200, evidence)
         self.assertTrue(evidence["current_selection_matches"])
         self.assertEqual(evidence["creation"]["planning"]["alternative"], planned["alternatives"][0])
+        self.assertEqual(evidence["creation"]["planning"]["event_start_time"], "18:30")
         body["policy"]["phases"][0]["target_minutes"] = 4
         self.assertEqual(self.call("/api/studio/plan/validate", {"policy": body["policy"]})[0], 400)
+
+    def test_reviewed_playback_optimization_over_http_is_persisted_as_an_estimate(self):
+        rule = {"clean_only": True, "limit": 2}
+        tracks = self.call("/api/studio/search", {"rule": rule})[1]["tracks"]
+        playback = {
+            "windows": [{"file_id": track["id"], "content_hash": track["content_hash"],
+                         "entry_s": 0, "exit_s": 60, "reviewed": True} for track in tracks],
+            "overlaps": [{"from_id": tracks[0]["id"], "to_id": tracks[1]["id"], "seconds": 0}],
+        }
+        body = {"rule": rule, "event": {}, "playback": playback, "optimize_playback": True,
+                "event_start_time": "23:59",
+                "policy": {"target_minutes": 2, "tolerance_minutes": 0, "max_tracks": 2,
+                           "must_include": [track["id"] for track in tracks],
+                           "pinned": [{"position": position, "file_id": track["id"]}
+                                      for position, track in enumerate(tracks)]}}
+        code, invalid = self.call("/api/studio/plan", body | {"optimize_playback": 1})
+        self.assertEqual(code, 400)
+        self.assertIn("optimize_playback must be a boolean", invalid["error"])
+        code, invalid = self.call("/api/studio/plan", body | {"event_start_time": "8 pm"})
+        self.assertEqual(code, 400)
+        self.assertIn("event_start_time must be a local 24-hour", invalid["error"])
+        code, planned = self.call("/api/studio/plan", body)
+        self.assertEqual(code, 200, planned)
+        self.assertEqual(planned["alternatives"][0]["duration_s"], 120)
+        self.assertEqual(planned["alternatives"][0]["full_file_duration_s"], 360)
+        self.assertEqual(planned["alternatives"][0]["duration_basis"], "reviewed_playback_estimate")
+        self.assertEqual(planned["alternatives"][0]["wall_clock_timeline"]["basis"],
+                         "reviewed_playback_estimate")
+        self.assertEqual(planned["alternatives"][0]["wall_clock_timeline"]["timeline"][0]["end_clock"],
+                         "00:00:00")
+        self.assertEqual(planned["alternatives"][0]["wall_clock_timeline"]["timeline"][0]["end_day_offset"], 1)
+        code, preview = self.call("/api/studio/plan/propose", {
+            **body, "dataset_id": self.session["dataset_id"], "name": "HTTP playback",
+            "alternative_index": 0})
+        self.assertEqual(code, 200, preview)
+        code, saved = self.call("/api/studio/approve", {
+            "dataset_id": self.session["dataset_id"], "request_id": "http-playback-plan",
+            "proposal_id": preview["proposal_id"]})
+        self.assertEqual(code, 200, saved)
+        code, evidence = self.call("/api/studio/crate/evidence", {"crate_id": saved["crate_id"]})
+        self.assertEqual(code, 200, evidence)
+        creation = evidence["creation"]["planning"]
+        self.assertTrue(creation["optimize_playback"])
+        self.assertEqual(creation["event_start_time"], "23:59")
+        self.assertEqual(creation["alternative"]["duration_s"], 120)
+        self.assertEqual(creation["alternative"]["transition_evidence"]["estimated_elapsed_s"], 120)
+        self.assertEqual(creation["alternative"]["wall_clock_timeline"],
+                         planned["alternatives"][0]["wall_clock_timeline"])
 
     def test_ai_planning_translation_is_separate_from_search_generation_and_saves(self):
         intent = studio_ai.validate_plan_intent(LocalAITests().planning_intent())

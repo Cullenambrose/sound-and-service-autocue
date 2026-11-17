@@ -54,6 +54,7 @@ class VendorImportTests(unittest.TestCase):
     def test_manifest_selects_only_declared_exports_and_reconciles_idempotent_import(self):
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         document, report = vendor_import.convert(str(self.root))
+        self.assertEqual(document["source"], "crate-hackers-manifest-csv")
         self.assertEqual(report["catalog_entries"], 3)
         self.assertEqual(report["available"], 2)
         self.assertEqual(report["memberships"], 4)

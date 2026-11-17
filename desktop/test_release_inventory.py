@@ -19,12 +19,31 @@ class ReleaseInventoryTests(unittest.TestCase):
             license = directory / "LICENSE.txt"
             license.write_text(f"Synthetic {name} license fixture\n")
             metadata = Message()
+            metadata["Name"] = name
             if name == "mutagen":
                 metadata["License-Expression"] = "GPL-2.0-or-later"
             metadata["Classifier"] = "License :: Synthetic license fixture"
+            if name == "numpy":
+                metadata.add_header("Requires-Dist", "synthetic-base>=1")
+            if name == "pyinstaller":
+                metadata.add_header("Requires-Dist", "synthetic-builddep>=1")
+                metadata.add_header("Requires-Dist", 'skipped-package; python_version < "3"')
             distributions[name] = SimpleNamespace(version="0.test", metadata=metadata,
+                requires=metadata.get_all("Requires-Dist", []),
                 files=[] if missing == name else [Path("../COPYING") if unsafe == name else Path("LICENSE.txt")],
                 locate_file=lambda path, directory=directory: directory / path)
+        for name, requirements in (
+            ("sound-service-autocue", ["numpy>=1", "scipy>=1", "mutagen>=1"]),
+            ("synthetic-base", ["synthetic-leaf>=1"]),
+            ("synthetic-leaf", []),
+            ("synthetic-builddep", []),
+        ):
+            metadata = Message()
+            metadata["Name"] = name
+            for requirement in requirements:
+                metadata.add_header("Requires-Dist", requirement)
+            distributions[name] = SimpleNamespace(version="0.test", metadata=metadata,
+                requires=metadata.get_all("Requires-Dist", []), files=[])
         runtime = root / "stdlib"
         runtime.mkdir()
         (runtime / "LICENSE.txt").write_text("Synthetic Python license fixture\n")
@@ -48,6 +67,28 @@ class ReleaseInventoryTests(unittest.TestCase):
             self.assertEqual(len(report["components"]), 5)
             self.assertEqual(report["components"][2]["license_expression"], "GPL-2.0-or-later")
             resources = contents / "Resources"
+            sbom_path = resources / report["sbom"]["path"]
+            self.assertEqual(hashlib.sha256(sbom_path.read_bytes()).hexdigest(), report["sbom"]["sha256"])
+            sbom = json.loads(sbom_path.read_text())
+            self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")
+            package_names = {package["name"] for package in sbom["packages"]}
+            self.assertTrue({"AutoCue Studio", "CPython", "synthetic-base", "synthetic-leaf",
+                             "synthetic-builddep"} <= package_names)
+            self.assertNotIn("skipped-package", package_names)
+            self.assertIn("not a complete shipped-binary SBOM", sbom["comment"])
+            package_ids = {package["SPDXID"] for package in sbom["packages"]}
+            package_ids.add(sbom["SPDXID"])
+            relationships = {
+                (item["spdxElementId"], item["relationshipType"], item["relatedSpdxElement"])
+                for item in sbom["relationships"]
+            }
+            self.assertIn(("SPDXRef-AutoCueStudio", "DEPENDS_ON", "SPDXRef-Package-numpy"),
+                          relationships)
+            self.assertIn(("SPDXRef-Package-numpy", "DEPENDS_ON", "SPDXRef-Package-synthetic-base"),
+                          relationships)
+            for relationship in sbom["relationships"]:
+                self.assertIn(relationship["spdxElementId"], package_ids)
+                self.assertIn(relationship["relatedSpdxElement"], package_ids)
             for component in report["components"]:
                 for notice in component["notices"]:
                     data = (resources / notice["path"]).read_bytes()
@@ -55,6 +96,7 @@ class ReleaseInventoryTests(unittest.TestCase):
             text = (resources / "release-inventory.json").read_text()
             self.assertNotIn(str(root), text)
             self.assertEqual(json.loads(text), report)
+            self.assertIn("not a complete shipped-binary SBOM", report["scope"])
 
     def test_missing_or_unsafe_notices_block_package_completion(self):
         for options in ({"missing": "mutagen"}, {"unsafe": "numpy"}):
@@ -65,6 +107,16 @@ class ReleaseInventoryTests(unittest.TestCase):
                         self.assertRaises((RuntimeError, ValueError)):
                     release_inventory(contents)
                 self.assertFalse((contents / "Resources" / "release-inventory.json").exists())
+
+    def test_xcode_inventory_excludes_shell_signed_after_packaging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contents, distributions, runtime = self.fixture(Path(directory))
+            with patch("scripts.build_macos_app.distribution", side_effect=distributions.__getitem__), \
+                    patch("scripts.build_macos_app.sysconfig.get_path", return_value=str(runtime)):
+                report = release_inventory(contents, exclude_macos=True)
+            self.assertEqual([item["path"] for item in report["native_binaries"]],
+                             ["Resources/backend/vendor.dylib"])
+            self.assertIn("Xcode signs them after", report["scope"])
 
 
 if __name__ == "__main__":

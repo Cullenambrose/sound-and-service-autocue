@@ -108,7 +108,11 @@ Queries never stat or hash music. Indexed availability is explicitly historical;
 selected files are freshly checked/hashed on proposal approval and export.
 Clean-only means explicitly tagged clean with dirty/explicit taking precedence,
 not an audible-content guarantee. Missing numeric metadata cannot satisfy a
-numeric bound. Requests to index folders are separate, explicit operations.
+numeric bound. Search and planned-track rows label BPM/key values read from local
+file tags separately from values with unverified or missing provenance. A
+file-tag label means the value was read from the tag, not independently checked
+against the audio. Studio does not fill missing BPM/key with general-knowledge
+estimates. Requests to index folders are separate, explicit operations.
 
 ### Optional local intent extraction
 
@@ -165,6 +169,33 @@ plan drafts go through the existing reviewed-plan controls; organize drafts copy
 into the batch editor and still require preview plus approval.
 Applying an organization draft preserves the current explicit source scope in
 every proposed crate; it cannot silently broaden a scoped selection.
+Generated set alternatives expose the planner's set-selection rationale and
+per-track scoring signals; the exact-file approval preview retains each track's
+signals. The numeric breakdown shows actual additive points, configured weight,
+fit and available metadata evidence. Imported DJ-curated CSV playlists receive
+a high-weight membership signal and a separate ordered-transition signal;
+the selected track's explanation names the imported playlists supporting its
+membership or adjacent order. Revised snapshots replace earlier evidence from
+the same import source rather than multiplying a playlist's weight. These
+signals never masquerade as observed play history or crowd response. Booking
+must-plays and special-moment cues are required in whole-set plans, while songs
+from `music_lists.client_playlists` become soft booking requests; their source
+playlist name and original item position are retained in the explanation.
+They are not guaranteed plays or a locked sequence. Unresolved hard event
+requests stop planning with diagnostics rather than being silently omitted.
+Studio consumes the supported event JSON payload; it does not yet fetch events
+directly from the booking service.
+
+After a show, the history panel can compare a saved planned set with exact play
+observations the DJ selects. It does not infer event boundaries or treat
+unselected history as a missed track; the comparison is exact-file based. The DJ
+may explicitly save a private event assessment (worked, mixed, needs work, or
+cannot tell) with a note, the selected saved set and exact observation IDs.
+It is a self-reported assessment, not inferred crowd telemetry, and does not
+automatically alter recommendations. Global per-file preferences remain a
+separate control and affect planning only when explicit DJ feedback is enabled
+in policy. Assessment submissions use durable request receipts and the latest
+100 are shown in Studio state.
 
 Refinements now use application-owned patches: omitted fields retain the prior
 rule/policy. Explicit field removal must be represented in the checked
@@ -227,6 +258,11 @@ planner when event policy is required.
 
 Save named typed rules in an optional folder/category. Updates require the last
 revision. Load/refresh reruns the same rule against current indexed evidence.
+Typed filters support bounded nested `all`/`any` groups (up to eight children per
+group, three nested levels and 32 total rule nodes). A group's matching children
+are ANDed or ORed respectively; conditions within a node are ANDed. Sort and
+result-limit controls are root-only. This bounds evaluation cost while allowing
+useful combinations such as genre AND (tempo OR tagged-clean).
 Freezing results produces a separate approval-bound static crate; existing
 static crates never silently change. Original dinner/house/rediscovery recipes
 are editable rules, not licensed music collections or competitor content.
@@ -336,6 +372,10 @@ timing and external operations are unsupported by this translator; keep exact
 event requests in the existing event form.
 
 Translation returns a visible JSON draft, not tracks or a feasibility claim.
+Studio also displays a readable set-brief read-back with filters, phases and
+the source quotes cited by the model; the structured JSON remains available for
+inspection. Review the read-back because quotes do not certify completeness or
+semantic correctness.
 The model has no library evidence and is not allowed to supply source IDs,
 must-play IDs, exclusions, pins or event lists. Defaults when unspecified are
 3 minutes global tolerance, 20 tracks maximum and 1 minute per-phase tolerance.
@@ -396,8 +436,8 @@ require an unexpired, freshly checked proposal.
 ### Cue evidence and explicit playback timing
 
 Search results expose **Existing cue evidence** for any analysis already in
-this app's `tracks` table with the same indexed whole-file SHA-256. Studio
-does not start analysis, read audio/stems, probe media or guess a match by title.
+this app's `tracks` table with the same indexed whole-file SHA-256. Search and
+planning do not start analysis, read audio/stems, probe media or guess a match by title.
 Evidence includes review revision/state, plan digest, cue times/confidence,
 grid diagnostics, flags and existing stem-window evidence. Bar-based cue
 times use the shared offset-aware conversion. Invalid grid conversions are
@@ -442,9 +482,18 @@ Transition cards show both edits, raw BPM/Camelot evidence, tempo difference
 and explicit overlap. Cue/grid/stem warnings retain their original provenance.
 Detected vocal activity is not a clean intro; a stem-derived candidate is
 not proof of vocal absence, phrase alignment, grid accuracy or a clean loop
-seam. All transitions still require audition. The overlay performs no audio
-rendering, time stretching, key shifting, automatic cue selection or safety
-certification.
+seam.
+
+The **Local transition audition** streams adjacent exact indexed files only
+after the user opens a plan and chooses to audition. It checks that the selected
+root/file is still available and the indexed whole-file hash still matches,
+supports browser range playback, and never uploads, copies or edits audio.
+Individual file players are available even without timing assumptions. The
+explicit-overlap preview is enabled only when both submitted windows match the
+exact file hashes and fit the files; it uses a browser volume crossfade, not a
+rendered mix. It does not mark a window reviewed. Listen on the actual DJ
+system before asserting review. No audio rendering, time stretching, key
+shifting, automatic cue selection or safety certification is performed.
 
 The server recomputes the report before creating a proposal. Preview, saved
 creation evidence and the playlist ZIP's `manifest.json` retain the same
@@ -456,17 +505,25 @@ bind an export preview, so a changed review requires a new preview.
 
 Full-track phase feasibility remains unchanged by the overlay. An elapsed
 estimate of 224 seconds does not certify a six-minute mixed target merely
-because the full files sum to 360 seconds. Mixed-duration optimization and
-automatic wall-clock timeline conversion remain follow-through; the phase
-schedule is still an explicit ordered full-track budget.
+because the full files sum to 360 seconds. The opt-in reviewed-playback planner
+can now search against that estimated elapsed time. Optionally enter an
+event-local start clock to project each planned track onto a wall-clock
+timeline. Full-file mode projects full durations with no overlap; playback mode
+uses only its reviewed-window estimate and explicit overlaps. This is a
+read-only projection, not measured playback or event-date/time-zone inference.
+For a live delay, **Reforecast from the observed start of the current track**
+shifts the forecast by the measured clock difference. It preserves the exact
+track order and durations; it does not skip/shorten tracks or move fixed event
+moments. Cross-midnight entries show day offsets. This is a manual forecast,
+not automatic deck tracking or a guarantee that a milestone will be met.
 
 ## 4. Operations and history
 
 See [library operations](LIBRARY-OPERATIONS.md) for indexed health, exact-hash
 versus related-edit groups, and explicit observed-play history. Record plays
 manually against exact file IDs. Rediscovery means no observation in this app,
-not certainty a song has never been played. No delete, flatten, rename, repair,
-quarantine or original-tag writer is enabled.
+not certainty a song has never been played. Physical delete, flatten, rename,
+quarantine, external DJ-reference repair and original-tag writing are not enabled.
 
 Select displayed exact observations, then **Preview selected history removal**.
 Review their IDs, timestamps, notes and current removal revisions before
@@ -479,6 +536,15 @@ New observations made afterward remain intact. Both operations use the durable
 browser outbox and exact receipt replay after reload/lost acknowledgements.
 The original play receipt is retained, so replaying an old record-play request
 cannot recreate a removed observation. Preferences and saved crates are untouched.
+
+**Preview catalog reference repair** accepts exact source/keeper file IDs from
+an identical whole-file hash group. Both files are freshly rehashed and all
+AutoCue match decisions pointing to the source are listed before approval.
+Approval updates only those AutoCue match decisions; it does not move the
+source, alter imported snapshots or write a DJ database/playlist. The
+revisioned repair is undoable only while both files and every affected match
+decision remain unchanged. External references are not inspected, so this is
+not permission to quarantine or delete the source.
 
 This is reversible logical removal, **not permanent privacy erasure**: private
 event text and recovery receipts remain in the database and backups. The UI
@@ -504,8 +570,9 @@ Disabling prevents future admissions but does not cancel an already admitted job
 Exact hash-bound Studio exclusions are reversible app-owned selection filters.
 They do **not** move/delete/quarantine audio or alter saved crates and external
 DJ references. A changed hash invalidates the old exclusion; restoration uses
-current index evidence. Physical recoverable cleanup/reference repair remains
-an unimplemented release gate, not a disguised delete button.
+current index evidence. Physical recoverable cleanup and external DJ-reference
+repair remain release gates; the AutoCue-only match repair is not a disguised
+delete or quarantine action.
 
 The missing-song form reuses the existing 25-provider navigation registry.
 It preserves the requested artist/title/version in copyable search text and
@@ -574,7 +641,8 @@ native drag bridge or sample-pad player.
 ## Recovery and privacy
 
 Smart-rule saves, approvals, batch approvals, model configuration, conversation
-turns, inbox reviews, monitor settings, exclusions, feedback and observed-play entries use request receipts.
+turns, inbox reviews, monitor settings, exclusions, feedback, observed-play
+entries and AutoCue catalog-reference repairs use request receipts.
 The browser retains an exact pending durable request before sending, checks
 matching dataset/request receipts and offers retry/download/explicit discard.
 Discarding a browser retry does not undo a committed action.

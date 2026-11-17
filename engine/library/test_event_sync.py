@@ -149,6 +149,22 @@ class TestSchema(unittest.TestCase):
         self.assertIsNone(event.music_lists.must_play[0].artist)
         self.assertIsNone(event.music_lists.must_play[1].title)
         self.assertEqual(event.music_lists.must_play[1].artist, "Some Artist")
+
+    def test_parse_client_playlists_preserves_name_order_and_versions(self):
+        event = event_sync_schema.parse_event({
+            "inquiry_id": "evt-client-playlist",
+            "event_date": "2026-12-20",
+            "music_lists": {"client_playlists": [{
+                "id": "playlist-1", "title": "Client dinner picks",
+                "songs": [{"title": "First", "artist": "Singer"},
+                          {"title": "Second", "artist": "Singer", "version": "Clean"}],
+            }]},
+        })
+        playlist = event.music_lists.client_playlists[0]
+        self.assertEqual((playlist.id, playlist.title), ("playlist-1", "Client dinner picks"))
+        self.assertEqual([song.title for song in playlist.songs], ["First", "Second"])
+        self.assertEqual(playlist.songs[1].version, "Clean")
+        self.assertEqual(playlist.songs[1].metadata["client_playlist_position"], 1)
     
     def test_serialize_prep_status(self):
         """Test serializing prep status for API."""
@@ -248,6 +264,25 @@ class TestEventProcessing(unittest.TestCase):
         self.assertEqual(must_play[0].matched_track["id"], 1)
         self.assertEqual(must_play[1].status, "matched")
         self.assertEqual(must_play[1].matched_track["id"], 2)
+
+    def test_process_event_includes_client_playlist_songs_as_soft_requests_in_order(self):
+        event = event_sync_schema.parse_event({
+            "inquiry_id": "evt-client-playlist",
+            "event_date": "2026-12-15",
+            "music_lists": {"client_playlists": [{
+                "id": "playlist-1", "title": "Client dinner picks",
+                "songs": [{"title": "Uptown Funk", "artist": "Mark Ronson"},
+                          {"title": "Bad Romance", "artist": "Lady Gaga"}],
+            }]},
+        })
+        _, play_if_possible, _ = event_sync.process_event(
+            event, get_library_tracks(), MatchConfig()
+        )
+        self.assertEqual([result.matched_track["id"] for result in play_if_possible], [1, 4])
+        self.assertEqual(
+            [result.request["client_playlist_position"] for result in play_if_possible],
+            [0, 1],
+        )
     
     def test_process_event_do_not_play_exclusion(self):
         """Test that do-not-play tracks are excluded."""
@@ -367,6 +402,23 @@ class TestHTTPClient(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].inquiry_id, "evt_123")
         mock_get.assert_called_once()
+
+    @mock.patch("requests.get")
+    def test_fetch_events_reports_and_skips_malformed_request_payloads(self, mock_get):
+        response = mock.Mock()
+        response.json.return_value = {"events": [
+            {"inquiry_id": "good", "event_date": "2026-12-15",
+             "music_lists": {"must_play": [{"title": "Song", "artist": "Artist"}]}},
+            {"inquiry_id": "bad", "event_date": "2026-12-15",
+             "music_lists": {"must_play": {"title": "Silently dropped"}}},
+        ]}
+        response.raise_for_status = mock.Mock()
+        mock_get.return_value = response
+        with mock.patch("builtins.print") as warning:
+            events = event_sync.fetch_events("https://test.example.com", "test_token")
+        self.assertEqual([event.inquiry_id for event in events], ["good"])
+        warning.assert_called_once()
+        self.assertIn("music_lists.must_play must be an array", warning.call_args.args[0])
     
     @mock.patch("requests.post")
     def test_push_prep_status(self, mock_post):

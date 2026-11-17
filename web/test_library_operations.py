@@ -28,7 +28,7 @@ class LibraryOperationsTests(unittest.TestCase):
             }],
         }
         with self.db:
-            catalog.import_snapshot(self.db, snapshot)
+            self.snapshot_id = catalog.import_snapshot(self.db, snapshot)["snapshot_id"]
             self.db.execute(
                 "INSERT INTO library_roots(id,path,device,inode,scanned_at,error) "
                 "VALUES(?,?,?,?,?,?)",
@@ -82,6 +82,11 @@ class LibraryOperationsTests(unittest.TestCase):
         }
 
     def test_health_is_database_only_and_distinguishes_hashes_from_related_edits(self):
+        self.db.execute(
+            "INSERT INTO catalog_match_decisions VALUES(?,?,?,?,?,?,?)",
+            (self.snapshot_id, "song-1", 1, "file-1", "sha256-a", "Synthetic review", 100),
+        )
+        self.db.commit()
         with patch.object(catalog, "root_status", side_effect=AssertionError("filesystem probe")), \
                 patch.object(catalog, "file_status", side_effect=AssertionError("filesystem probe")), \
                 patch.object(Path, "stat", side_effect=AssertionError("filesystem probe")):
@@ -89,6 +94,11 @@ class LibraryOperationsTests(unittest.TestCase):
 
         self.assertEqual(result["basis"], "indexed_snapshot_only")
         self.assertFalse(result["fresh_validation_performed"])
+        self.assertEqual(result["reference_scope"], {
+            "autocue_catalog": "reviewed_match_decisions_only",
+            "external_dj_crates_and_playlists": "not_inspected",
+            "audit_available": True,
+        })
         self.assertEqual(result["counts"]["files"], 5)
         self.assertEqual(result["counts"]["available_at_last_scan"], 4)
         self.assertEqual(result["counts"]["missing_at_last_scan"], 1)
@@ -100,11 +110,29 @@ class LibraryOperationsTests(unittest.TestCase):
         self.assertEqual(exact["identity"], "sha256-a")
         self.assertEqual(set(exact["file_ids"]), {"file-1", "file-2"})
         self.assertIn("make any copy disposable", exact["description"])
+        file_one = next(item for item in exact["files"] if item["file_id"] == "file-1")
+        self.assertEqual(file_one["autocue_catalog_references"]["reviewed_song_links"], 1)
+        self.assertEqual(file_one["autocue_catalog_references"]["crate_memberships"], 1)
+        self.assertEqual(file_one["autocue_catalog_references"]["items"][0]["song_id"], "song-1")
+        file_two = next(item for item in exact["files"] if item["file_id"] == "file-2")
+        self.assertEqual(file_two["autocue_catalog_references"]["reviewed_song_links"], 0)
         related = result["related_edit_groups"][0]
         self.assertEqual(related["evidence"], "catalog_matcher_identity")
         self.assertEqual(set(related["file_ids"]), {"file-1", "file-2", "file-3"})
         self.assertIn("metadata-family", related["description"])
         self.assertEqual({row["file_id"] for row in related["files"]}, set(related["file_ids"]))
+
+    def test_reference_audit_reports_unavailable_when_optional_tables_are_missing(self):
+        self.db.execute("DROP TABLE catalog_match_decisions")
+        self.db.commit()
+
+        result = library_operations.health(self.db)
+
+        self.assertFalse(result["reference_scope"]["audit_available"])
+        self.assertEqual(
+            result["duplicate_groups"][0]["files"][0]["autocue_catalog_references"]["state"],
+            "unavailable",
+        )
 
     def test_health_uses_current_indexed_metadata_and_presents_stored_errors(self):
         self.db.execute("UPDATE library_files SET metadata_json=? WHERE id='file-2'",

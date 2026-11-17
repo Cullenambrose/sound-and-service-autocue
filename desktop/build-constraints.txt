@@ -1,0 +1,12 @@
+# Exact dependencies used by the verified Apple Silicon Python 3.10 build environment.
+# Update deliberately with a complete rebuild and regression run; not a rights clearance.
+numpy==2.2.6
+scipy==1.14.1
+mutagen==1.48.1
+pyinstaller==6.16.0
+pyinstaller-hooks-contrib==2026.10
+altgraph==0.17.5
+macholib==1.16.4
+packaging==26.3
+setuptools==69.5.1
+wheel==0.48.0

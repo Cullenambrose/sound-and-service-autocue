@@ -823,6 +823,29 @@ class SetlistEngineTests(unittest.TestCase):
         self.assertEqual(result[0].score, SetlistSettings().song_cue_weight)
         self.assertEqual(result[0].reasons.count("Song cue fits first dance"), 1)
 
+    def test_client_playlist_entries_become_soft_requests_with_source_order_metadata(self):
+        context = context_from_event({"music_lists": {"client_playlists": [{
+            "id": "playlist-1", "title": "Client dinner picks",
+            "songs": [
+                {"title": "First", "artist": "Singer"},
+                {"title": "Second", "artist": "Singer", "version": "Clean"},
+            ],
+        }]}})
+        self.assertEqual([(item.title, item.version) for item in context.play_if_possible],
+                         [("First", None), ("Second", "Clean")])
+        self.assertEqual(
+            [item.metadata["client_playlist_position"] for item in context.play_if_possible],
+            [0, 1],
+        )
+        self.assertTrue(all(item.metadata["client_playlist_title"] == "Client dinner picks"
+                            for item in context.play_if_possible))
+
+    def test_malformed_booking_music_lists_fail_instead_of_being_dropped(self):
+        with self.assertRaisesRegex(ValueError, "music_lists.must_play must be an array"):
+            context_from_event({"music_lists": {"must_play": {"title": "Lost request"}}})
+        with self.assertRaisesRegex(ValueError, "client_playlists\\[0\\] requires a title and songs array"):
+            context_from_event({"music_lists": {"client_playlists": [{"songs": []}]}})
+
     def test_special_moment_song_default_and_per_song_moments_are_preserved(self):
         context = context_from_event({"music_lists": {"special_moments": [{
             "moment": "First Dance",
@@ -990,6 +1013,33 @@ class SetlistEngineTests(unittest.TestCase):
         self.assertIn("Played-next transition memory", result[0].reasons)
         reversed_result = rank_next_song(context, list(reversed(library)), track("Now", "DJ"))
         self.assertEqual(identities(result), identities(reversed_result))
+
+    def test_curated_csv_playlist_evidence_is_high_weight_and_explainable(self):
+        source = song_identity("Now", "DJ")
+        favorite = song_identity("Favorite", "A")
+        other = song_identity("Other", "B")
+        context = SetlistContext(
+            curated_playlist_support={favorite: 3},
+            curated_playlist_next={source: {favorite: 2, other: 1}},
+        )
+        playing = track("Now", "DJ")
+        result = rank_next_song(context, [track("Other", "B"), track("Favorite", "A")], playing)
+        selected = result[0]
+        self.assertEqual(selected.song_identity, favorite)
+        self.assertIn("Included in DJ-curated CSV playlists", selected.reasons)
+        self.assertIn("DJ-curated CSV sequence precedent", selected.reasons)
+        terms = {term["factor"]: term for term in selected.score_terms}
+        self.assertEqual(terms["curated_playlist_presence"]["points"], 45.0)
+        self.assertEqual(terms["curated_playlist_presence"]["evidence"]["matching_playlists"], 3)
+        self.assertAlmostEqual(terms["curated_playlist_sequence"]["points"], 20.0)
+        self.assertAlmostEqual(sum(term["points"] for term in selected.score_terms), selected.score)
+
+        one_playlist = rank_next_song(
+            SetlistContext(curated_playlist_support={favorite: 1}),
+            [track("Favorite", "A"), track("Other", "B")],
+        )[0]
+        self.assertAlmostEqual(one_playlist.score, 33.75)
+        self.assertEqual(one_playlist.score_terms[0]["factor"], "curated_playlist_presence")
 
     def test_deterministic_ties_and_returned_file_version_metadata(self):
         versioned = [
