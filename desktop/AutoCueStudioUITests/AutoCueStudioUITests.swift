@@ -644,6 +644,10 @@ final class AutoCueStudioUITests: XCTestCase {
         let label = app.textFields["phase-label"]; reveal(label, in: app); replaceText(label, with: "Synthetic phase")
         let addPhase = app.buttons["phase-add"]; reveal(addPhase, in: app); addPhase.click()
         XCTAssertTrue(app.buttons["phase-remove-0"].exists)
+        let budget = app.textFields["phase-budget-0"]; reveal(budget, in: app); replaceText(budget, with: "8")
+        reveal(label, in: app); replaceText(label, with: "Second synthetic phase")
+        reveal(addPhase, in: app); addPhase.click()
+        let move = app.buttons["Move phase 2 up"]; reveal(move, in: app); move.click()
         app.buttons["sidebar-crates"].click(); app.buttons["sidebar-planning"].click()
         app.buttons["planner-advanced-toggle"].click()
         let event = app.textViews["planner-event-json"]; reveal(event, in: app)
@@ -654,7 +658,9 @@ final class AutoCueStudioUITests: XCTestCase {
         let policy = app.textViews["planner-policy-json"]; reveal(policy, in: app)
         let policyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data((policy.value as? String ?? "").utf8)) as? [String: Any])
         let phases = try XCTUnwrap(policyObject["phases"] as? [[String: Any]])
-        XCTAssertEqual(phases.first?["label"] as? String, "Synthetic phase")
+        XCTAssertEqual(phases.first?["label"] as? String, "Second synthetic phase")
+        XCTAssertEqual(phases.last?["label"] as? String, "Synthetic phase")
+        XCTAssertEqual((phases.last?["target_minutes"] as? NSNumber)?.doubleValue, 8)
     }
 
     @MainActor
@@ -695,6 +701,11 @@ final class AutoCueStudioUITests: XCTestCase {
         try scanAndGenerate(app, fixture: fixture); try approveFirstAlternative(app)
         XCTAssertTrue(app.staticTexts["native-saved-crate-name"].waitForExistence(timeout: 15))
         openCrateManager(app)
+        let fileStatus = app.staticTexts["gig-file-status"].firstMatch
+        reveal(fileStatus, in: app)
+        XCTAssertTrue((fileStatus.value as? String ?? fileStatus.label).contains("not checked"))
+        let eventReview = app.checkBoxes["gig-event-review"].firstMatch
+        reveal(eventReview, in: app); eventReview.click()
         let preview = app.buttons["native-export-preview"].firstMatch; reveal(preview, in: app); preview.click()
         let export = app.buttons["native-export-serato"].firstMatch; reveal(export, in: app); export.click()
         let exportSheet = app.sheets.buttons["Export"]
@@ -707,6 +718,11 @@ final class AutoCueStudioUITests: XCTestCase {
         XCTAssertNotNil(bytes.range(of: try XCTUnwrap(fixture.path.data(using: .utf16BigEndian))))
         let attributes = try FileManager.default.attributesOfItem(atPath: crate.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        reveal(eventReview, in: app)
+        let reviewValue = eventReview.value
+        XCTAssertEqual((reviewValue as? NSNumber)?.intValue ?? Int(reviewValue as? String ?? ""), 0, "Verifying again resets manual acknowledgements")
+        reveal(fileStatus, in: app)
+        XCTAssertTrue((fileStatus.value as? String ?? fileStatus.label).contains("last preview"))
         let message = app.staticTexts["native-export-message"].firstMatch
         XCTAssertTrue(message.waitForExistence(timeout: 10))
         XCTAssertTrue((message.value as? String ?? message.label).contains("_Serato_/Subcrates"))
@@ -721,6 +737,36 @@ final class AutoCueStudioUITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fixture), original)
         let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         shot.name = "native-serato-crate-export"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor
+    func testVisualFileConstraintsReachPlannerAndPreserveDraft() throws {
+        let (fixture, original) = try generatedFixture(title: "Visual Constraint Fixture")
+        let app = launchApp()
+        try scanAndGenerate(app, fixture: fixture)
+        let controls = app.buttons["planner-file-constraints"]; reveal(controls, in: app); controls.click()
+        let search = app.textFields["constraint-search"]; reveal(search, in: app); replaceText(search, with: "Visual Constraint Fixture")
+        app.buttons["constraint-find"].click()
+        let require = app.buttons["constraint-require"]; XCTAssertTrue(require.waitForExistence(timeout: 15)); reveal(require, in: app); require.click()
+        let pin = app.buttons["constraint-pin"]; reveal(pin, in: app); pin.click()
+        app.buttons["constraint-exclude"].click()
+        let conflict = app.staticTexts["constraint-message"]
+        XCTAssertTrue((conflict.value as? String ?? conflict.label).contains("required or pinned"))
+        app.buttons["sidebar-crates"].click(); app.buttons["sidebar-planning"].click()
+        let advanced = app.buttons["planner-advanced-toggle"]; reveal(advanced, in: app); advanced.click()
+        let editor = app.textViews["planner-policy-json"]; reveal(editor, in: app)
+        let policy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data((editor.value as? String ?? "").utf8)) as? [String: Any])
+        let required = try XCTUnwrap(policy["must_include"] as? [String])
+        let pins = try XCTUnwrap(policy["pinned"] as? [[String: Any]])
+        XCTAssertEqual(required.count, 1)
+        XCTAssertEqual(pins.first?["file_id"] as? String, required.first)
+        XCTAssertEqual(pins.first?["position"] as? Int, 0)
+        reveal(advanced, in: app); advanced.click()
+        let generate = app.buttons["planner-generate"]; reveal(generate, in: app); generate.click()
+        XCTAssertTrue(app.staticTexts["plan-alternative-0"].waitForExistence(timeout: 20))
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-visual-file-constraints"; shot.lifetime = .keepAlways; add(shot)
     }
 
 }

@@ -28,6 +28,10 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 5 && arguments[1] == "--policy" {
+    do { print(try NativePlannerDraft.update(arguments[2], fileID: arguments[3], action: arguments[4], position: Int(arguments[5])!)); exit(0) }
+    catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 2 && arguments[1] == "--filename" {
     print(NativeSeratoCrate.filename(for: arguments[2])); exit(0)
 }
@@ -206,6 +210,45 @@ do {
         portable = subprocess.check_output([str(self.binary), "--destination", "/tmp/Other/Dinner.crate"], text=True)
         self.assertTrue(portable.startswith("false\n"))
         self.assertIn("quit Serato, move this new file", portable)
+
+    def edit_policy(self, policy, file_id, action, position=1, accepted=True):
+        result = subprocess.run([str(self.binary), "--policy", json.dumps(policy), file_id, action, str(position)], capture_output=True, text=True)
+        self.assertEqual(result.returncode == 0, accepted, result.stdout)
+        return json.loads(result.stdout) if accepted else result.stdout
+
+    def test_visual_constraints_preserve_advanced_fields_and_pin_uses_zero_based_contract(self):
+        policy = {"target_minutes": 30, "tolerance_minutes": 3, "max_tracks": 20, "energy_target": .6,
+                  "phases": [{"phase": "dinner", "target_minutes": 30, "custom_evidence": "keep"}]}
+        required = self.edit_policy(policy, "exact-a", "require")
+        pinned = self.edit_policy(required, "exact-a", "pin", 3)
+        self.assertEqual(pinned["pinned"], [{"file_id": "exact-a", "position": 2}])
+        self.assertEqual(pinned["energy_target"], .6)
+        self.assertEqual(pinned["phases"], policy["phases"])
+        self.assertEqual(pinned["must_include"], ["exact-a"])
+
+    def test_visual_constraints_refuse_conflicting_actions(self):
+        required = self.edit_policy({"max_tracks": 20}, "a", "require")
+        self.edit_policy(required, "a", "exclude", accepted=False)
+        excluded = self.edit_policy({}, "a", "exclude")
+        self.edit_policy(excluded, "a", "require", accepted=False)
+        self.edit_policy(excluded, "a", "pin", accepted=False)
+        self.edit_policy({"phases": [{"must_include": ["a"]}]}, "a", "exclude", accepted=False)
+
+    def test_visual_pins_refuse_occupied_and_out_of_range_positions(self):
+        policy = self.edit_policy({"max_tracks": 2}, "a", "pin", 2)
+        self.edit_policy(policy, "b", "pin", 2, accepted=False)
+        self.edit_policy(policy, "a", "pin", 3, accepted=False)
+        moved = self.edit_policy(policy, "a", "pin", 1)
+        self.assertEqual(moved["pinned"], [{"file_id": "a", "position": 0}])
+
+    def test_clear_only_removes_selected_global_constraints(self):
+        policy = {"must_include": ["a", "b"], "exclude": ["c"], "pinned": [{"file_id": "a", "position": 0}], "phases": [{"must_include": ["b"]}]}
+        cleared = self.edit_policy(policy, "a", "clear")
+        self.assertEqual(cleared, {**policy, "must_include": ["b"], "pinned": []})
+
+    def test_visual_constraints_refuse_malformed_existing_arrays(self):
+        self.edit_policy({"must_include": "not a list"}, "a", "require", accepted=False)
+        self.edit_policy({"pinned": "not a list"}, "a", "pin", accepted=False)
 
 
 if __name__ == "__main__":

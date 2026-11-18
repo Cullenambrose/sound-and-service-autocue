@@ -2,6 +2,12 @@
 
 ## Resume on the next computer
 
+**Destination is the DJ laptop with a real working Serato library.** Use a separate macOS test account before any Serato acceptance work. Do not copy, merge, replace or export into that laptop's production `_Serato_` folder. Prior authorization to modify disposable test songs/library does not authorize changes to the real DJ library. Synthetic verification does not need that library or any song transfer.
+
+The local companion archive `/tmp/BOOTH-BUDDY-machine-transfer/BOOTH-BUDDY-test-audio.zip` contains three authorized disposable audio copies, a hash manifest and instructions. It is not in Git. Transfer it separately through a trusted channel before leaving this machine; temporary storage is not a durable backup. Size: 28,504,702 bytes. SHA-256: `893577b39776de48c79d63b67d8abdea923de4e6a47ef573f5b81b5365cbc803`. The archive's ZIP integrity and each member hash were checked. It contains no Serato database, crate file, app database or credentials. After extraction in the test account, scan only its dedicated test-audio folder into a fresh BOOTH BUDDY workspace and regenerate exports for the new paths.
+
+For testing on the destination account, use `verify_native.sh` first: it creates temporary databases and synthetic audio. A normal Xcode Run uses the default app workspace for that macOS account; do not use it in the production account for Serato acceptance. The Serato export panel can suggest `~/Music/_Serato_/Subcrates`; only use that destination inside the isolated test account. Save portable test exports to a separate staging folder otherwise. Keep real music outside all test roots.
+
 The development branch is `feat/prep-live-flow` in `Cullenambrose/sound-and-service-autocue`. Use a native Apple Silicon Mac with full Xcode selected, Node and native arm64 Python 3.10+. The current build constraints are a tested dependency set, not a reproducible-build lock or supported-platform matrix.
 
 From a fresh checkout of this branch:
@@ -24,6 +30,8 @@ Generated apps, DerivedData, virtual environments, runtime databases, credential
 For existing application data, use the app's explicit database backup/restore workflow and transfer the private backup separately through a trusted channel. Backups do not include audio, models, export artifacts or native recovery journals. Preserve original music locations or rescan and revalidate before export; absolute playlist/crate paths from the old computer are not automatically portable. The authorized Serato acceptance library and temporary fixture copies are not required for synthetic tests and are not included here.
 
 ## Current behavior and next work
+
+Latest checkpoint: `V1-PLANNING-MILESTONE-2026-11-17.md`. Native exact-file requirements/exclusions/pins, phase budget/reorder editing and the crate pre-gig panel are implemented. Current unit suite: 52 passing tests; Node: 100 passing tests. Three changed UI flows passed across the focused run and corrected export retry. Test/Release builds, static analysis and development preflight passed. The pre-gig panel separates backend file verification from manual DJ acknowledgements; it does not automatically certify event obligations or playback. Serato row-order/playback acceptance remains blocked by the control-service window error.
 
 Export to Serato saves a new verified `.crate`, preserves exact memberships, uses private atomic no-overwrite publication and blocks recognized Subcrates destinations while Serato is open. Suggested names preserve Unicode within byte limits. Existing audio, tags, cues and Serato database files are not edited by the product.
 

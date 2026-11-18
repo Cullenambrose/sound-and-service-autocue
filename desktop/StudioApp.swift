@@ -176,6 +176,48 @@ struct NativeExportCrate: Codable, Equatable {
     let revision: Int
 }
 
+enum NativePlannerDraft {
+    static func update(_ text: String, fileID: String, action: String, position: Int = 1) throws -> String {
+        guard let data = text.data(using: .utf8),
+              var policy = try JSONSerialization.jsonObject(with: data) as? [String: Any], !fileID.isEmpty,
+              let required = (policy["must_include"] ?? [String]()) as? [String],
+              let excluded = (policy["exclude"] ?? [String]()) as? [String],
+              let pins = (policy["pinned"] ?? [[String: Any]]()) as? [[String: Any]] else {
+            throw nativeWorkflowError("Correct the existing policy before editing exact-file constraints.")
+        }
+        var requiredFiles = required, excludedFiles = excluded, pinnedFiles = pins
+        switch action {
+        case "require", "pin":
+            guard !excluded.contains(fileID) else { throw nativeWorkflowError("This file is excluded. Clear its constraints before requiring or pinning it.") }
+            if action == "require" {
+                if !requiredFiles.contains(fileID) { requiredFiles.append(fileID) }
+                guard requiredFiles.count <= 60 else { throw nativeWorkflowError("A plan supports at most 60 required files.") }
+            } else {
+                let maximum = (policy["max_tracks"] as? NSNumber)?.intValue ?? 20
+                guard (1...60).contains(position), position <= maximum else { throw nativeWorkflowError("The pin position must fit the plan's maximum track count.") }
+                guard !pins.contains(where: { ($0["position"] as? Int) == position - 1 && ($0["file_id"] as? String) != fileID }) else {
+                    throw nativeWorkflowError("That position already has a different pinned file. Clear it before assigning another.")
+                }
+                pinnedFiles.removeAll { ($0["file_id"] as? String) == fileID }
+                pinnedFiles.append(["file_id": fileID, "position": position - 1])
+                guard pinnedFiles.count <= 60 else { throw nativeWorkflowError("A plan supports at most 60 pins.") }
+            }
+        case "exclude":
+            guard !required.contains(fileID), !pins.contains(where: { ($0["file_id"] as? String) == fileID }),
+                  !((policy["phases"] as? [[String: Any]]) ?? []).contains(where: { ($0["must_include"] as? [String] ?? []).contains(fileID) }) else {
+                throw nativeWorkflowError("This file is required or pinned. Remove that requirement before excluding it.")
+            }
+            if !excludedFiles.contains(fileID) { excludedFiles.append(fileID) }
+        case "clear":
+            requiredFiles.removeAll { $0 == fileID }; excludedFiles.removeAll { $0 == fileID }
+            pinnedFiles.removeAll { ($0["file_id"] as? String) == fileID }
+        default: throw nativeWorkflowError("Unknown exact-file draft action.")
+        }
+        policy["must_include"] = requiredFiles; policy["exclude"] = excludedFiles; policy["pinned"] = pinnedFiles
+        return String(decoding: try JSONSerialization.data(withJSONObject: policy, options: [.sortedKeys]), as: UTF8.self)
+    }
+}
+
 struct NativeExportEntry: Codable, Equatable {
     let position: Int
     let eligible: Bool
@@ -1708,11 +1750,12 @@ struct PlannerBuilderCard: View {
             .disabled(!validInputs || isPlanning)
             NativePlanningDetails(eventJSON: $eventJSON, policyJSON: $policyJSON)
                 .disabled(isPlanning)
+            NativeFileConstraints(controller: controller, policyJSON: $policyJSON).disabled(isPlanning)
             Button(showAdvanced ? "Hide advanced JSON" : "Advanced event and policy JSON") { showAdvanced.toggle() }
                 .accessibilityIdentifier("planner-advanced-toggle")
             if showAdvanced {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Edit advanced constraints, exact-file pins and exclusions. Unsupported fields are refused.")
+                    Text("Edit additional policy fields. Unsupported fields are refused; visual edits preserve unrelated fields.")
                         .font(.caption).foregroundStyle(.secondary)
                     PlannerJSONEditor(title: "Event data", text: $eventJSON)
                     PlannerJSONEditor(title: "Planner policy", text: $policyJSON)
@@ -3049,14 +3092,34 @@ struct NativeCrateExportView: View {
     @State private var busy = false
     @State private var message = ""
     @State private var errorMessage = ""
+    @State private var eventReviewed = false
+    @State private var playbackReviewed = false
+    @State private var checkedAt: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("Pre-gig checks").font(.headline)
+            Text("For \(name), revision \(revision). These checks apply to this crate; they do not certify an entire event or playback.")
+                .font(.caption).foregroundStyle(.secondary)
+            if controller.hasPendingNativeOperation {
+                Label("A saved change still needs reconciliation. Review recovery before relying on this crate.", systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange).accessibilityIdentifier("gig-recovery-warning")
+            }
+            Text(preview == nil ? "File availability: not checked for this view. Verify the current crate below." : (preview!.manifest.ready ? "File availability: verified at the last preview. Saving checks source bytes again." : "File availability: blocked. Resolve the listed memberships before exporting."))
+                .font(.caption).accessibilityIdentifier("gig-file-status")
+            if let checkedAt { Text("Last preview: \(checkedAt.formatted(date: .abbreviated, time: .shortened))").font(.caption2).foregroundStyle(.secondary) }
+            Toggle("I reviewed event must-plays, do-not-plays and unresolved requests against this crate", isOn: $eventReviewed)
+                .font(.caption).accessibilityIdentifier("gig-event-review")
+            Toggle("I checked drive availability, track order and playback in my DJ software", isOn: $playbackReviewed)
+                .font(.caption).accessibilityIdentifier("gig-playback-review")
+            Text("DJ review: \(eventReviewed && playbackReviewed ? "both items acknowledged for this view" : "still needed"). These acknowledgements are not an automated check and reset when you verify again or reopen the crate.")
+                .font(.caption2).foregroundStyle(.secondary).accessibilityIdentifier("gig-review-status")
             Button(busy ? "Verifying…" : "Preview verified export") {
-                preview = nil; busy = true; message = ""; errorMessage = ""
+                preview = nil; checkedAt = nil; eventReviewed = false; playbackReviewed = false
+                busy = true; message = ""; errorMessage = ""
                 Task {
                     defer { busy = false }
-                    do { preview = try await controller.previewNativeExport(crateId: crateId, revision: revision) }
+                    do { preview = try await controller.previewNativeExport(crateId: crateId, revision: revision); checkedAt = Date() }
                     catch { errorMessage = error.localizedDescription }
                 }
             }
@@ -3104,8 +3167,11 @@ struct NativeCrateExportView: View {
             if !message.isEmpty { Text(message).font(.caption).textSelection(.enabled).accessibilityIdentifier("native-export-message") }
             if !errorMessage.isEmpty { Text(errorMessage).font(.caption).foregroundStyle(.red).textSelection(.enabled).accessibilityIdentifier("native-export-error") }
         }
-        .onChange(of: crateId) { _ in preview = nil; message = ""; errorMessage = "" }
-        .onChange(of: revision) { _ in preview = nil; message = ""; errorMessage = "" }
+        .onChange(of: crateId) { _ in resetChecks() }
+        .onChange(of: revision) { _ in resetChecks() }
+    }
+    private func resetChecks() {
+        preview = nil; checkedAt = nil; eventReviewed = false; playbackReviewed = false; message = ""; errorMessage = ""
     }
 }
 
@@ -3643,6 +3709,90 @@ struct NativeWorkspaceRecoveryView: View {
     }
 }
 
+struct NativeFileConstraints: View {
+    let controller: BackendController
+    @Binding var policyJSON: String
+    @State private var expanded = false
+    @State private var query = ""
+    @State private var tracks: [CatalogTrack] = []
+    @State private var labels: [String: String] = [:]
+    @State private var selected = ""
+    @State private var position = 1
+    @State private var loading = false
+    @State private var message = ""
+    private var policy: [String: Any] { (try? JSONSerialization.jsonObject(with: Data(policyJSON.utf8))) as? [String: Any] ?? [:] }
+    private var constraints: [String] {
+        let pins = policy["pinned"] as? [[String: Any]] ?? []
+        return Set((policy["must_include"] as? [String] ?? []) + (policy["exclude"] as? [String] ?? []) + pins.compactMap { $0["file_id"] as? String }).sorted()
+    }
+    private func describe(_ id: String) -> String {
+        var values: [String] = []
+        if (policy["must_include"] as? [String] ?? []).contains(id) { values.append("Required") }
+        if (policy["exclude"] as? [String] ?? []).contains(id) { values.append("Excluded") }
+        for pin in policy["pinned"] as? [[String: Any]] ?? [] where pin["file_id"] as? String == id {
+            if let slot = pin["position"] as? Int { values.append("Pinned at \(slot + 1)") }
+        }
+        return values.joined(separator: " · ")
+    }
+    private func apply(_ action: String, id: String) {
+        do { policyJSON = try NativePlannerDraft.update(policyJSON, fileID: id, action: action, position: position); message = "" }
+        catch { message = error.localizedDescription }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(expanded ? "Hide exact-file constraints" : "Exact-file requirements, exclusions and pins") { expanded.toggle() }
+                .accessibilityIdentifier("planner-file-constraints")
+            if expanded {
+                Text("Choose an indexed file, then set its role in this draft. Pinned positions start at 1. Files still need to be present in your candidate search and pass backend validation.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("Find a file by title, artist or version", text: $query).textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("constraint-search")
+                    Button("Find files") {
+                        let submitted = query
+                        loading = true; message = ""; tracks = []; selected = ""
+                        Task {
+                            defer { loading = false }
+                            do {
+                                let result = try await controller.searchCatalog(query: submitted, cleanOnly: false)
+                                guard query == submitted else { return }
+                                tracks = result.tracks; selected = tracks.first?.id ?? ""
+                                for track in tracks { labels[track.id] = "\(track.title) — \(track.artist)" }
+                                message = result.total == 0 ? "No matching indexed files." : "\(result.tracks.count) of \(result.total) matching files shown. Narrow the search if needed."
+                            } catch { message = error.localizedDescription }
+                        }
+                    }.disabled(loading).accessibilityIdentifier("constraint-find")
+                }
+                if loading { ProgressView("Finding indexed files…") }
+                if !tracks.isEmpty {
+                    Picker("Exact file", selection: $selected) {
+                        ForEach(tracks) { track in Text("\(track.title) — \(track.artist) · \(track.path)").tag(track.id) }
+                    }.accessibilityIdentifier("constraint-file")
+                    HStack {
+                        Button("Require file") { apply("require", id: selected) }.accessibilityIdentifier("constraint-require")
+                        Button("Exclude file") { apply("exclude", id: selected) }.accessibilityIdentifier("constraint-exclude")
+                    }.disabled(selected.isEmpty)
+                    HStack {
+                        Stepper("Pin position: \(position)", value: $position, in: 1...60).accessibilityIdentifier("constraint-position")
+                        Button("Pin file") { apply("pin", id: selected) }.disabled(selected.isEmpty).accessibilityIdentifier("constraint-pin")
+                    }
+                }
+                ForEach(constraints, id: \.self) { id in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(labels[id] ?? "Exact file \(id)").font(.caption.weight(.semibold))
+                            Text(describe(id)).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Clear file constraints") { apply("clear", id: id) }.accessibilityIdentifier("constraint-clear-\(id)")
+                    }
+                }
+                if !message.isEmpty { Text(message).font(.caption).textSelection(.enabled).accessibilityIdentifier("constraint-message") }
+            }
+        }
+    }
+}
+
 struct NativePlanningDetails: View {
     @Binding var eventJSON: String
     @Binding var policyJSON: String
@@ -3745,10 +3895,17 @@ struct NativePlanningDetails: View {
                 if let phases {
                     ForEach(Array(phases.enumerated()), id: \.offset) { index, phase in
                         HStack {
-                            Text("\(index + 1). \(phase["label"] as? String ?? phase["phase"] as? String ?? "Phase") · \((phase["target_minutes"] as? NSNumber)?.stringValue ?? "unknown") minutes")
+                            Text("\(index + 1). \(phase["label"] as? String ?? phase["phase"] as? String ?? "Phase")")
                                 .font(.caption)
+                            TextField("Phase minutes", value: Binding(get: { (phase["target_minutes"] as? NSNumber)?.doubleValue ?? 0 }, set: { value in
+                                guard value.isFinite, value > 0 else { return }
+                                var values = phases; values[index]["target_minutes"] = value; updatePhases(values)
+                            }), format: .number).textFieldStyle(.roundedBorder).frame(maxWidth: 100).accessibilityIdentifier("phase-budget-\(index)")
                             Spacer()
-                            Button("Move phase up") { var values = phases; values.swapAt(index, index - 1); updatePhases(values) }.disabled(index == 0)
+                            Button { var values = phases; values.swapAt(index, index - 1); updatePhases(values) } label: { Image(systemName: "arrow.up") }
+                                .accessibilityLabel("Move phase \(index + 1) up").disabled(index == 0)
+                            Button { var values = phases; values.swapAt(index, index + 1); updatePhases(values) } label: { Image(systemName: "arrow.down") }
+                                .accessibilityLabel("Move phase \(index + 1) down").disabled(index + 1 == phases.count)
                             Button("Remove phase") { var values = phases; values.remove(at: index); updatePhases(values) }
                                 .accessibilityIdentifier("phase-remove-\(index)")
                         }
