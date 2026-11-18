@@ -218,6 +218,97 @@ enum NativePlannerDraft {
     }
 }
 
+struct NativeRequestImportRow: Codable, Identifiable, Equatable {
+    let sourceRow: Int
+    var title: String
+    var artist: String
+    var version: String
+    var category: String
+    var id: Int { sourceRow }
+}
+
+enum NativeRequestIntake {
+    static let categories = ["must_play", "do_not_play", "play_if_possible"]
+    static func parse(_ input: String, format: String, category: String) throws -> [NativeRequestImportRow] {
+        guard input.utf8.count <= 65536, categories.contains(category) else { throw nativeWorkflowError("Use at most 64 KiB of UTF-8 text and a supported request category.") }
+        let text = input.hasPrefix("\u{feff}") ? String(input.dropFirst()) : input
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        var rows: [NativeRequestImportRow] = []
+        if format == "lines" {
+            for (index, line) in normalized.components(separatedBy: "\n").enumerated() where !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                rows.append(NativeRequestImportRow(sourceRow: index + 1, title: line.trimmingCharacters(in: .whitespacesAndNewlines), artist: "", version: "", category: category))
+            }
+        } else {
+            guard format == "csv" || format == "tsv" else { throw nativeWorkflowError("Choose titles, CSV or TSV format.") }
+            let delimiter: Character = format == "csv" ? "," : "\t"
+            var table: [[String]] = [], fields: [String] = [], value = ""
+            var quoted = false, closed = false
+            let characters = Array(normalized)
+            var index = 0
+            while index < characters.count {
+                let character = characters[index]
+                if quoted {
+                    if character == "\"" {
+                        if index + 1 < characters.count, characters[index + 1] == "\"" { value.append("\""); index += 1 }
+                        else { quoted = false; closed = true }
+                    } else { value.append(character) }
+                } else if character == delimiter || character == "\n" {
+                    fields.append(value); value = ""; closed = false
+                    if character == "\n" { table.append(fields); fields = [] }
+                } else if character == "\"", value.isEmpty, !closed { quoted = true }
+                else {
+                    guard !closed, character != "\"" else { throw nativeWorkflowError("Malformed quoted field. Check quotes and separators before importing.") }
+                    value.append(character)
+                }
+                index += 1
+            }
+            guard !quoted else { throw nativeWorkflowError("A quoted field is not closed.") }
+            fields.append(value); table.append(fields)
+            guard let first = table.first else { throw nativeWorkflowError("The request list is empty.") }
+            let headers = first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            guard headers.contains("title"), Set(headers).count == headers.count,
+                  Set(headers).isSubset(of: ["title", "artist", "version", "category"]) else {
+                throw nativeWorkflowError("CSV/TSV needs a title header and optional artist, version and category headers. Unknown or duplicate columns are refused.")
+            }
+            for (offset, cells) in table.dropFirst().enumerated() {
+                if cells.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { continue }
+                guard cells.count == headers.count else { throw nativeWorkflowError("Row \(offset + 2) has a different number of fields from the header.") }
+                let record = Dictionary(uniqueKeysWithValues: zip(headers, cells))
+                rows.append(NativeRequestImportRow(sourceRow: offset + 2, title: record["title"] ?? "", artist: record["artist"] ?? "", version: record["version"] ?? "", category: record["category"].flatMap { $0.isEmpty ? nil : $0 } ?? category))
+            }
+        }
+        try validate(rows)
+        return rows
+    }
+
+    static func validate(_ rows: [NativeRequestImportRow]) throws {
+        guard !rows.isEmpty, rows.count <= 200 else { throw nativeWorkflowError("Review between 1 and 200 requests per import.") }
+        for row in rows {
+            guard !row.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, categories.contains(row.category),
+                  [row.title, row.artist, row.version].allSatisfy({ $0.utf8.count <= 1024 && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t" }) }) else {
+                throw nativeWorkflowError("Row \(row.sourceRow) needs a title, a supported category and fields of at most 1 KiB without control characters.")
+            }
+        }
+    }
+
+    static func append(_ rows: [NativeRequestImportRow], to eventText: String) throws -> String {
+        try validate(rows)
+        guard var event = try JSONSerialization.jsonObject(with: Data(eventText.utf8)) as? [String: Any],
+              var lists = (event["music_lists"] ?? [String: Any]()) as? [String: Any] else { throw nativeWorkflowError("Correct the existing event JSON before adding requests.") }
+        for category in categories {
+            guard var existing = (lists[category] ?? [[String: Any]]()) as? [[String: Any]] else { throw nativeWorkflowError("Correct the existing \(category) list before adding requests.") }
+            for row in rows where row.category == category {
+                var request = ["title": row.title.trimmingCharacters(in: .whitespacesAndNewlines), "artist": row.artist.trimmingCharacters(in: .whitespacesAndNewlines)]
+                if !row.version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { request["version"] = row.version.trimmingCharacters(in: .whitespacesAndNewlines) }
+                existing.append(request)
+            }
+            lists[category] = existing
+        }
+        event["music_lists"] = lists
+        return String(decoding: try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]), as: UTF8.self)
+    }
+}
+
 struct NativeExportEntry: Codable, Equatable {
     let position: Int
     let eligible: Bool
@@ -1748,6 +1839,7 @@ struct PlannerBuilderCard: View {
                 return json["clean_only"] as? Bool ?? false
             }, set: { setPolicy("clean_only", value: $0) }))
             .disabled(!validInputs || isPlanning)
+            NativeRequestIntakeView(eventJSON: $eventJSON).disabled(isPlanning)
             NativePlanningDetails(eventJSON: $eventJSON, policyJSON: $policyJSON)
                 .disabled(isPlanning)
             NativeFileConstraints(controller: controller, policyJSON: $policyJSON).disabled(isPlanning)
@@ -3706,6 +3798,99 @@ struct NativeWorkspaceRecoveryView: View {
             if !message.isEmpty { Text(message).font(.caption).textSelection(.enabled).accessibilityIdentifier("native-backup-message") }
         }
         .padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct NativeRequestIntakeView: View {
+    @Binding var eventJSON: String
+    @State private var expanded = false
+    @State private var source = ""
+    @State private var format = "lines"
+    @State private var category = "must_play"
+    @State private var rows: [NativeRequestImportRow] = []
+    @State private var message = ""
+
+    private func invalidate() { rows = []; message = "" }
+    private func chooseFile() {
+        guard let window = NSApp.keyWindow else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.plainText, .commaSeparatedText]
+        panel.prompt = "Review request file"
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                let data = try handle.read(upToCount: 65537) ?? Data()
+                guard data.count <= 65536, let text = String(data: data, encoding: .utf8) else { throw nativeWorkflowError("Choose a UTF-8 request file no larger than 64 KiB.") }
+                source = text; rows = []; message = ""
+            } catch { rows = []; message = error.localizedDescription }
+        }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(expanded ? "Hide client-request intake" : "Import client requests") { expanded.toggle() }
+                .accessibilityIdentifier("request-intake-toggle")
+            if expanded {
+                Text("Paste titles, or choose a UTF-8 CSV/TSV file. Preview and review before adding to this event draft. No library or saved crate is changed.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Input format", selection: $format) {
+                    Text("One title per line").tag("lines"); Text("CSV with headers").tag("csv"); Text("TSV with headers").tag("tsv")
+                }.accessibilityIdentifier("request-intake-format")
+                Picker("Default category", selection: $category) {
+                    Text("Must play").tag("must_play"); Text("Do not play").tag("do_not_play"); Text("Play if possible").tag("play_if_possible")
+                }.accessibilityIdentifier("request-intake-category")
+                Text("CSV/TSV columns: title, artist, version, category. Only title is required. Category values: must_play, do_not_play, play_if_possible. Unknown columns are refused. Artist/title splits are never guessed.")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $source).font(.system(.body, design: .monospaced)).frame(height: 110)
+                    .accessibilityLabel("Client request source text").accessibilityIdentifier("request-intake-source")
+                HStack {
+                    Button("Choose request file…", action: chooseFile)
+                    Button("Preview requests") {
+                        rows = []; message = ""
+                        do { rows = try NativeRequestIntake.parse(source, format: format, category: category) }
+                        catch { message = error.localizedDescription }
+                    }.disabled(source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("request-intake-preview")
+                }
+                if !rows.isEmpty {
+                    Text("\(rows.count) requests to review").font(.headline).accessibilityIdentifier("request-intake-count")
+                    Text("Edit missing artists and exact versions, and check categories. Repeated requests retain their order. These rows are not matched or resolved; Generate alternatives uses the existing planner resolver and reports conflicts or missing requirements.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach($rows) { $row in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Source record \(row.sourceRow)").font(.caption2).foregroundStyle(.secondary)
+                            TextField("Request title", text: $row.title).accessibilityIdentifier("intake-title-\(row.sourceRow)")
+                            HStack {
+                                TextField("Artist (review if blank)", text: $row.artist).accessibilityIdentifier("intake-artist-\(row.sourceRow)")
+                                TextField("Exact version (optional)", text: $row.version).accessibilityIdentifier("intake-version-\(row.sourceRow)")
+                            }
+                            HStack {
+                                Picker("Category", selection: $row.category) {
+                                    Text("Must play").tag("must_play"); Text("Do not play").tag("do_not_play"); Text("Play if possible").tag("play_if_possible")
+                                }
+                                Button("Remove request") { let sourceRow = row.sourceRow; rows.removeAll { $0.sourceRow == sourceRow } }
+                                    .accessibilityIdentifier("intake-remove-\(row.sourceRow)")
+                            }
+                        }.textFieldStyle(.roundedBorder)
+                    }
+                    HStack {
+                        Button("Add reviewed requests to event draft") {
+                            do {
+                                let count = rows.count
+                                eventJSON = try NativeRequestIntake.append(rows, to: eventJSON)
+                                rows = []; message = "Added \(count) reviewed requests to the event draft. Generate alternatives to check matches and conflicts. Nothing was saved to a crate."
+                            } catch { message = error.localizedDescription }
+                        }.accessibilityIdentifier("request-intake-apply")
+                        Button("Discard import preview") { invalidate() }.accessibilityIdentifier("request-intake-discard")
+                    }
+                }
+                if !message.isEmpty { Text(message).font(.caption).textSelection(.enabled).accessibilityIdentifier("request-intake-message") }
+            }
+        }
+        .onChange(of: source) { _ in invalidate() }
+        .onChange(of: format) { _ in invalidate() }
+        .onChange(of: category) { _ in invalidate() }
     }
 }
 

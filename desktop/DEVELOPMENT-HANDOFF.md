@@ -31,6 +31,8 @@ For existing application data, use the app's explicit database backup/restore wo
 
 ## Current behavior and next work
 
+Newer intake checkpoint: `CLIENT-REQUEST-VERIFICATION-2026-11-17.md` and `CLIENT-REQUEST-INTAKE.md`. Native title/CSV/TSV request intake now supports editable previews and explicit append/discard while preserving event context. The existing planner resolves the added requests; the importer does not infer matches. Current unit suite: 61 passed; Node: 100 passed; selected native UI tests: 3 passed. Test/Release builds, analysis and development preflight passed. Full native-suite and destination-machine acceptance must still be rerun before release claims.
+
 Latest checkpoint: `V1-PLANNING-MILESTONE-2026-11-17.md`. Native exact-file requirements/exclusions/pins, phase budget/reorder editing and the crate pre-gig panel are implemented. Current unit suite: 52 passing tests; Node: 100 passing tests. Three changed UI flows passed across the focused run and corrected export retry. Test/Release builds, static analysis and development preflight passed. The pre-gig panel separates backend file verification from manual DJ acknowledgements; it does not automatically certify event obligations or playback. Serato row-order/playback acceptance remains blocked by the control-service window error.
 
 Export to Serato saves a new verified `.crate`, preserves exact memberships, uses private atomic no-overwrite publication and blocks recognized Subcrates destinations while Serato is open. Suggested names preserve Unicode within byte limits. Existing audio, tags, cues and Serato database files are not edited by the product.

@@ -740,6 +740,70 @@ final class AutoCueStudioUITests: XCTestCase {
     }
 
     @MainActor
+    func testRequestIntakeReviewsBeforeAppendAndReachesPlanner() throws {
+        let (fixture, original) = try generatedFixture(title: "Imported Request Fixture")
+        let app = launchApp()
+        try scanAndGenerate(app, fixture: fixture)
+        let intake = app.buttons["request-intake-toggle"]; reveal(intake, in: app); intake.click()
+        let source = app.textViews["request-intake-source"]; reveal(source, in: app)
+        replaceText(source, with: "Discard this draft")
+        let preview = app.buttons["request-intake-preview"]; reveal(preview, in: app); preview.click()
+        let discard = app.buttons["request-intake-discard"]; reveal(discard, in: app); discard.click()
+        XCTAssertFalse(app.buttons["request-intake-apply"].exists)
+        reveal(source, in: app); replaceText(source, with: "Imported Request Fixture")
+        reveal(preview, in: app); preview.click()
+        let artist = app.textFields["intake-artist-1"]; reveal(artist, in: app); replaceText(artist, with: "Invented Native Artist")
+        let apply = app.buttons["request-intake-apply"]; reveal(apply, in: app); apply.click()
+        let message = app.staticTexts["request-intake-message"]
+        XCTAssertTrue((message.value as? String ?? message.label).contains("Added 1 reviewed requests"))
+        app.buttons["sidebar-crates"].click(); app.buttons["sidebar-planning"].click()
+        let advanced = app.buttons["planner-advanced-toggle"]; reveal(advanced, in: app); advanced.click()
+        let event = app.textViews["planner-event-json"]; reveal(event, in: app)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data((event.value as? String ?? "").utf8)) as? [String: Any])
+        let lists = try XCTUnwrap(object["music_lists"] as? [String: Any])
+        let requests = try XCTUnwrap(lists["must_play"] as? [[String: Any]])
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?["title"] as? String, "Imported Request Fixture")
+        XCTAssertEqual(requests.first?["artist"] as? String, "Invented Native Artist")
+        reveal(advanced, in: app); advanced.click()
+        let generate = app.buttons["planner-generate"]; reveal(generate, in: app); generate.click()
+        XCTAssertTrue(app.staticTexts["plan-alternative-0"].waitForExistence(timeout: 20))
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-request-intake-plan"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor
+    func testRequestCSVPreviewRejectsUnknownColumnsAndPreservesCategories() throws {
+        let app = launchApp()
+        app.buttons["sidebar-planning"].click()
+        let intake = app.buttons["request-intake-toggle"]; reveal(intake, in: app); intake.click()
+        let format = app.popUpButtons["request-intake-format"]; reveal(format, in: app); format.click()
+        app.menuItems["CSV with headers"].click()
+        let source = app.textViews["request-intake-source"]; reveal(source, in: app)
+        replaceText(source, with: "title,unrecognized\nNo,silent discard")
+        let preview = app.buttons["request-intake-preview"]; reveal(preview, in: app); preview.click()
+        let error = app.staticTexts["request-intake-message"]
+        XCTAssertTrue((error.value as? String ?? error.label).contains("Unknown or duplicate columns"))
+        XCTAssertFalse(app.buttons["request-intake-apply"].exists)
+        reveal(source, in: app)
+        replaceText(source, with: "title,artist,version,category\nRequired,Synthetic,Radio,must_play\nExcluded,Synthetic,,do_not_play\nOptional,Synthetic,Live,play_if_possible")
+        reveal(preview, in: app); preview.click()
+        let count = app.staticTexts["request-intake-count"]
+        XCTAssertTrue((count.value as? String ?? count.label).contains("3 requests"))
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-request-intake-review"; shot.lifetime = .keepAlways; add(shot)
+        let apply = app.buttons["request-intake-apply"]; reveal(apply, in: app); apply.click()
+        let advanced = app.buttons["planner-advanced-toggle"]; reveal(advanced, in: app); advanced.click()
+        let event = app.textViews["planner-event-json"]; reveal(event, in: app)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data((event.value as? String ?? "").utf8)) as? [String: Any])
+        let lists = try XCTUnwrap(object["music_lists"] as? [String: Any])
+        XCTAssertEqual((lists["must_play"] as? [[String: Any]])?.first?["version"] as? String, "Radio")
+        XCTAssertEqual((lists["do_not_play"] as? [[String: Any]])?.first?["title"] as? String, "Excluded")
+        XCTAssertEqual((lists["play_if_possible"] as? [[String: Any]])?.first?["version"] as? String, "Live")
+    }
+
+    @MainActor
     func testVisualFileConstraintsReachPlannerAndPreserveDraft() throws {
         let (fixture, original) = try generatedFixture(title: "Visual Constraint Fixture")
         let app = launchApp()

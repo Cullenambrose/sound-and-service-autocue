@@ -28,6 +28,19 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 4 && arguments[1] == "--intake" {
+    do {
+        let input = try JSONDecoder().decode(String.self, from: Data(arguments[2].utf8))
+        FileHandle.standardOutput.write(try JSONEncoder().encode(NativeRequestIntake.parse(input, format: arguments[3], category: arguments[4]))); exit(0)
+    }
+    catch { print(error.localizedDescription); exit(1) }
+}
+if arguments.count > 3 && arguments[1] == "--append-requests" {
+    do {
+        let rows = try JSONDecoder().decode([NativeRequestImportRow].self, from: Data(arguments[3].utf8))
+        print(try NativeRequestIntake.append(rows, to: arguments[2])); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 5 && arguments[1] == "--policy" {
     do { print(try NativePlannerDraft.update(arguments[2], fileID: arguments[3], action: arguments[4], position: Int(arguments[5])!)); exit(0) }
     catch { print(error.localizedDescription); exit(1) }
@@ -249,6 +262,71 @@ do {
     def test_visual_constraints_refuse_malformed_existing_arrays(self):
         self.edit_policy({"must_include": "not a list"}, "a", "require", accepted=False)
         self.edit_policy({"pinned": "not a list"}, "a", "pin", accepted=False)
+
+    def intake(self, text, format="csv", category="must_play", accepted=True):
+        result = subprocess.run([str(self.binary), "--intake", json.dumps(text), format, category], capture_output=True, text=True)
+        self.assertEqual(result.returncode == 0, accepted, result.stdout)
+        return json.loads(result.stdout) if accepted else result.stdout
+
+    def append_requests(self, event, rows, accepted=True):
+        result = subprocess.run([str(self.binary), "--append-requests", json.dumps(event), json.dumps(rows)], capture_output=True, text=True)
+        self.assertEqual(result.returncode == 0, accepted, result.stdout)
+        return json.loads(result.stdout) if accepted else result.stdout
+
+    def test_intake_csv_matches_independent_parser_with_unicode_quotes_and_multiline_fields(self):
+        text = 'title,artist,version,category\r\n"Café, first","The ""Quoted"" Artist","Live\r\nedit",must_play\r\nSecond,Other,,do_not_play\r\n'
+        rows = self.intake(text)
+        reference = list(csv.DictReader(io.StringIO(text.replace("\r\n", "\n"))))
+        self.assertEqual([{key: row[key] for key in reference[0]} for row in rows], reference)
+
+    def test_intake_title_lines_do_not_guess_artist_or_drop_repeats(self):
+        rows = self.intake("Artist - Title\n\nArtist - Title\n", "lines", "play_if_possible")
+        self.assertEqual([row["title"] for row in rows], ["Artist - Title"] * 2)
+        self.assertTrue(all(row["artist"] == "" and row["category"] == "play_if_possible" for row in rows))
+
+    def test_intake_tsv_and_utf8_bom(self):
+        rows = self.intake('\ufefftitle\tartist\nUnicode 🎧\tSynthetic\n', "tsv")
+        self.assertEqual(rows[0]["title"], "Unicode 🎧")
+        self.assertEqual(rows[0]["artist"], "Synthetic")
+
+    def test_intake_rejects_unknown_duplicate_and_missing_title_headers(self):
+        for text in ["title,notes\na,private", "title,title\na,b", "artist\na"]:
+            self.intake(text, accepted=False)
+
+    def test_intake_rejects_malformed_quoting_and_row_width(self):
+        for text in ['title\n"open', 'title\n"closed"suffix', 'title\nstray"quote', 'title,artist\na,b,c']:
+            self.intake(text, accepted=False)
+
+    def test_intake_rejects_unknown_category_and_blank_title(self):
+        for text in ["title,category\na,mustplay", "title,artist\n,artist"]:
+            self.intake(text, accepted=False)
+
+    def test_intake_bounds_and_control_characters(self):
+        self.intake("a" * 65537, "lines", accepted=False)
+        self.intake("\n".join(["a"] * 201), "lines", accepted=False)
+        self.intake("a" * 1025, "lines", accepted=False)
+        self.intake("bad\x00title", "lines", accepted=False)
+        self.intake("\n\n", "lines", accepted=False)
+
+    def test_intake_append_preserves_existing_event_metadata_categories_and_repeats(self):
+        event = {"event_name": "Synthetic event", "custom": {"keep": True}, "music_lists": {
+            "must_play": [{"title": "Existing", "artist": "Original", "metadata": {"keep": True}}],
+            "special_moments": [{"moment": "first_dance", "title": "Keep"}], "client_playlists": [{"title": "Keep list"}]}}
+        rows = self.intake("title,artist,version,category\nNew,Artist,Radio,must_play\nNew,Artist,Radio,must_play\nNo,Artist,,do_not_play")
+        result = self.append_requests(event, rows)
+        self.assertEqual(result["custom"], event["custom"])
+        self.assertEqual(result["music_lists"]["special_moments"], event["music_lists"]["special_moments"])
+        self.assertEqual(result["music_lists"]["client_playlists"], event["music_lists"]["client_playlists"])
+        self.assertEqual(result["music_lists"]["must_play"][0], event["music_lists"]["must_play"][0])
+        self.assertEqual(result["music_lists"]["must_play"][1:], [{"title": "New", "artist": "Artist", "version": "Radio"}] * 2)
+        self.assertEqual(result["music_lists"]["do_not_play"], [{"title": "No", "artist": "Artist"}])
+
+    def test_intake_append_refuses_malformed_existing_lists_and_edited_rows(self):
+        rows = self.intake("Valid", "lines")
+        self.append_requests({"music_lists": {"do_not_play": "invalid"}}, rows, accepted=False)
+        self.append_requests({"music_lists": []}, rows, accepted=False)
+        rows[0]["title"] = ""
+        self.append_requests({}, rows, accepted=False)
 
 
 if __name__ == "__main__":
