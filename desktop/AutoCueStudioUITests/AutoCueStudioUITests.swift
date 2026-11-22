@@ -137,6 +137,9 @@ final class AutoCueStudioUITests: XCTestCase {
     @MainActor
     private func replaceText(_ element: XCUIElement, with text: String) {
         XCTAssertTrue(element.waitForExistence(timeout: 5))
+        application?.activate()
+        // On macOS the first click can activate a window without focusing its field.
+        element.click()
         element.click()
         element.typeKey("a", modifierFlags: .command)
         element.typeText(text)
@@ -323,7 +326,14 @@ final class AutoCueStudioUITests: XCTestCase {
 
     @MainActor
     private func scanAndGenerate(_ app: XCUIApplication, fixture: URL, targetMinutes: String = "1") throws {
-        replaceText(app.textFields["library-folder-path"], with: fixture.deletingLastPathComponent().path)
+        let path = fixture.deletingLastPathComponent().path
+        let field = app.textFields["library-folder-path"]
+        replaceText(field, with: path)
+        // Native synthesized typing can reorder keystrokes under host load.
+        // Never submit a scan until the exact disposable path is visible.
+        if field.value as? String != path { replaceText(field, with: path) }
+        XCTAssertEqual(field.value as? String, path)
+        guard field.value as? String == path else { throw NSError(domain: "SyntheticUITest", code: 1, userInfo: [NSLocalizedDescriptionKey: "The test driver did not enter the exact fixture path."]) }
         app.buttons["library-start-scan"].click()
         XCTAssertTrue(app.staticTexts["scan-status-completed"].waitForExistence(timeout: 30))
         app.buttons["sidebar-planning"].click()
@@ -737,6 +747,56 @@ final class AutoCueStudioUITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fixture), original)
         let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         shot.name = "native-serato-crate-export"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor
+    func testNativeTransitionEvidenceAndVerifiedAuditionLifecycle() throws {
+        let (fixture, original) = try generatedFixture(title: "Audition First")
+        _ = try generatedFixture(title: "Audition Second")
+        let app = launchApp()
+        try scanAndGenerate(app, fixture: fixture, targetMinutes: "2")
+        let review = app.buttons["transition-review-0"]; reveal(review, in: app); review.click()
+        let timing = app.staticTexts["transition-status-0"]
+        XCTAssertTrue((timing.value as? String ?? timing.label).contains("incomplete"))
+        let listen = app.buttons["audition-play-0-0"]; reveal(listen, in: app); listen.click()
+        let pause = app.buttons["audition-pause-0"]
+        let playing = NSPredicate(format: "label == %@", "Pause audition")
+        expectation(for: playing, evaluatedWith: pause); waitForExpectations(timeout: 20)
+        reveal(pause, in: app); pause.click()
+        XCTAssertEqual(pause.label, "Resume audition")
+        pause.click()
+        XCTAssertEqual(pause.label, "Pause audition")
+        XCTAssertTrue((timing.value as? String ?? timing.label).contains("incomplete"), "Listening must not promote timing evidence")
+        let otherReview = app.buttons["transition-review-1"]; reveal(otherReview, in: app); otherReview.click()
+        let otherListen = app.buttons["audition-play-1-0"]; reveal(otherListen, in: app); otherListen.click()
+        let otherPause = app.buttons["audition-pause-1"]
+        expectation(for: playing, evaluatedWith: otherPause); waitForExpectations(timeout: 20)
+        XCTAssertFalse(pause.exists, "Only the alternative that started playback owns the player controls")
+        reveal(review, in: app); review.click()
+        reveal(otherPause, in: app)
+        XCTAssertEqual(otherPause.label, "Pause audition", "Closing a different review must not interrupt the active alternative")
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-transition-audition"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["sidebar-library"].click(); app.buttons["sidebar-planning"].click()
+        let reopened = app.buttons["transition-review-0"]; reveal(reopened, in: app); reopened.click()
+        XCTAssertFalse(app.buttons["audition-stop-0"].exists, "Leaving the planner stops playback")
+        XCTAssertFalse(app.buttons["audition-stop-1"].exists)
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
+    func testNativeAuditionRefusesChangedSourceBytes() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp()
+        try scanAndGenerate(app, fixture: fixture)
+        var changed = original; changed.append(1); try changed.write(to: fixture)
+        let review = app.buttons["transition-review-0"]; reveal(review, in: app); review.click()
+        let listen = app.buttons["audition-play-0-0"]; reveal(listen, in: app); listen.click()
+        let status = app.staticTexts["audition-status-0"]
+        let rejected = NSPredicate(format: "value CONTAINS[c] %@ OR label CONTAINS[c] %@", "changed", "changed")
+        expectation(for: rejected, evaluatedWith: status); waitForExpectations(timeout: 20)
+        XCTAssertFalse(app.buttons["audition-pause-0"].isEnabled)
+        XCTAssertEqual(try Data(contentsOf: fixture), changed, "Refusal must not repair or rewrite the source")
     }
 
     @MainActor

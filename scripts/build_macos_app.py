@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import PackageNotFoundError, distribution
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -258,10 +259,12 @@ def build_backend(contents, *, exclude_macos=False):
                      for part in ("--add-data", f"{web / name}:web")],
                    "--add-data", f"{config}:autocue_config",
                    str(ROOT / "desktop/backend.py")]
-        result = subprocess.run(command, cwd=work_root, stdout=subprocess.PIPE,
+        environment = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(work_root / "cache"))
+        result = subprocess.run(command, cwd=work_root, env=environment, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
         if result.returncode:
-            print("PyInstaller failed; rerun the build command directly for diagnostics.", file=sys.stderr)
+            print(result.stdout, file=sys.stderr)
+            print("PyInstaller failed; captured diagnostics are shown above.", file=sys.stderr)
             raise SystemExit(result.returncode)
         shutil.move(str(dist / "studio-backend"), str(backend))
     release_inventory(contents, exclude_macos=exclude_macos)

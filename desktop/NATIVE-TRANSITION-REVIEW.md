@@ -1,0 +1,13 @@
+# Native transition evidence and listening
+
+In a generated planner alternative, select **Review transitions and listen**. The native view shows the backend's transition status, full-file runtime, available reviewed-window estimate, unresolved evidence, tagged BPM/key values, explicit overlap, warnings and assumptions. Unknown metadata and missing windows/overlaps remain visible. The native client does not recompute rankings, infer overlaps or promote a transition to safe.
+
+**Listen to file** verifies the exact indexed file selected in the plan, then starts a single-track AVAudioPlayer audition at half volume. Use Pause/Resume, the position slider and Stop. One player is shared by the planner; the alternative that starts playback owns its controls. Starting another file stops the previous audition. Closing the active review, changing planner inputs or leaving the planner stops playback and cancels pending loading. Closing an unrelated alternative does not stop the active one.
+
+Audio uses the existing same-origin loopback audition endpoint. The client probes one byte, verifies the expected plan hash and declared size, requests the complete range, checks ETag/range/count and independently hashes the received bytes with SHA-256. Changed index evidence, stale hashes, partial transfers and oversized responses fail before playback. A serial URLSession delegate bounds the in-memory buffer, with synchronized task/continuation cancellation. Ephemeral sessions have no URL cache or cookie storage. No app audio-cache file, source-media write, upload or new backend endpoint is introduced.
+
+Native audition accepts files up to **64 MiB** that macOS can decode. This is an encoded-input limit, not a guarantee about total decoder memory or codec support. Missing/disconnected/changed sources require rescanning and regenerating the plan where appropriate. Audio output or codec failures remain visible. The app does not change system output-device settings.
+
+This is individual-file listening, not synchronized pair playback, a crossfade renderer or a measured DJ mix. Listening does not mark cue windows reviewed, clear backend warnings, write history or prove vocal/phrase/grid compatibility. The current native planner still submits empty playback windows/overlaps and uses full-file constraints; native editing of reviewed windows and explicit overlaps is a later slice. The browser's existing overlap-audition workflow is not silently substituted.
+
+Testing must use generated silent WAV fixtures or explicitly authorized disposable music in the isolated test account. The DJ laptop's real Serato library remains outside scope. See `DEVELOPMENT-HANDOFF.md` for transfer boundaries.

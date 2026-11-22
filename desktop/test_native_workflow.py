@@ -5,6 +5,8 @@ Extract its production models/verifier into a temporary CLI; do not duplicate th
 verification logic or require an app session to test malformed archives.
 """
 import csv
+import base64
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -28,6 +30,15 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 2 && arguments[1] == "--audition" {
+    do {
+        let spec = try JSONSerialization.jsonObject(with: Data(arguments[2].utf8)) as! [String: Any]
+        let hash = spec["hash"] as! String
+        let size = try NativeAuditionVerification.size(status: spec["probeStatus"] as! Int, etag: spec["probeTag"] as? String, range: spec["probeRange"] as? String, expectedHash: hash)
+        try NativeAuditionVerification.verify(Data(base64Encoded: spec["data"] as! String)!, size: size, status: spec["status"] as! Int, etag: spec["tag"] as? String, range: spec["range"] as? String, expectedHash: hash)
+        print("verified audio"); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 4 && arguments[1] == "--intake" {
     do {
         let input = try JSONDecoder().decode(String.self, from: Data(arguments[2].utf8))
@@ -66,7 +77,7 @@ do {
 } catch { print(error.localizedDescription); exit(1) }
 '''
         swift = cls.root / "main.swift"
-        swift.write_text("import Foundation\n" + models + verifier + harness)
+        swift.write_text("import Foundation\nimport CryptoKit\n" + models + verifier + harness)
         cls.binary = cls.root / "verify"
         built = subprocess.run(["xcrun", "swiftc", "-module-cache-path", str(cls.root / "modules"),
                                 str(swift), "-o", str(cls.binary)], capture_output=True, text=True, timeout=120)
@@ -327,6 +338,30 @@ do {
         self.append_requests({"music_lists": []}, rows, accepted=False)
         rows[0]["title"] = ""
         self.append_requests({}, rows, accepted=False)
+
+    def audition_spec(self, **changes):
+        data = b"Synthetic verified audition bytes"
+        digest = hashlib.sha256(data).hexdigest()
+        return {"hash": digest, "probeStatus": 206, "probeTag": f'"{digest}"', "probeRange": f"bytes 0-0/{len(data)}",
+                "data": base64.b64encode(data).decode(), "status": 206, "tag": f'"{digest}"', "range": f"bytes 0-{len(data)-1}/{len(data)}", **changes}
+
+    def check_audition(self, spec, accepted=False):
+        result = subprocess.run([str(self.binary), "--audition", json.dumps(spec)], capture_output=True, text=True)
+        self.assertEqual(result.returncode == 0, accepted, result.stdout)
+
+    def test_audition_accepts_exact_hash_bound_complete_range(self):
+        self.check_audition(self.audition_spec(), accepted=True)
+
+    def test_audition_refuses_changed_or_partial_bytes(self):
+        self.check_audition(self.audition_spec(data=base64.b64encode(b"different").decode()))
+        self.check_audition(self.audition_spec(range="bytes 1-32/33"))
+        self.check_audition(self.audition_spec(status=200))
+
+    def test_audition_refuses_stale_hash_and_unbounded_sizes(self):
+        self.check_audition(self.audition_spec(probeTag='"' + "0" * 64 + '"'))
+        self.check_audition(self.audition_spec(probeRange="bytes 0-0/67108865"))
+        self.check_audition(self.audition_spec(probeRange="bytes 0-0/0"))
+        self.check_audition(self.audition_spec(probeStatus=200))
 
 
 if __name__ == "__main__":

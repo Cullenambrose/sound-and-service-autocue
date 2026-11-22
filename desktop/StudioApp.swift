@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import CryptoKit
 import Darwin
 import Foundation
 import SwiftUI
@@ -63,6 +65,46 @@ struct NativePlanAlternative: Codable, Equatable {
     let reasons: [String]
     let trackReasons: [NativePlanReason]
     let phases: [NativePlanPhase]?
+    let transitionEvidence: NativeTransitionReport?
+}
+
+struct NativeTransitionPair: Codable, Equatable {
+    let fromId: String
+    let toId: String
+    let bpm: [Double?]
+    let camelotKeys: [String?]
+    let tempoChangePercent: Double?
+    let overlapS: Double?
+    let warnings: [String]
+    let assumptions: String
+}
+struct NativeTransitionReport: Codable, Equatable {
+    let schemaVersion: Int
+    let status: String
+    let fullFileRuntimeS: Double?
+    let estimatedElapsedS: Double?
+    let transitions: [NativeTransitionPair]
+    let issues: [NativeJSON]
+    let note: String
+}
+
+enum NativeAuditionVerification {
+    static let maximumBytes = 64 * 1024 * 1024
+    static func size(status: Int, etag: String?, range: String?, expectedHash: String) throws -> Int {
+        guard expectedHash.count == 64, expectedHash.allSatisfy({ "0123456789abcdef".contains($0) }),
+              status == 206, etag == "\"\(expectedHash)\"", let range, range.hasPrefix("bytes 0-0/"),
+              let size = Int(range.dropFirst("bytes 0-0/".count)), size > 0, size <= maximumBytes else {
+            throw nativeWorkflowError("The selected file changed, is unavailable, or exceeds the 64 MiB native audition limit. Rescan and generate again if its evidence changed.")
+        }
+        return size
+    }
+    static func verify(_ data: Data, size: Int, status: Int, etag: String?, range: String?, expectedHash: String) throws {
+        guard size > 0, size <= maximumBytes, data.count == size, status == 206,
+              etag == "\"\(expectedHash)\"", range == "bytes 0-\(size - 1)/\(size)",
+              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == expectedHash else {
+            throw nativeWorkflowError("Audition bytes do not match the exact file reviewed in this plan. Nothing was played. Rescan and generate again.")
+        }
+    }
 }
 
 struct NativePlanDiagnostics: Codable, Equatable {
@@ -602,6 +644,113 @@ enum WorkspacePhase: Equatable {
     case loading
     case ready
     case failed(String)
+}
+
+// Memory-only, bounded audio transport. No audio is written to an app cache.
+final class NativeAuditionDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let maximum: Int
+    private let lock = NSLock()
+    private var canceled = false
+    private var task: URLSessionDataTask?
+    private var session: URLSession?
+    private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var bytes = Data()
+    private var response: HTTPURLResponse?
+    private var failure: Error?
+    init(maximum: Int) { self.maximum = maximum }
+
+    static func load(_ request: URLRequest, maximum: Int) async throws -> (Data, HTTPURLResponse) {
+        let transfer = NativeAuditionDownload(maximum: maximum)
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in transfer.start(request, continuation: continuation) }
+        }, onCancel: { transfer.cancel() })
+    }
+    private func start(_ request: URLRequest, continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>) {
+        lock.lock()
+        if canceled { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+        self.continuation = continuation
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil; configuration.httpCookieStorage = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 30; configuration.timeoutIntervalForResource = 60
+        let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+        self.session = session
+        let task = session.dataTask(with: request); self.task = task
+        lock.unlock(); task.resume()
+    }
+    private func cancel() { lock.lock(); canceled = true; let task = task; lock.unlock(); task?.cancel() }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse, response.expectedContentLength <= Int64(maximum) else {
+            failure = nativeWorkflowError("The audition response exceeded its size limit."); completionHandler(.cancel); return
+        }
+        self.response = http; completionHandler(.allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard data.count <= maximum - bytes.count else {
+            failure = nativeWorkflowError("The audition response exceeded its size limit."); dataTask.cancel(); return
+        }
+        bytes.append(data)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock(); let completion = continuation; continuation = nil; self.task = nil; lock.unlock()
+        session.finishTasksAndInvalidate(); self.session = nil
+        if let error = failure ?? error { completion?.resume(throwing: error) }
+        else if let response { completion?.resume(returning: (bytes, response)) }
+        else { completion?.resume(throwing: nativeWorkflowError("Audition returned no HTTP response.")) }
+    }
+}
+
+@MainActor
+final class NativeAuditionPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published private(set) var activeTrackId: String?
+    @Published private(set) var ownerIndex: Int?
+    @Published private(set) var loading = false
+    @Published private(set) var playing = false
+    @Published private(set) var duration = 0.0
+    @Published var message = ""
+    private var audio: AVAudioPlayer?
+    private var pending: Task<Void, Never>?
+    private var generation = UUID()
+    func play(_ track: NativePlanTrack, controller: BackendController, ownerIndex: Int) {
+        stop()
+        let generation = self.generation
+        activeTrackId = track.id; self.ownerIndex = ownerIndex; loading = true; message = "Verifying selected audio…"
+        pending = Task {
+            do {
+                let bytes = try await controller.nativeAuditionBytes(track)
+                try Task.checkCancellation()
+                guard generation == self.generation else { return }
+                let audio = try AVAudioPlayer(data: bytes)
+                guard audio.duration.isFinite, audio.duration > 0 else { throw nativeWorkflowError("This audio has no playable duration.") }
+                audio.delegate = self; audio.volume = 0.5
+                guard audio.prepareToPlay(), audio.play() else { throw nativeWorkflowError("macOS could not start this audio. Check the output device or supported codec.") }
+                self.audio = audio; duration = audio.duration; playing = true; loading = false
+                message = "Auditioning \(track.title) — \(track.artist). Listening does not approve timing or certify a transition."
+            } catch {
+                guard generation == self.generation else { return }
+                loading = false; playing = false; message = error.localizedDescription
+            }
+        }
+    }
+    func togglePause() {
+        guard let audio else { return }
+        if playing { audio.pause(); playing = false }
+        else { playing = audio.play(); if !playing { message = "The output device could not resume playback." } }
+    }
+    var currentTime: Double { audio?.currentTime ?? 0 }
+    func seek(_ value: Double) { if value.isFinite { audio?.currentTime = min(duration, max(0, value)) } }
+    func stop() {
+        generation = UUID(); pending?.cancel(); pending = nil; audio?.stop(); audio = nil
+        activeTrackId = nil; ownerIndex = nil; loading = false; playing = false; duration = 0; message = ""
+    }
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor [weak self] in
+            guard let self, self.audio === player else { return }
+            self.playing = false; self.message = flag ? "Audition ended. No timing or cue review was recorded." : "Audio playback ended with a decoding error."
+        }
+    }
 }
 
 @MainActor
@@ -1783,6 +1932,7 @@ struct PlannerBuilderCard: View {
     @State private var proposal: NativePlanProposal?
     @State private var previewBusy = false
     @State private var previewError = ""
+    @StateObject private var audition = NativeAuditionPlayer()
 
     private var validInputs: Bool {
         [eventJSON, policyJSON].allSatisfy { value in
@@ -1905,7 +2055,7 @@ struct PlannerBuilderCard: View {
                     TextField("Name for the reviewed crate", text: $drafts.plannedCrateName)
                         .textFieldStyle(.roundedBorder).accessibilityIdentifier("planner-crate-name")
                     ForEach(Array(result.response.alternatives.enumerated()), id: \.offset) { index, alternative in
-                        NativeAlternativeCard(alternative: alternative, index: index)
+                        NativeAlternativeCard(alternative: alternative, index: index, controller: controller, audition: audition)
                         Button("Preview alternative \(index + 1) for approval") {
                             let name = drafts.plannedCrateName
                             previewBusy = true; proposal = nil; previewError = ""
@@ -1935,16 +2085,19 @@ struct PlannerBuilderCard: View {
         .onChange(of: drafts.plannerQuery) { _ in invalidate() }
         .onChange(of: drafts.plannerLimit) { _ in invalidate() }
         .onChange(of: drafts.plannedCrateName) { _ in proposal = nil }
+        .onDisappear { audition.stop() }
         .padding(18)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private func invalidate() { planResult = nil; planMessage = ""; proposal = nil; previewError = "" }
+    private func invalidate() { audition.stop(); planResult = nil; planMessage = ""; proposal = nil; previewError = "" }
 }
 
 struct NativeAlternativeCard: View {
     let alternative: NativePlanAlternative
     let index: Int
+    let controller: BackendController
+    @ObservedObject var audition: NativeAuditionPlayer
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1968,9 +2121,75 @@ struct NativeAlternativeCard: View {
             }
             Text("Full-file duration evidence only. This is not a measured performance or a certified transition.")
                 .font(.caption).foregroundStyle(.secondary)
+            NativeTransitionReview(alternative: alternative, index: index, controller: controller, audition: audition)
         }
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct NativeTransitionReview: View {
+    let alternative: NativePlanAlternative
+    let index: Int
+    let controller: BackendController
+    @ObservedObject var audition: NativeAuditionPlayer
+    @State private var expanded = false
+    @State private var position = 0.0
+    private func name(_ id: String) -> String { alternative.tracks.first(where: { $0.id == id }).map { "\($0.title) — \($0.artist)" } ?? "Unknown file \(id)" }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(expanded ? "Hide transition review and listening" : "Review transitions and listen") { expanded.toggle() }
+                .accessibilityIdentifier("transition-review-\(index)")
+            if expanded {
+                if let report = alternative.transitionEvidence, report.schemaVersion == 1 {
+                    Text("Timing evidence: \(report.status)").font(.headline).accessibilityIdentifier("transition-status-\(index)")
+                    if let duration = report.fullFileRuntimeS { Text("Full-file runtime: \(nativeDuration(duration))").font(.caption) }
+                    if report.status == "estimated", let elapsed = report.estimatedElapsedS { Text("Reviewed-window estimate: \(nativeDuration(elapsed)). Not measured playback.").font(.caption) }
+                    else { Text("No complete mixed-runtime estimate. Review missing windows and overlaps before relying on mixed timing.").font(.caption).foregroundStyle(.orange) }
+                    ForEach(Array(report.issues.enumerated()), id: \.offset) { _, issue in Text(issue.diagnosticText).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+                    ForEach(Array(report.transitions.enumerated()), id: \.offset) { pairIndex, pair in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(pairIndex + 1). \(name(pair.fromId)) → \(name(pair.toId))").font(.caption.weight(.semibold))
+                            Text("BPM: \(pair.bpm.map { $0.map { String(format: "%.1f", $0) } ?? "unknown" }.joined(separator: " → ")) · Keys: \(pair.camelotKeys.map { $0 ?? "unknown" }.joined(separator: " → "))").font(.caption)
+                            if let tempo = pair.tempoChangePercent { Text(String(format: "Tagged tempo change: %+.1f%%", tempo)).font(.caption) }
+                            Text(pair.overlapS.map { "Explicit overlap: \($0) seconds" } ?? "Explicit overlap: missing").font(.caption)
+                            ForEach(pair.warnings, id: \.self) { warning in Text(warning.replacingOccurrences(of: "_", with: " ")).font(.caption).foregroundStyle(.orange) }
+                            Text(pair.assumptions).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    Text(report.note).font(.caption2).foregroundStyle(.secondary)
+                } else { Text("Transition timing evidence is unavailable for this alternative.").font(.caption).foregroundStyle(.orange) }
+                Text("Single-file listening from the selected plan, one player at a time. Audio is verified in memory (up to 64 MiB); nothing is written or uploaded. Listening does not review cue windows, infer an overlap or approve a transition.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(Array(alternative.tracks.enumerated()), id: \.offset) { trackIndex, track in
+                    HStack {
+                        Text("\(trackIndex + 1). \(track.title) — \(track.artist)").font(.caption)
+                        Spacer()
+                        Button("Listen to file \(trackIndex + 1)") { audition.play(track, controller: controller, ownerIndex: index) }
+                            .accessibilityIdentifier("audition-play-\(index)-\(trackIndex)")
+                    }
+                }
+                if audition.ownerIndex == index, let active = audition.activeTrackId, alternative.tracks.contains(where: { $0.id == active }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if audition.loading { ProgressView("Verifying audio…") }
+                        Text(audition.message).font(.caption).textSelection(.enabled).accessibilityIdentifier("audition-status-\(index)")
+                        if audition.duration > 0 {
+                            Slider(value: Binding(get: { position }, set: { position = $0; audition.seek($0) }), in: 0...max(1, audition.duration))
+                                .accessibilityLabel("Audition position").accessibilityIdentifier("audition-position-\(index)")
+                            Text("\(nativeDuration(position)) / \(nativeDuration(audition.duration))").font(.caption2)
+                        }
+                        HStack {
+                            Button(audition.playing ? "Pause audition" : "Resume audition") { audition.togglePause() }
+                                .disabled(audition.loading || audition.duration == 0).accessibilityIdentifier("audition-pause-\(index)")
+                            Button("Stop audition") { audition.stop() }.accessibilityIdentifier("audition-stop-\(index)")
+                        }
+                    }
+                    .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in position = audition.currentTime }
+                }
+            }
+        }
+        .onChange(of: expanded) { value in if !value, audition.ownerIndex == index { audition.stop() } }
+        .onDisappear { if audition.ownerIndex == index { audition.stop() } }
     }
 }
 
@@ -4102,6 +4321,29 @@ struct NativePlanningDetails: View {
 }
 
 extension BackendController {
+    func nativeAuditionBytes(_ track: NativePlanTrack) async throws -> Data {
+        guard started, !closing, let origin,
+              UUID(uuidString: track.id)?.uuidString.lowercased() == track.id else { throw nativeWorkflowError("Choose an exact file from the current plan after the local workspace is ready.") }
+        let url = origin.appendingPathComponent("api/studio/audition").appendingPathComponent(track.id)
+        func fetch(_ range: String, maximum: Int) async throws -> (Data, HTTPURLResponse) {
+            var request = URLRequest(url: url)
+            request.setValue(origin.absoluteString, forHTTPHeaderField: "Origin")
+            request.setValue(range, forHTTPHeaderField: "Range")
+            let result = try await NativeAuditionDownload.load(request, maximum: maximum)
+            try Task.checkCancellation()
+            guard result.1.url == url, result.1.statusCode == 206 else {
+                throw nativeWorkflowError(Self.responseMessage(result.0, fallback: "The indexed audio could not be verified. Rescan and generate again."))
+            }
+            return result
+        }
+        let (probe, response) = try await fetch("bytes=0-0", maximum: 65536)
+        let size = try NativeAuditionVerification.size(status: response.statusCode, etag: response.value(forHTTPHeaderField: "ETag"), range: response.value(forHTTPHeaderField: "Content-Range"), expectedHash: track.contentHash)
+        guard probe.count == 1 else { throw nativeWorkflowError("The local audio service returned an unexpected probe.") }
+        let (data, full) = try await fetch("bytes=0-\(size - 1)", maximum: size)
+        try NativeAuditionVerification.verify(data, size: size, status: full.statusCode, etag: full.value(forHTTPHeaderField: "ETag"), range: full.value(forHTTPHeaderField: "Content-Range"), expectedHash: track.contentHash)
+        return data
+    }
+
     var canOpenDefaultWorkspace: Bool {
         ProcessInfo.processInfo.environment["AUTOCUE_DESKTOP_DATA"] == nil &&
         !ProcessInfo.processInfo.arguments.contains("--synthetic-data") &&

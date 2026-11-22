@@ -1,5 +1,6 @@
 from email.message import Message
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -7,10 +8,29 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.build_macos_app import release_inventory
+from scripts.build_macos_app import build_backend, release_inventory
 
 
 class ReleaseInventoryTests(unittest.TestCase):
+    def test_failed_freeze_preserves_diagnostics_and_uses_private_work_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contents = Path(directory) / "Fixture.app" / "Contents"
+            contents.mkdir(parents=True)
+            installed = SimpleNamespace(locate_file=lambda name: Path(directory) / name)
+            diagnostic = io.StringIO()
+            with patch("scripts.build_macos_app.platform.machine", return_value="arm64"), \
+                    patch("scripts.build_macos_app.sys.platform", "darwin"), \
+                    patch("scripts.build_macos_app.distribution", return_value=installed), \
+                    patch("scripts.build_macos_app.subprocess.run", return_value=SimpleNamespace(returncode=2, stdout="Synthetic freeze failure detail")) as run, \
+                    patch("scripts.build_macos_app.sys.stderr", diagnostic), \
+                    patch("scripts.build_macos_app.release_inventory") as inventory:
+                with self.assertRaises(SystemExit) as failure:
+                    build_backend(contents)
+                self.assertEqual(failure.exception.code, 2)
+                self.assertIn("Synthetic freeze failure detail", diagnostic.getvalue())
+                self.assertEqual(Path(run.call_args.kwargs["env"]["PYINSTALLER_CONFIG_DIR"]).parent, run.call_args.kwargs["cwd"])
+                inventory.assert_not_called()
+
     def fixture(self, root, *, missing=None, unsafe=None):
         distributions = {}
         for name in ("numpy", "scipy", "mutagen", "pyinstaller"):
