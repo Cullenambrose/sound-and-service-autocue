@@ -88,6 +88,62 @@ struct NativeTransitionReport: Codable, Equatable {
     let note: String
 }
 
+struct NativeIndexedRoot: Decodable, Identifiable {
+    let id: String
+    let path: String
+    let state: String
+    let availabilityError: String
+    let scanRevision: Int
+}
+struct NativeIndexedRoots: Decodable { let roots: [NativeIndexedRoot] }
+struct NativeInboxFile: Decodable, Identifiable {
+    let fileId: String
+    let rootId: String
+    let relativePath: String
+    let status: String
+    let revision: Int
+    let available: Int
+    let error: String
+    let metadata: [String: NativeJSON]
+    let missingMetadata: [String]
+    let exactHashGroupCount: Int
+    var id: String { fileId }
+    func tag(_ key: String) -> String { guard let value = metadata[key], case let .string(text) = value else { return "" }; return text }
+    var title: String { tag("title").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? URL(fileURLWithPath: relativePath).lastPathComponent : tag("title") }
+    var needsSearchTags: Bool { ["title", "artist"].contains { tag($0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+}
+struct NativeLibraryInbox: Decodable {
+    let items: [NativeInboxFile]
+    let counts: [String: Int]
+    let limit: Int
+    func visibleItems(view: String, query: String, rootId: String) -> [NativeInboxFile] {
+        items.filter { file in
+            guard rootId.isEmpty || file.rootId == rootId,
+                  query.isEmpty || [file.title, file.tag("artist"), file.relativePath].contains(where: { $0.localizedCaseInsensitiveContains(query) }) else { return false }
+            switch view {
+            case "all": return true
+            case "search-tags": return file.needsSearchTags
+            case "metadata": return !file.missingMetadata.isEmpty || file.needsSearchTags
+            case "unavailable": return file.available == 0
+            case "errors": return !file.error.isEmpty
+            case "duplicates": return file.exactHashGroupCount > 1
+            default: return false
+            }
+        }
+    }
+}
+struct NativeScanCancellation: Decodable {
+    struct Job: Decodable { let id: String; let status: String }
+    let ok: Bool
+    let job: Job
+    func status(for id: String) throws -> String {
+        guard ok, job.id == id, ["cancelled", "cancelling", "completed", "failed", "interrupted"].contains(job.status) else {
+            throw nativeWorkflowError("Scan cancellation returned unexpected evidence. Refresh scan status before retrying.")
+        }
+        return job.status
+    }
+}
+
 enum NativeAuditionVerification {
     static let maximumBytes = 64 * 1024 * 1024
     static func size(status: Int, etag: String?, range: String?, expectedHash: String) throws -> Int {
@@ -1302,6 +1358,18 @@ final class BackendController: NSObject, ObservableObject, WKNavigationDelegate,
         }
     }
 
+    func nativeIndexedRoots() async throws -> [NativeIndexedRoot] {
+        try Self.decodeNative(NativeIndexedRoots.self, await nativeBytes("api/catalog/roots")).roots
+    }
+    func nativeLibraryInbox() async throws -> NativeLibraryInbox {
+        try Self.decodeNative(NativeLibraryInbox.self, await nativeBytes("api/studio/inbox", bodyData: Data("{}".utf8)))
+    }
+    func cancelNativeScan(_ id: String) async throws -> String {
+        let body = try JSONSerialization.data(withJSONObject: ["dataset_id": datasetID, "job_id": id])
+        let receipt = try Self.decodeNative(NativeScanCancellation.self, await nativeBytes("api/catalog/scans/cancel", bodyData: body))
+        return try receipt.status(for: id)
+    }
+
     private func freePort() throws -> UInt16 {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw NSError(domain: "port", code: 1) }
@@ -1591,6 +1659,7 @@ struct LibraryDetailEditor: View {
             isScanning: $drafts.isScanning,
             openDetailedWorkspace: nil
         )
+        NativeLibraryIndexView(controller: controller)
         CatalogSearchView(controller: controller)
         NativeDetailBoundaryNote(
             title: "Synthetic-data safe",
@@ -2726,6 +2795,96 @@ struct CatalogSearchView: View {
     }
 }
 
+struct NativeLibraryIndexView: View {
+    let controller: BackendController
+    @State private var expanded = false
+    @State private var roots: [NativeIndexedRoot] = []
+    @State private var inbox: NativeLibraryInbox?
+    @State private var filter = "all"
+    @State private var query = ""
+    @State private var selectedRoot = ""
+    @State private var attempt = 0
+    @State private var readId = UUID()
+    @State private var loading = false
+    @State private var message = ""
+    @State private var checkedAt: Date?
+    private var visible: [NativeInboxFile] { inbox?.visibleItems(view: filter, query: query, rootId: selectedRoot) ?? [] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(expanded ? "Hide indexed folders and ingestion records" : "Review indexed folders and ingestion records") { expanded.toggle() }
+                .accessibilityIdentifier("library-index-toggle")
+            if expanded {
+                Text("Folder identity is checked on refresh. File availability, metadata and same-hash groups below are published index evidence, not a fresh source-byte verification. No files, tags or review states are changed here.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Refresh index evidence") { attempt += 1 }.disabled(loading).accessibilityIdentifier("index-refresh")
+                if loading { ProgressView("Loading index evidence…") }
+                if let checkedAt { Text("Last checked: \(checkedAt.formatted(date: .abbreviated, time: .shortened))").font(.caption2).foregroundStyle(.secondary) }
+                ForEach(roots) { root in rootCard(root) }
+                if inbox != nil && roots.isEmpty { Text("No indexed folders. Choose a test folder above and scan it first.").font(.caption) }
+                if let inbox {
+                    Text("\(inbox.items.count) loaded · \(inbox.counts.values.reduce(0, +)) ingestion records overall")
+                        .font(.subheadline.weight(.semibold)).accessibilityIdentifier("index-loaded-count")
+                    Text("The inbox returns up to \(inbox.limit) recent records, not the whole library. These filters apply only to loaded records. Title/artist gaps remain visible here even when catalog search excludes them.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Indexed folder", selection: $selectedRoot) {
+                        Text("All indexed folders").tag("")
+                        ForEach(roots) { root in Text(root.path).tag(root.id) }
+                    }.accessibilityIdentifier("index-root-filter")
+                    Picker("File view", selection: $filter) {
+                        Text("All loaded records").tag("all"); Text("Needs title or artist").tag("search-tags")
+                        Text("Any missing metadata").tag("metadata"); Text("Indexed unavailable").tag("unavailable")
+                        Text("Indexed errors").tag("errors")
+                        Text("Indexed same-hash groups").tag("duplicates")
+                    }.accessibilityIdentifier("index-filter")
+                    TextField("Filter loaded titles, artists or paths", text: $query).textFieldStyle(.roundedBorder).accessibilityIdentifier("index-search")
+                    Text("\(visible.count) loaded records match this view").font(.caption).accessibilityIdentifier("index-visible-count")
+                    if visible.isEmpty { Text("No loaded records match these filters.").font(.caption).foregroundStyle(.secondary) }
+                    ForEach(visible) { file in fileCard(file) }
+                }
+                if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.red).textSelection(.enabled).accessibilityIdentifier("index-error") }
+            }
+        }
+        .task(id: "\(expanded)-\(attempt)") {
+            guard expanded else { return }
+            let current = UUID(); readId = current; loading = true; message = ""
+            defer { if readId == current { loading = false } }
+            do {
+                async let rootResponse = controller.nativeIndexedRoots()
+                async let inboxResponse = controller.nativeLibraryInbox()
+                let values = try await (rootResponse, inboxResponse)
+                try Task.checkCancellation()
+                guard readId == current else { return }
+                roots = values.0; inbox = values.1; checkedAt = Date()
+            } catch is CancellationError {
+            } catch { if !Task.isCancelled, readId == current { message = "Index evidence could not be refreshed: \(error.localizedDescription)" } }
+        }
+    }
+    private func rootCard(_ root: NativeIndexedRoot) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(root.state.capitalized).font(.subheadline.weight(.semibold)).foregroundStyle(root.state == "online" ? BoothBrand.teal : .orange).accessibilityIdentifier("index-root-state")
+            Text(root.path).font(.caption).textSelection(.enabled)
+            Text("Published scan revision \(root.scanRevision)").font(.caption2).foregroundStyle(.secondary)
+            if !root.availabilityError.isEmpty { Text(root.availabilityError).font(.caption).foregroundStyle(.orange) }
+        }
+    }
+    private func fileCard(_ file: NativeInboxFile) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(file.title).font(.subheadline.weight(.semibold)).accessibilityIdentifier("index-file-title")
+            Text(file.tag("artist").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Artist tag missing" : file.tag("artist")).font(.caption)
+            Text(file.relativePath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+            Text("Inbox: \(file.status) · revision \(file.revision) · indexed \(file.available == 1 ? "available" : "unavailable")").font(.caption)
+            if let root = roots.first(where: { $0.id == file.rootId }), root.state != "online" { Text("Folder was offline at the last check; the indexed record is retained.").font(.caption).foregroundStyle(.orange) }
+            if file.needsSearchTags { Text("Title or artist tags need review before this file can appear in catalog search.").font(.caption).foregroundStyle(.orange) }
+            if !file.missingMetadata.isEmpty { Text("Missing indexed metadata: \(file.missingMetadata.joined(separator: ", "))").font(.caption).foregroundStyle(.secondary) }
+            if !file.error.isEmpty { Text(file.error).font(.caption).foregroundStyle(.orange) }
+            if file.exactHashGroupCount > 1 { Text("Indexed same-hash group: \(file.exactHashGroupCount) files. This is not a deletion recommendation.").font(.caption).foregroundStyle(.secondary) }
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 struct ScanProgressView: View {
     let controller: BackendController
     let trigger: String
@@ -2733,6 +2892,8 @@ struct ScanProgressView: View {
     @State private var message = ""
     @State private var retry = 0
     @State private var lastUpdated: Date?
+    @State private var cancelingId: String?
+    @State private var cancelMessage = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2749,10 +2910,21 @@ struct ScanProgressView: View {
                         if let error = job.error, !error.isEmpty {
                             Text(error).font(.caption).foregroundStyle(.red)
                         }
+                        if ["queued", "running"].contains(job.status) {
+                            Button("Request cancellation") {
+                                cancelingId = job.id; cancelMessage = ""
+                                Task {
+                                    defer { cancelingId = nil; retry += 1 }
+                                    do { let state = try await controller.cancelNativeScan(job.id); cancelMessage = "Scan status: \(state). A job that finishes first may already have published its index." }
+                                    catch { cancelMessage = "Cancellation could not be confirmed: \(error.localizedDescription). Refresh status before retrying." }
+                                }
+                            }.disabled(cancelingId != nil).accessibilityIdentifier("scan-cancel-\(job.id)")
+                        }
                     }
                 }
                 .accessibilityElement(children: .contain)
             }
+            if !cancelMessage.isEmpty { Text(cancelMessage).font(.caption).textSelection(.enabled).accessibilityIdentifier("scan-cancel-message") }
             if !message.isEmpty {
                 Text(message).font(.caption).foregroundStyle(.red)
                 Button("Retry scan status") { retry += 1 }

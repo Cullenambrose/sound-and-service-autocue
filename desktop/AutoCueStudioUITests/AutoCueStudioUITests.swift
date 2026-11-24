@@ -750,6 +750,39 @@ final class AutoCueStudioUITests: XCTestCase {
     }
 
     @MainActor
+    func testIndexedFilesExposeMissingTagsAndOfflineFolderEvidence() throws {
+        let (fixture, original) = try generatedFixture()
+        var untagged = Data(original.prefix(44 + 60 * 16000))
+        let riffSize = UInt32(untagged.count - 8)
+        for shift in 0..<4 { untagged[4 + shift] = UInt8((riffSize >> (shift * 8)) & 255) }
+        let untaggedURL = fixture.deletingLastPathComponent().appendingPathComponent("untagged.wav")
+        try untagged.write(to: untaggedURL)
+        let app = launchApp()
+        try scanAndGenerate(app, fixture: fixture)
+        app.buttons["sidebar-library"].click()
+        app.buttons["detailed-workspace-toggle"].click()
+        let review = app.buttons["library-index-toggle"]; reveal(review, in: app); review.click()
+        XCTAssertTrue(app.staticTexts["index-loaded-count"].waitForExistence(timeout: 15))
+        let filter = app.popUpButtons["index-filter"]; reveal(filter, in: app); filter.click()
+        app.menuItems["Needs title or artist"].click()
+        let title = app.staticTexts["index-file-title"].firstMatch; reveal(title, in: app)
+        XCTAssertEqual(title.value as? String ?? title.label, "untagged.wav")
+        let oldFolder = fixture.deletingLastPathComponent()
+        let offline = oldFolder.deletingLastPathComponent().appendingPathComponent("planned-music-offline", isDirectory: true)
+        try FileManager.default.moveItem(at: oldFolder, to: offline)
+        let refresh = app.buttons["index-refresh"]; reveal(refresh, in: app); refresh.click()
+        let root = app.staticTexts["index-root-state"].firstMatch
+        let unavailable = NSPredicate(format: "value == %@ OR label == %@", "Offline", "Offline")
+        expectation(for: unavailable, evaluatedWith: root); waitForExpectations(timeout: 15)
+        reveal(title, in: app)
+        XCTAssertEqual(title.value as? String ?? title.label, "untagged.wav", "Offline folders retain their indexed evidence")
+        XCTAssertEqual(try Data(contentsOf: offline.appendingPathComponent(fixture.lastPathComponent)), original)
+        XCTAssertEqual(try Data(contentsOf: offline.appendingPathComponent("untagged.wav")), untagged)
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-indexed-file-evidence"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor
     func testNativeTransitionEvidenceAndVerifiedAuditionLifecycle() throws {
         let (fixture, original) = try generatedFixture(title: "Audition First")
         _ = try generatedFixture(title: "Audition Second")

@@ -30,6 +30,20 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 5 && arguments[1] == "--index-view" {
+    do {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let inbox = try decoder.decode(NativeLibraryInbox.self, from: Data(arguments[2].utf8))
+        let items = inbox.visibleItems(view: arguments[3], query: arguments[4], rootId: arguments[5])
+        FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: items.map { ["id": $0.id, "title": $0.title] })); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
+if arguments.count > 3 && arguments[1] == "--cancel-scan" {
+    do {
+        let receipt = try JSONDecoder().decode(NativeScanCancellation.self, from: Data(arguments[2].utf8))
+        print(try receipt.status(for: arguments[3])); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 2 && arguments[1] == "--audition" {
     do {
         let spec = try JSONSerialization.jsonObject(with: Data(arguments[2].utf8)) as! [String: Any]
@@ -362,6 +376,46 @@ do {
         self.check_audition(self.audition_spec(probeRange="bytes 0-0/67108865"))
         self.check_audition(self.audition_spec(probeRange="bytes 0-0/0"))
         self.check_audition(self.audition_spec(probeStatus=200))
+
+    def index_fixture(self):
+        items = []
+        for id, root, metadata, missing, available, group in [
+                ("tagged", "root-a", {"title": "_Intro", "artist": "Artist"}, ["bpm"], 1, 1),
+                ("untagged", "root-a", {}, ["title", "artist"], 1, 1),
+                ("other", "root-b", {"title": "Other", "artist": "Another"}, [], 0, 2)]:
+            items.append({"file_id": id, "root_id": root, "relative_path": id + ".wav", "status": "new", "revision": 1,
+                          "metadata": metadata, "missing_metadata": missing, "available": available, "error": "", "exact_hash_group_count": group})
+        return {"items": items, "counts": {"new": 30}, "limit": 100}
+
+    def index_view(self, fixture, view="all", query="", root=""):
+        result = subprocess.run([str(self.binary), "--index-view", json.dumps(fixture), view, query, root], capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_index_view_exposes_missing_tags_without_inventing_titles(self):
+        fixture = self.index_fixture()
+        self.assertEqual(self.index_view(fixture, "search-tags"), [{"id": "untagged", "title": "untagged.wav"}])
+        self.assertEqual(self.index_view(fixture, query="intro"), [{"id": "tagged", "title": "_Intro"}])
+        self.assertEqual(len(self.index_view(fixture, "metadata")), 2)
+
+    def test_index_filters_apply_only_to_loaded_scope_and_preserve_order(self):
+        fixture = self.index_fixture()
+        self.assertEqual([row["id"] for row in self.index_view(fixture)], ["tagged", "untagged", "other"])
+        self.assertEqual([row["id"] for row in self.index_view(fixture, root="root-a")], ["tagged", "untagged"])
+        self.assertEqual(self.index_view(fixture, root="absent"), [])
+        self.assertEqual(self.index_view(fixture, "unsupported"), [])
+
+    def test_index_unavailable_and_hash_groups_are_independent_metadata_filters(self):
+        fixture = self.index_fixture()
+        fixture["items"][2]["error"] = "Synthetic indexed decode error"
+        for view in ["unavailable", "duplicates", "errors"]:
+            self.assertEqual(self.index_view(fixture, view), [{"id": "other", "title": "Other"}])
+        self.assertEqual(self.index_view(fixture, query="untagged.wav"), [{"id": "untagged", "title": "untagged.wav"}])
+
+    def test_scan_cancel_receipts_require_exact_job_and_terminal_or_pending_cancellation(self):
+        for state in ["cancelled", "cancelling", "completed", "failed", "interrupted", "running"]:
+            for job in ["selected", "different"]:
+                result = subprocess.run([str(self.binary), "--cancel-scan", json.dumps({"ok": True, "job": {"id": job, "status": state}}), "selected"], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, job == "selected" and state != "running", result.stdout)
 
 
 if __name__ == "__main__":
