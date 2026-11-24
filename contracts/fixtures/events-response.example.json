@@ -1,0 +1,65 @@
+{
+  "events": [
+    {
+      "inquiry_id": "550e8400-e29b-41d4-a716-446655440000",
+      "event_date": "2026-12-12",
+      "event_name": "Wedding",
+      "customer_first_name": "Sample",
+      "start_time": "2026-12-12T16:00:00-08:00",
+      "duration_hours": 5,
+      "service_type": "wedding_dj",
+      "timezone": "America/Los_Angeles",
+      "planner_status": "locked",
+      "music_lists": {
+        "must_play": [
+          { "id": "s1", "title": "September", "artist": "Earth, Wind & Fire", "version": "Clean" }
+        ],
+        "play_if_possible": [
+          { "id": "s2", "title": "Uptown Funk", "artist": "Mark Ronson feat. Bruno Mars" }
+        ],
+        "special_moments": [
+          { "id": "s3", "title": "Can't Help Falling in Love", "artist": "Elvis Presley", "moment": "First Dance" }
+        ],
+        "do_not_play": [
+          { "id": "s4", "title": "Cupid Shuffle", "artist": "Cupid" }
+        ]
+      },
+      "music_preferences": {
+        "genre_preferences": { "top_40": "lots", "country": "some" },
+        "clean_edits_only": true,
+        "guest_request_policy": "dj_discretion",
+        "additional_notes": null,
+        "playlist_links": [
+          { "url": "https://open.spotify.com/playlist/example", "label": "Cocktail hour" }
+        ]
+      },
+      "timeline_items": [
+        { "id": "t1", "time": "16:00", "title": "Ceremony", "order": 1, "kind": "Processional", "song": "A Thousand Years - Christina Perri" },
+        { "id": "t2", "time": "18:15", "title": "First Dance", "order": 2, "kind": "First Dance", "song": "Can't Help Falling in Love - Elvis Presley", "songCue": { "fade": "fade", "seconds": 165 }, "mic": "none" }
+      ],
+      "planner": { "first_dance_song": "Can't Help Falling in Love" }
+    },
+    {
+      "inquiry_id": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+      "event_date": "2026-12-19",
+      "event_name": "Birthday",
+      "customer_first_name": "Client",
+      "start_time": null,
+      "duration_hours": 4,
+      "service_type": "party_dj",
+      "timezone": "America/Los_Angeles",
+      "planner_status": null,
+      "music_lists": { "must_play": [], "play_if_possible": [], "special_moments": [], "do_not_play": [] },
+      "music_preferences": null,
+      "timeline_items": [],
+      "planner": null
+    }
+  ],
+  "metadata": {
+    "contract_version": "1.0.0",
+    "count": 2,
+    "days_ahead": 30,
+    "couple_locked_filter_applied": false,
+    "generated_at": "2026-11-24T03:00:00.000Z"
+  }
+}

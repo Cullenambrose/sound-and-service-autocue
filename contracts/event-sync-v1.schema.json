@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.soundandservice.co/contracts/event-sync-v1.schema.json",
+  "title": "Sound & Service event sync contract",
+  "description": "Contract version 1.0.0 between the booking site (GET /api/autocue/events, POST /api/autocue/prep-status) and the Mac setlist app. Validate against the named $defs: EventsResponse, PrepStatusRequest, PrepStatusResponse, ErrorBody. Readers ignore unknown keys (additionalProperties is left open on purpose).",
+  "x-contract-version": "1.0.0",
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "PlannerStatus": {
+      "description": "planner_responses.status, or null when the event has no planner. Crates may be written only for confirmed or locked.",
+      "enum": ["draft", "in_progress", "submitted", "confirmed", "locked", null]
+    },
+    "Song": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "title": { "type": "string", "minLength": 1 },
+        "artist": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"], "description": "Preferred DJ-pool edit, e.g. Clean, Short Edit." },
+        "moment": { "type": ["string", "null"], "description": "Timeline kind this song belongs to, e.g. First Dance." },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+    "SongCue": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" },
+        "fade": { "enum": ["full", "fade", "cut"] },
+        "seconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "TimelineItem": {
+      "type": "object",
+      "required": ["id", "time", "title", "order"],
+      "properties": {
+        "id": { "type": "string" },
+        "time": { "type": "string", "description": "Local wall-clock text, e.g. 18:00 or 6:00 PM, in the event timezone." },
+        "title": { "type": "string" },
+        "song": { "type": ["string", "null"], "description": "Song as free text." },
+        "notes": { "type": ["string", "null"] },
+        "order": { "type": "number" },
+        "kind": { "type": ["string", "null"], "description": "Moment type; unknown values are generic." },
+        "songCue": { "$ref": "#/$defs/SongCue" },
+        "mic": { "enum": ["handheld", "lav", "none", null] },
+        "sourceQuestionId": { "type": ["string", "null"] },
+        "importedFrom": { "type": ["string", "null"], "description": "Legacy; read sourceQuestionId first." }
+      }
+    },
+    "PlaylistLink": {
+      "type": "object",
+      "required": ["url", "label"],
+      "properties": {
+        "url": { "type": "string", "minLength": 1 },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "MusicLists": {
+      "type": "object",
+      "required": ["must_play", "play_if_possible", "special_moments", "do_not_play"],
+      "properties": {
+        "must_play": { "type": "array", "maxItems": 10, "items": { "$ref": "#/$defs/Song" } },
+        "play_if_possible": { "type": "array", "items": { "$ref": "#/$defs/Song" } },
+        "special_moments": { "type": "array", "items": { "$ref": "#/$defs/Song" } },
+        "do_not_play": { "type": "array", "items": { "$ref": "#/$defs/Song" } }
+      }
+    },
+    "MusicPreferences": {
+      "type": ["object", "null"],
+      "required": ["genre_preferences", "clean_edits_only", "guest_request_policy", "additional_notes", "playlist_links"],
+      "properties": {
+        "genre_preferences": {
+          "type": "object",
+          "additionalProperties": { "enum": ["never", "some", "lots"] }
+        },
+        "clean_edits_only": { "type": "boolean" },
+        "guest_request_policy": { "enum": ["dj_discretion", "only_from_list", "no_requests"] },
+        "additional_notes": { "type": ["string", "null"] },
+        "playlist_links": { "type": "array", "items": { "$ref": "#/$defs/PlaylistLink" } }
+      }
+    },
+    "Event": {
+      "type": "object",
+      "required": [
+        "inquiry_id", "event_date", "event_name", "customer_first_name", "start_time",
+        "duration_hours", "service_type", "timezone", "planner_status", "music_lists",
+        "music_preferences", "timeline_items", "planner"
+      ],
+      "properties": {
+        "inquiry_id": { "$ref": "#/$defs/Uuid" },
+        "event_date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "Local calendar date of the event, not a timestamp." },
+        "event_name": { "type": "string" },
+        "customer_first_name": { "type": "string" },
+        "start_time": { "type": ["string", "null"], "description": "ISO 8601 with offset." },
+        "duration_hours": { "type": ["number", "null"] },
+        "service_type": { "type": ["string", "null"] },
+        "timezone": { "type": "string", "description": "IANA zone; default America/Los_Angeles." },
+        "planner_status": { "$ref": "#/$defs/PlannerStatus" },
+        "music_lists": { "$ref": "#/$defs/MusicLists" },
+        "music_preferences": { "$ref": "#/$defs/MusicPreferences" },
+        "timeline_items": { "type": "array", "items": { "$ref": "#/$defs/TimelineItem" } },
+        "planner": {
+          "type": ["object", "null"],
+          "description": "Free-form music answers for display only. Do not parse songs from it."
+        }
+      }
+    },
+    "EventsResponse": {
+      "type": "object",
+      "required": ["events", "metadata"],
+      "properties": {
+        "events": { "type": "array", "items": { "$ref": "#/$defs/Event" } },
+        "metadata": {
+          "type": "object",
+          "required": ["contract_version", "count", "days_ahead", "couple_locked_filter_applied", "generated_at"],
+          "properties": {
+            "contract_version": { "type": "string", "pattern": "^1\\.\\d+\\.\\d+$" },
+            "count": { "type": "integer", "minimum": 0 },
+            "days_ahead": { "type": "integer", "minimum": 1, "maximum": 90 },
+            "couple_locked_filter_applied": { "type": "boolean" },
+            "generated_at": { "type": "string", "description": "ISO 8601 UTC." }
+          }
+        }
+      }
+    },
+    "PrepSong": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "artist": { "type": "string", "maxLength": 300 },
+        "reason": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "PrepStatusRequest": {
+      "type": "object",
+      "required": ["inquiry_id", "matched_count", "missing_count"],
+      "properties": {
+        "inquiry_id": { "$ref": "#/$defs/Uuid" },
+        "matched_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "missing_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "missing_titles": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/PrepSong" } },
+        "do_not_play_hits": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/PrepSong" } },
+        "crate_name": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "PrepStatusResponse": {
+      "type": "object",
+      "required": ["ok", "status"],
+      "properties": {
+        "ok": { "const": true },
+        "status": {
+          "type": "object",
+          "required": ["id", "inquiry_id", "matched_count", "missing_count", "crate_name", "updated_at"],
+          "properties": {
+            "id": { "type": "string" },
+            "inquiry_id": { "$ref": "#/$defs/Uuid" },
+            "matched_count": { "type": "integer" },
+            "missing_count": { "type": "integer" },
+            "crate_name": { "type": ["string", "null"] },
+            "updated_at": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ErrorBody": {
+      "type": "object",
+      "required": ["error", "code"],
+      "properties": {
+        "error": { "type": "string" },
+        "code": { "enum": ["invalid_request", "unauthorized", "rate_limited", "fetch_failed", "save_failed", "db_unavailable"] },
+        "details": {}
+      }
+    }
+  }
+}

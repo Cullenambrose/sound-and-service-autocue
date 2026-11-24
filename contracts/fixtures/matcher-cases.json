@@ -1,0 +1,21 @@
+{
+  "contract": "event-sync",
+  "contract_version": "1.0.0",
+  "description": "Shared song-identity cases. Both the site matcher (lib/music/match.ts) and the Mac app matcher (engine/library/matcher.py) must return `same_song` for every case. Add cases here first, then fix both matchers in matching PRs. Never edit an expected value to make a test pass without Cullen agreeing.",
+  "cases": [
+    { "id": "clean-tag-and-apostrophe", "a": { "title": "Can't Help Falling in Love", "artist": "Elvis Presley" }, "b": { "title": "Cant Help Falling In Love (Clean)", "artist": "Elvis Presley" }, "same_song": true },
+    { "id": "short-edit-and-featured-artists", "a": { "title": "Yeah! (Short Edit)", "artist": "Usher feat. Lil Jon & Ludacris" }, "b": { "title": "Yeah!", "artist": "Usher" }, "same_song": true },
+    { "id": "featuring-in-title-parens", "a": { "title": "Lean On (feat. MØ & DJ Snake)", "artist": "Major Lazer" }, "b": { "title": "Lean On", "artist": "Major Lazer" }, "same_song": true },
+    { "id": "intro-in-brackets", "a": { "title": "September [Intro]", "artist": "Earth, Wind & Fire" }, "b": { "title": "September", "artist": "Earth, Wind & Fire" }, "same_song": true },
+    { "id": "re-drum-and-ft", "a": { "title": "Uptown Funk (Re-Drum)", "artist": "Mark Ronson ft. Bruno Mars" }, "b": { "title": "Uptown Funk", "artist": "Mark Ronson" }, "same_song": true },
+    { "id": "chorus-intro", "a": { "title": "Shout (Chorus Intro)", "artist": "The Isley Brothers" }, "b": { "title": "Shout", "artist": "The Isley Brothers" }, "same_song": true },
+    { "id": "punctuation-period", "a": { "title": "Mr. Brightside", "artist": "The Killers" }, "b": { "title": "Mr Brightside", "artist": "The Killers" }, "same_song": true },
+    { "id": "punctuation-apostrophes", "a": { "title": "Don't Stop Believin'", "artist": "Journey" }, "b": { "title": "Dont Stop Believin", "artist": "Journey" }, "same_song": true },
+    { "id": "radio-edit-tag", "a": { "title": "Hey Ya! (Radio Edit)", "artist": "OutKast" }, "b": { "title": "Hey Ya!", "artist": "OutKast" }, "same_song": true },
+    { "id": "accented-artist", "a": { "title": "Crazy in Love", "artist": "Beyoncé feat. Jay-Z" }, "b": { "title": "Crazy In Love", "artist": "Beyonce" }, "same_song": true },
+    { "id": "with-inside-title-is-not-featuring", "a": { "title": "Stay With Me", "artist": "Sam Smith" }, "b": { "title": "Stay", "artist": "Sam Smith" }, "same_song": false },
+    { "id": "title-starting-with-with", "a": { "title": "With or Without You", "artist": "U2" }, "b": { "title": "With a Shout", "artist": "U2" }, "same_song": false },
+    { "id": "rerecording-is-a-different-song", "a": { "title": "Love Story (Taylor's Version)", "artist": "Taylor Swift" }, "b": { "title": "Love Story", "artist": "Taylor Swift" }, "same_song": false },
+    { "id": "same-title-different-artist", "a": { "title": "Hello", "artist": "Adele" }, "b": { "title": "Hello", "artist": "Lionel Richie" }, "same_song": false }
+  ]
+}
