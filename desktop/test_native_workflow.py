@@ -30,6 +30,13 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 3 && arguments[1] == "--scan-history" {
+    do {
+        let jobs = try JSONDecoder().decode([ScanJob].self, from: Data(arguments[2].utf8))
+        let history = NativeScanHistory(jobs: jobs, expanded: arguments[3] == "expanded")
+        FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: ["active": history.active.map(\.id), "history": history.visibleHistory.map(\.id), "hidden": history.hiddenCount])); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 5 && arguments[1] == "--index-view" {
     do {
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -410,6 +417,20 @@ do {
         for view in ["unavailable", "duplicates", "errors"]:
             self.assertEqual(self.index_view(fixture, view), [{"id": "other", "title": "Other"}])
         self.assertEqual(self.index_view(fixture, query="untagged.wav"), [{"id": "untagged", "title": "untagged.wav"}])
+
+    def scan_history(self, statuses, expanded=False):
+        rows = [{"id": str(i), "path": "/temporary/fixture", "status": state, "scanned": 0, "errors": 0} for i, state in enumerate(statuses)]
+        result = subprocess.run([str(self.binary), "--scan-history", json.dumps(rows), "expanded" if expanded else "collapsed"], capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_scan_history_keeps_older_active_jobs_outside_five_record_history_limit(self):
+        result = self.scan_history(["completed"] * 6 + ["queued", "running", "cancelling"])
+        self.assertEqual(result, {"active": ["6", "7", "8"], "history": ["0", "1", "2", "3", "4"], "hidden": 1})
+
+    def test_scan_history_expands_all_returned_inactive_states_without_reordering(self):
+        states = ["completed", "running", "failed", "cancelled", "interrupted", "completed", "unknown", "queued"]
+        self.assertEqual(self.scan_history(states, True), {"active": ["1", "7"], "history": ["0", "2", "3", "4", "5", "6"], "hidden": 0})
+        self.assertEqual(self.scan_history([]), {"active": [], "history": [], "hidden": 0})
 
     def test_scan_cancel_receipts_require_exact_job_and_terminal_or_pending_cancellation(self):
         for state in ["cancelled", "cancelling", "completed", "failed", "interrupted", "running"]:

@@ -616,6 +616,25 @@ struct NativeCrateDetail: Decodable {
     }
 }
 
+struct ScanJob: Decodable, Identifiable {
+    let id: String
+    let path: String
+    let status: String
+    let scanned: Int
+    let errors: Int
+    let error: String?
+    var active: Bool { ["queued", "running", "cancelling"].contains(status) }
+}
+
+struct NativeScanHistory {
+    let jobs: [ScanJob]
+    let expanded: Bool
+    var active: [ScanJob] { jobs.filter(\.active) }
+    var inactive: [ScanJob] { jobs.filter { !$0.active } }
+    var visibleHistory: [ScanJob] { expanded ? inactive : Array(inactive.prefix(5)) }
+    var hiddenCount: Int { inactive.count - visibleHistory.count }
+}
+
 struct CrateSummary: Identifiable, Equatable {
     let id: String
     let name: String
@@ -666,16 +685,6 @@ struct CatalogTrack: Identifiable {
     let artist: String
     let path: String
     let metadata: String
-}
-
-struct ScanJob: Identifiable {
-    let id: String
-    let path: String
-    let status: String
-    let scanned: Int
-    let errors: Int
-    let error: String?
-    var active: Bool { ["queued", "running", "cancelling"].contains(status) }
 }
 
 @MainActor
@@ -2894,35 +2903,25 @@ struct ScanProgressView: View {
     @State private var lastUpdated: Date?
     @State private var cancelingId: String?
     @State private var cancelMessage = ""
+    @State private var historyExpanded = false
+    private var history: NativeScanHistory { NativeScanHistory(jobs: jobs, expanded: historyExpanded) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !jobs.isEmpty { Text("Recent scans").font(.subheadline.weight(.semibold)) }
-            ForEach(Array(jobs.prefix(5))) { job in
-                HStack(alignment: .top, spacing: 10) {
-                    if job.active { ProgressView().controlSize(.small) }
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("\(job.status.capitalized) · \(job.scanned) scanned · \(job.errors) errors")
-                            .font(.caption.weight(.medium))
-                            .accessibilityIdentifier("scan-status-\(job.status)")
-                        Text(job.path).font(.caption2).foregroundStyle(.secondary)
-                            .lineLimit(2).textSelection(.enabled)
-                        if let error = job.error, !error.isEmpty {
-                            Text(error).font(.caption).foregroundStyle(.red)
-                        }
-                        if ["queued", "running"].contains(job.status) {
-                            Button("Request cancellation") {
-                                cancelingId = job.id; cancelMessage = ""
-                                Task {
-                                    defer { cancelingId = nil; retry += 1 }
-                                    do { let state = try await controller.cancelNativeScan(job.id); cancelMessage = "Scan status: \(state). A job that finishes first may already have published its index." }
-                                    catch { cancelMessage = "Cancellation could not be confirmed: \(error.localizedDescription). Refresh status before retrying." }
-                                }
-                            }.disabled(cancelingId != nil).accessibilityIdentifier("scan-cancel-\(job.id)")
-                        }
-                    }
-                }
-                .accessibilityElement(children: .contain)
+            if !jobs.isEmpty {
+                Text("Recent scans").font(.subheadline.weight(.semibold))
+                Text("\(history.active.count) active · \(history.inactive.count) inactive in the returned snapshot")
+                    .font(.caption).accessibilityIdentifier("scan-history-summary")
+                Text("The service returns all active scans and up to 20 recent inactive jobs. Older inactive jobs are outside this snapshot.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if !history.active.isEmpty { Text("Active scans").font(.caption.weight(.semibold)) }
+            ForEach(history.active) { job in scanCard(job) }
+            if !history.inactive.isEmpty { Text("Scan history").font(.caption.weight(.semibold)) }
+            ForEach(history.visibleHistory) { job in scanCard(job) }
+            if history.hiddenCount > 0 || (historyExpanded && history.inactive.count > 5) {
+                Button(historyExpanded ? "Show fewer inactive scans" : "Show older scans (\(history.hiddenCount))") { historyExpanded.toggle() }
+                    .accessibilityIdentifier("scan-history-toggle")
             }
             if !cancelMessage.isEmpty { Text(cancelMessage).font(.caption).textSelection(.enabled).accessibilityIdentifier("scan-cancel-message") }
             if !message.isEmpty {
@@ -2950,6 +2949,32 @@ struct ScanProgressView: View {
                 message = "Scan status unavailable: \(error.localizedDescription)"
             }
         }
+    }
+    private func scanCard(_ job: ScanJob) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            if job.active { ProgressView().controlSize(.small) }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(job.status.capitalized) · \(job.scanned) scanned · \(job.errors) errors")
+                    .font(.caption.weight(.medium))
+                    .accessibilityIdentifier("scan-status-\(job.status)")
+                Text(job.path).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(2).textSelection(.enabled)
+                if let error = job.error, !error.isEmpty {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                if ["queued", "running"].contains(job.status) {
+                    Button("Request cancellation") {
+                        cancelingId = job.id; cancelMessage = ""
+                        Task {
+                            defer { cancelingId = nil; retry += 1 }
+                            do { let state = try await controller.cancelNativeScan(job.id); cancelMessage = "Scan status: \(state). A job that finishes first may already have published its index." }
+                            catch { cancelMessage = "Cancellation could not be confirmed: \(error.localizedDescription). Refresh status before retrying." }
+                        }
+                    }.disabled(cancelingId != nil).accessibilityIdentifier("scan-cancel-\(job.id)")
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 

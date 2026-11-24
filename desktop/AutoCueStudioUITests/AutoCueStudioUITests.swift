@@ -750,6 +750,36 @@ final class AutoCueStudioUITests: XCTestCase {
     }
 
     @MainActor
+    func testScanHistoryExpandsOlderJobsAndCollapsesAgain() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp()
+        replaceText(app.textFields["library-folder-path"], with: fixture.deletingLastPathComponent().path)
+        XCTAssertEqual(app.textFields["library-folder-path"].value as? String, fixture.deletingLastPathComponent().path)
+        for count in 1...6 {
+            let start = app.buttons["library-start-scan"]
+            XCTAssertTrue(start.waitForExistence(timeout: 10))
+            start.click()
+            let summary = app.staticTexts["scan-history-summary"]
+            let expected = "0 active · \(count) inactive in the returned snapshot"
+            let ready = NSPredicate(format: "label == %@ OR value == %@", expected, expected)
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: summary)], timeout: 30), .completed)
+        }
+        XCTAssertEqual(app.staticTexts.matching(identifier: "scan-status-completed").count, 5)
+        let toggle = app.buttons["scan-history-toggle"]
+        XCTAssertEqual(toggle.label, "Show older scans (1)")
+        toggle.click()
+        XCTAssertEqual(app.staticTexts.matching(identifier: "scan-status-completed").count, 6)
+        XCTAssertEqual(toggle.label, "Show fewer inactive scans")
+        let screenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        screenshot.name = "native-expanded-scan-history"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        toggle.click()
+        XCTAssertEqual(app.staticTexts.matching(identifier: "scan-status-completed").count, 5)
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
     func testIndexedFilesExposeMissingTagsAndOfflineFolderEvidence() throws {
         let (fixture, original) = try generatedFixture()
         var untagged = Data(original.prefix(44 + 60 * 16000))
