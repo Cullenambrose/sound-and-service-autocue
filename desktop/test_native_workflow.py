@@ -30,6 +30,24 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 3 && arguments[1] == "--monitor-request" {
+    do {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let request = try decoder.decode(NativeMonitorRequest.self, from: Data(arguments[2].utf8))
+        if arguments.count > 4 {
+            let receipt = try decoder.decode(NativeMonitorReceipt.self, from: Data(arguments[4].utf8))
+            try receipt.validate(request, dataset: arguments[3])
+        }
+        FileHandle.standardOutput.write(try request.data(dataset: arguments[3])); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
+if arguments.count > 2 && arguments[1] == "--monitor-state" {
+    do {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let monitor = try decoder.decode(NativeRootMonitor.self, from: Data(arguments[2].utf8))
+        try monitor.validate(); print("valid monitor"); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 3 && arguments[1] == "--inbox-request" {
     do {
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -48,6 +66,7 @@ if arguments.count > 3 && arguments[1] == "--inbox-journal" {
         let restored = try JSONDecoder().decode(NativeWorkflowJournal.self, from: JSONEncoder().encode(journal))
         try restored.validatePendingOperations(dataset: arguments[3])
         if let pending = restored.pendingInboxReview { FileHandle.standardOutput.write(try pending.request.data(dataset: arguments[3])) }
+        else if let pending = restored.pendingMonitor { FileHandle.standardOutput.write(try pending.request.data(dataset: arguments[3])) }
         else { print("no pending inbox status") }; exit(0)
     } catch { print(error.localizedDescription); exit(1) }
 }
@@ -413,7 +432,7 @@ do {
                 ("other", "root-b", {"title": "Other", "artist": "Another"}, [], 0, 2)]:
             items.append({"file_id": id, "root_id": root, "relative_path": id + ".wav", "status": "new", "revision": 1,
                           "metadata": metadata, "missing_metadata": missing, "available": available, "error": "", "exact_hash_group_count": group})
-        return {"items": items, "counts": {"new": 30}, "limit": 100}
+        return {"items": items, "counts": {"new": 30}, "limit": 100, "monitors": []}
 
     def index_view(self, fixture, view="all", query="", root=""):
         result = subprocess.run([str(self.binary), "--index-view", json.dumps(fixture), view, query, root], capture_output=True, text=True, check=True)
@@ -438,6 +457,65 @@ do {
         for view in ["unavailable", "duplicates", "errors"]:
             self.assertEqual(self.index_view(fixture, view), [{"id": "other", "title": "Other"}])
         self.assertEqual(self.index_view(fixture, query="untagged.wav"), [{"id": "untagged", "title": "untagged.wav"}])
+
+    def monitor_request(self):
+        return {"request_id": "retained-monitor", "dataset_id": "dataset", "root_id": "exact-root", "base_revision": 0, "enabled": True, "interval_s": 60}
+
+    def run_monitor_request(self, request, receipt=None):
+        args = [str(self.binary), "--monitor-request", json.dumps(request), "dataset"]
+        if receipt is not None:
+            args.append(json.dumps(receipt))
+        return subprocess.run(args, capture_output=True, text=True)
+
+    def test_monitor_request_exact_contract_and_receipt(self):
+        request = self.monitor_request()
+        receipt = {"ok": True, "request_id": "retained-monitor", "dataset_id": "dataset", "root_id": "exact-root", "enabled": True, "revision": 1}
+        result = self.run_monitor_request(request, receipt)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout), request)
+        for field, wrong in [("ok", False), ("request_id", "other"), ("dataset_id", "other"), ("root_id", "other"), ("enabled", False), ("revision", 0), ("revision", 2)]:
+            self.assertNotEqual(self.run_monitor_request(request, {**receipt, field: wrong}).returncode, 0)
+
+    def test_monitor_interval_and_explicit_boolean_boundaries(self):
+        request = self.monitor_request()
+        for interval in [60, 61, 300, 86400]:
+            for enabled in [True, False]:
+                result = self.run_monitor_request({**request, "interval_s": interval, "enabled": enabled})
+                self.assertEqual(result.returncode, 0, result.stdout)
+        for field, wrong in [("interval_s", 59), ("interval_s", 86401), ("interval_s", True), ("interval_s", "60"), ("interval_s", 60.5), ("enabled", 1), ("enabled", "true")]:
+            self.assertNotEqual(self.run_monitor_request({**request, field: wrong}).returncode, 0)
+
+    def test_monitor_request_requires_root_dataset_and_valid_base_revision(self):
+        request = self.monitor_request()
+        for field, wrong in [("request_id", ""), ("dataset_id", "other"), ("root_id", ""), ("base_revision", -1), ("base_revision", 9223372036854775807), ("base_revision", True)]:
+            self.assertNotEqual(self.run_monitor_request({**request, field: wrong}).returncode, 0)
+        self.assertEqual(self.run_monitor_request({**request, "base_revision": 8}).returncode, 0)
+
+    def test_monitor_journal_restart_keeps_exact_request_and_rejects_overlap(self):
+        request = {"requestId": "retained-monitor", "datasetId": "dataset", "rootId": "exact-root", "baseRevision": 0, "enabled": True, "intervalS": 60}
+        journal = {"schemaVersion": 1, "datasetId": "dataset", "saved": [], "pendingMonitor": {"request": request, "path": "/temporary/music", "rejected": False}}
+        result = subprocess.run([str(self.binary), "--inbox-journal", json.dumps(journal), "dataset"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout), self.monitor_request())
+        inbox = {"request": {"requestId": "inbox", "datasetId": "dataset", "fileId": "file", "baseRevision": 1, "status": "new"}, "title": "Title", "relativePath": "test.wav", "rejected": False}
+        bad = subprocess.run([str(self.binary), "--inbox-journal", json.dumps({**journal, "pendingInboxReview": inbox}), "dataset"], capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("overlapping", bad.stdout)
+
+    def test_monitor_snapshot_validates_indexed_configuration(self):
+        monitor = {"root_id": "root", "enabled": 1, "interval_s": 300, "revision": 1, "next_scan": 12345, "last_job": None, "error": "Synthetic disconnected volume"}
+        def check(value):
+            return subprocess.run([str(self.binary), "--monitor-state", json.dumps(value)], capture_output=True, text=True)
+        self.assertEqual(check(monitor).returncode, 0)
+        self.assertEqual(check({**monitor, "enabled": 0, "last_job": "retained-job"}).returncode, 0)
+        for field, wrong in [("root_id", ""), ("enabled", 2), ("interval_s", 59), ("interval_s", 86401), ("revision", 0), ("revision", 9223372036854775807), ("next_scan", -1)]:
+            self.assertNotEqual(check({**monitor, field: wrong}).returncode, 0)
+
+    def test_monitor_missing_snapshot_does_not_imply_disabled(self):
+        fixture = self.index_fixture()
+        del fixture["monitors"]
+        result = subprocess.run([str(self.binary), "--index-view", json.dumps(fixture), "all", "", ""], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
 
     def inbox_request(self):
         return {"request_id": "retained-identity", "dataset_id": "dataset", "file_id": "exact-file", "base_revision": 7, "status": "reviewed"}

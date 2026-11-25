@@ -116,6 +116,7 @@ struct NativeLibraryInbox: Decodable {
     let items: [NativeInboxFile]
     let counts: [String: Int]
     let limit: Int
+    let monitors: [NativeRootMonitor]
     func visibleItems(view: String, query: String, rootId: String) -> [NativeInboxFile] {
         items.filter { file in
             guard rootId.isEmpty || file.rootId == rootId,
@@ -132,6 +133,66 @@ struct NativeLibraryInbox: Decodable {
         }
     }
 }
+struct NativeRootMonitor: Decodable {
+    let rootId: String
+    let enabled: Int
+    let intervalS: Int
+    let revision: Int
+    let nextScan: Double
+    let lastJob: String?
+    let error: String
+    func validate() throws {
+        guard [0, 1].contains(enabled), (60...86400).contains(intervalS), revision > 0,
+              revision < Int.max, nextScan.isFinite, nextScan >= 0, !rootId.isEmpty else {
+            throw nativeWorkflowError("Folder monitor evidence is invalid. Refresh before changing it.")
+        }
+    }
+}
+struct NativeMonitorSelection: Identifiable {
+    let root: NativeIndexedRoot
+    let monitor: NativeRootMonitor?
+    var id: String { root.id }
+}
+struct NativeMonitorRequest: Codable, Equatable {
+    let requestId: String
+    let datasetId: String
+    let rootId: String
+    let baseRevision: Int
+    let enabled: Bool
+    let intervalS: Int
+    func validate(dataset: String) throws {
+        guard datasetId == dataset, !dataset.isEmpty, !requestId.isEmpty, !rootId.isEmpty,
+              baseRevision >= 0, baseRevision < Int.max, (60...86400).contains(intervalS) else {
+            throw nativeWorkflowError("Folder monitor identity, revision or interval is invalid. Use 60–86400 seconds.")
+        }
+    }
+    func data(dataset: String) throws -> Data {
+        try validate(dataset: dataset)
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase; encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+struct NativePendingMonitor: Codable {
+    let request: NativeMonitorRequest
+    let path: String
+    var rejected = false
+}
+struct NativeMonitorReceipt: Decodable {
+    let ok: Bool
+    let requestId: String
+    let datasetId: String
+    let rootId: String
+    let enabled: Bool
+    let revision: Int
+    func validate(_ request: NativeMonitorRequest, dataset: String) throws {
+        try request.validate(dataset: dataset)
+        guard ok, requestId == request.requestId, datasetId == request.datasetId,
+              rootId == request.rootId, enabled == request.enabled, revision == request.baseRevision + 1 else {
+            throw nativeWorkflowError("Folder monitor receipt did not match the retained request. Retry exact recovery.")
+        }
+    }
+}
+
 struct NativeInboxReviewRequest: Codable, Equatable {
     let requestId: String
     let datasetId: String
@@ -306,13 +367,15 @@ struct NativeWorkflowJournal: Codable {
     var pending: NativeApprovalOperation?
     var pendingEdit: NativePendingEdit?
     var pendingInboxReview: NativePendingInboxReview?
+    var pendingMonitor: NativePendingMonitor?
     var saved: [NativeSavedCrate] = []
     func validatePendingOperations(dataset: String) throws {
         guard schemaVersion == 1, datasetId == dataset,
-              [pending != nil, pendingEdit != nil, pendingInboxReview != nil].filter({ $0 }).count <= 1 else {
+              [pending != nil, pendingEdit != nil, pendingInboxReview != nil, pendingMonitor != nil].filter({ $0 }).count <= 1 else {
             throw nativeWorkflowError("Recovery journal belongs to another dataset/version or contains overlapping mutations.")
         }
         if let pendingInboxReview { try pendingInboxReview.request.validate(dataset: dataset) }
+        if let pendingMonitor { try pendingMonitor.request.validate(dataset: dataset) }
     }
 }
 
@@ -889,6 +952,7 @@ final class BackendController: NSObject, ObservableObject, WKNavigationDelegate,
     private var simulatedAcknowledgementLoss = false
     private var simulatedEditAcknowledgementLoss = false
     private var simulatedInboxAcknowledgementLoss = false
+    private var simulatedMonitorAcknowledgementLoss = false
     @Published private(set) var nativeWorkspaceRevision = 0
 
     func makeWebView() -> WKWebView {
@@ -1668,6 +1732,7 @@ struct CratesDetailEditor: View {
         NativeApprovalRecoveryView(controller: controller)
         NativeEditRecoveryView(controller: controller)
         NativeInboxReviewRecoveryView(controller: controller)
+        NativeMonitorRecoveryView(controller: controller)
         NativeSavedPlansView(controller: controller)
         NativeExportHistoryView(controller: controller)
         NativeCrateManager(controller: controller)
@@ -1721,6 +1786,7 @@ struct LibraryDetailEditor: View {
         NativeApprovalRecoveryView(controller: controller)
         NativeEditRecoveryView(controller: controller)
         NativeInboxReviewRecoveryView(controller: controller)
+        NativeMonitorRecoveryView(controller: controller)
         NativeLibraryIndexView(controller: controller)
         CatalogSearchView(controller: controller)
         NativeDetailBoundaryNote(
@@ -2210,6 +2276,7 @@ struct PlannerBuilderCard: View {
             NativeApprovalRecoveryView(controller: controller)
             NativeEditRecoveryView(controller: controller)
             NativeInboxReviewRecoveryView(controller: controller)
+            NativeMonitorRecoveryView(controller: controller)
             NativeSavedPlansView(controller: controller)
         }
         .onChange(of: eventJSON) { _ in invalidate() }
@@ -2872,6 +2939,7 @@ struct NativeLibraryIndexView: View {
     @State private var message = ""
     @State private var checkedAt: Date?
     @State private var reviewFile: NativeInboxFile?
+    @State private var monitorSelection: NativeMonitorSelection?
     private var visible: [NativeInboxFile] { inbox?.visibleItems(view: filter, query: query, rootId: selectedRoot) ?? [] }
 
     var body: some View {
@@ -2910,6 +2978,7 @@ struct NativeLibraryIndexView: View {
             }
         }
         .sheet(item: $reviewFile) { file in NativeInboxReviewConfirmation(controller: controller, file: file) }
+        .sheet(item: $monitorSelection) { selection in NativeMonitorConfirmation(controller: controller, selection: selection) }
         .task(id: "\(expanded)-\(attempt)-\(controller.nativeWorkspaceRevision)") {
             guard expanded else { return }
             let current = UUID(); readId = current; loading = true; message = ""
@@ -2920,6 +2989,8 @@ struct NativeLibraryIndexView: View {
                 let values = try await (rootResponse, inboxResponse)
                 try Task.checkCancellation()
                 guard readId == current else { return }
+                for monitor in values.1.monitors { try monitor.validate() }
+                guard Set(values.1.monitors.map(\.rootId)).count == values.1.monitors.count else { throw nativeWorkflowError("Folder monitor snapshot contains duplicate identities.") }
                 roots = values.0; inbox = values.1; checkedAt = Date()
             } catch is CancellationError {
             } catch { if !Task.isCancelled, readId == current { message = "Index evidence could not be refreshed: \(error.localizedDescription)" } }
@@ -2931,6 +3002,19 @@ struct NativeLibraryIndexView: View {
             Text(root.path).font(.caption).textSelection(.enabled)
             Text("Published scan revision \(root.scanRevision)").font(.caption2).foregroundStyle(.secondary)
             if !root.availabilityError.isEmpty { Text(root.availabilityError).font(.caption).foregroundStyle(.orange) }
+            if let inbox {
+                let monitor = inbox.monitors.first { $0.rootId == root.id }
+                Text(monitor.map { "Monitoring: \($0.enabled == 1 ? "On" : "Off") · every \($0.intervalS) seconds · revision \($0.revision)" } ?? "Monitoring: Off · not configured")
+                    .font(.caption).accessibilityIdentifier("monitor-state-\(root.id)")
+                if let monitor {
+                    if monitor.enabled == 1 { Text("Next eligible scan: \(Date(timeIntervalSince1970: monitor.nextScan).formatted(date: .abbreviated, time: .shortened)). Requires the local service to be running.").font(.caption2).foregroundStyle(.secondary) }
+                    if let job = monitor.lastJob { Text("Last polling job: \(job)").font(.caption2).textSelection(.enabled) }
+                    if !monitor.error.isEmpty { Text("Monitoring error: \(monitor.error)").font(.caption).foregroundStyle(.orange) }
+                }
+                Button("Review folder monitoring…") { monitorSelection = NativeMonitorSelection(root: root, monitor: monitor) }
+                    .accessibilityIdentifier("monitor-review-\(root.id)")
+                    .disabled(loading || controller.approvalBusy || controller.hasPendingNativeOperation || controller.workflowJournal == nil)
+            }
         }
     }
     private func fileCard(_ file: NativeInboxFile) -> some View {
@@ -3061,6 +3145,130 @@ extension BackendController {
             throw nativeWorkflowError("An uncertain inbox status must be reconciled, not discarded.")
         }
         journal.pendingInboxReview = nil
+        try persistWorkflowJournal(journal)
+        nativeWorkspaceRevision += 1
+    }
+}
+
+struct NativeMonitorConfirmation: View {
+    @ObservedObject var controller: BackendController
+    let selection: NativeMonitorSelection
+    @Environment(\.dismiss) private var dismiss
+    @State private var enabled: Bool
+    @State private var interval: String
+    @State private var message = ""
+    init(controller: BackendController, selection: NativeMonitorSelection) {
+        self.controller = controller; self.selection = selection
+        _enabled = State(initialValue: selection.monitor?.enabled == 1)
+        _interval = State(initialValue: String(selection.monitor?.intervalS ?? 300))
+    }
+    private var seconds: Int? { Int(interval) }
+    private var changed: Bool { enabled != (selection.monitor?.enabled == 1) || seconds != (selection.monitor?.intervalS ?? 300) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Review folder monitoring").font(.title2.weight(.semibold))
+            Text(selection.root.path).font(.caption).textSelection(.enabled)
+            Text("Folder state: \(selection.root.state) · monitor revision \(selection.monitor?.revision ?? 0)").font(.caption)
+            Text("Opt in only for this indexed folder. While BOOTH BUDDY’s local service is running, polling can queue read-only scans and update its app-owned index and inbox. It does not copy or edit audio, tags or external DJ libraries. Enabling makes the folder eligible for a scan immediately. Disabling stops future polling; a queued or running scan may still finish. Cancel it separately in Recent scans if needed.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Toggle("Automatically rescan this indexed folder", isOn: $enabled).accessibilityIdentifier("monitor-enabled")
+            TextField("Polling interval (seconds)", text: $interval).textFieldStyle(.roundedBorder).accessibilityIdentifier("monitor-interval")
+            Text("60–86400 seconds. Polling occurs only while the local service is running; this does not install a macOS background agent.").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Close") { dismiss() }.disabled(controller.approvalBusy)
+                Button("Save folder monitoring") {
+                    guard let seconds else { return }
+                    message = ""
+                    Task {
+                        do { try await controller.saveNativeMonitor(selection, enabled: enabled, interval: seconds); dismiss() }
+                        catch { message = error.localizedDescription }
+                    }
+                }.buttonStyle(.borderedProminent).tint(BoothBrand.teal).accessibilityIdentifier("monitor-save")
+                    .disabled(!changed || !(60...86400).contains(seconds ?? 0) || controller.approvalBusy || controller.hasPendingNativeOperation || controller.workflowJournal == nil)
+            }
+            if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.red).accessibilityIdentifier("monitor-error") }
+        }.padding(24).frame(width: 540)
+    }
+}
+
+struct NativeMonitorRecoveryView: View {
+    @ObservedObject var controller: BackendController
+    @State private var message = ""
+    var body: some View {
+        if let pending = controller.workflowJournal?.pendingMonitor {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(pending.rejected ? "Folder monitoring rejected" : "Folder monitoring needs reconciliation")
+                    .font(.headline).accessibilityIdentifier("monitor-pending")
+                Text(pending.path).font(.caption).textSelection(.enabled)
+                Text("\(pending.request.enabled ? "Enable" : "Disable") · \(pending.request.intervalS) seconds · request \(pending.request.requestId)").font(.caption)
+                Text(pending.rejected ? "Discard this rejected request, refresh and review the current configuration." : "The exact request is retained. Retry to retrieve the same receipt before making another durable change.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(pending.rejected ? "Discard rejected monitoring" : "Retry exact folder monitoring") {
+                    message = ""
+                    Task {
+                        do {
+                            if pending.rejected { try controller.discardRejectedNativeMonitor() }
+                            else { try await controller.retryNativeMonitor() }
+                        } catch { message = error.localizedDescription }
+                    }
+                }.accessibilityIdentifier("monitor-retry").disabled(controller.approvalBusy)
+                if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.red) }
+            }
+        }
+    }
+}
+
+extension BackendController {
+    func saveNativeMonitor(_ selection: NativeMonitorSelection, enabled: Bool, interval: Int) async throws {
+        guard !approvalBusy, !hasPendingNativeOperation, var journal = workflowJournal else {
+            throw nativeWorkflowError("Resolve pending recovery before changing folder monitoring.")
+        }
+        if let monitor = selection.monitor {
+            try monitor.validate()
+            guard monitor.rootId == selection.root.id else { throw nativeWorkflowError("Monitor evidence belongs to another indexed folder.") }
+        }
+        let request = NativeMonitorRequest(requestId: UUID().uuidString.lowercased(), datasetId: datasetID,
+                                           rootId: selection.root.id, baseRevision: selection.monitor?.revision ?? 0, enabled: enabled, intervalS: interval)
+        try request.validate(dataset: datasetID)
+        journal.pendingMonitor = NativePendingMonitor(request: request, path: selection.root.path)
+        try persistWorkflowJournal(journal)
+        try await retryNativeMonitor()
+    }
+    func retryNativeMonitor() async throws {
+        guard !approvalBusy, let pending = workflowJournal?.pendingMonitor, !pending.rejected else {
+            throw nativeWorkflowError("There is no retryable folder monitor change.")
+        }
+        approvalBusy = true
+        defer { approvalBusy = false }
+        do {
+            let raw = try await nativeBytes("api/studio/monitor/save", bodyData: pending.request.data(dataset: datasetID))
+            let receipt = try Self.decodeNative(NativeMonitorReceipt.self, raw)
+            try receipt.validate(pending.request, dataset: datasetID)
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("--ui-testing"), args.contains("--synthetic-data"), args.contains("--test-drop-monitor-ack"), !simulatedMonitorAcknowledgementLoss {
+                simulatedMonitorAcknowledgementLoss = true
+                throw nativeWorkflowError("Monitor response interrupted. Close this review and retry the retained request from recovery.")
+            }
+            guard var journal = workflowJournal, journal.pendingMonitor?.request == pending.request else {
+                throw nativeWorkflowError("Monitor recovery changed unexpectedly. Reopen before continuing.")
+            }
+            journal.pendingMonitor = nil
+            try persistWorkflowJournal(journal)
+            nativeWorkspaceRevision += 1
+        } catch {
+            let failure = error as NSError
+            if failure.domain == "BOOTHBUDDY", [400, 409].contains(failure.code), var journal = workflowJournal {
+                journal.pendingMonitor?.rejected = true
+                try persistWorkflowJournal(journal)
+            }
+            throw error
+        }
+    }
+    func discardRejectedNativeMonitor() throws {
+        guard !approvalBusy, var journal = workflowJournal, journal.pendingMonitor?.rejected == true else {
+            throw nativeWorkflowError("An uncertain monitor change must be reconciled, not discarded.")
+        }
+        journal.pendingMonitor = nil
         try persistWorkflowJournal(journal)
         nativeWorkspaceRevision += 1
     }
@@ -3899,7 +4107,7 @@ struct NativeExportHistoryView: View {
 }
 
 extension BackendController {
-    var hasPendingNativeOperation: Bool { workflowJournal?.pending != nil || workflowJournal?.pendingEdit != nil || workflowJournal?.pendingInboxReview != nil }
+    var hasPendingNativeOperation: Bool { workflowJournal?.pending != nil || workflowJournal?.pendingEdit != nil || workflowJournal?.pendingInboxReview != nil || workflowJournal?.pendingMonitor != nil }
 
     func nativeCrates() async throws -> [CrateSummary] {
         let state = try await nativeRequest("api/studio/state")

@@ -774,6 +774,105 @@ final class AutoCueStudioUITests: XCTestCase {
     }
 
     @MainActor
+    private func openMonitorReview(_ app: XCUIApplication) {
+        let button = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "monitor-review-")).firstMatch
+        reveal(button, in: app); button.click()
+        XCTAssertTrue(app.buttons["monitor-save"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    private func waitMonitorState(_ app: XCUIApplication, _ text: String) {
+        let state = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "monitor-state-")).firstMatch
+        let ready = NSPredicate(format: "value == %@ OR label == %@", text, text)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: state)], timeout: 15), .completed)
+    }
+
+    @MainActor
+    func testNativeMonitorExplicitEnableDisableAndIntervalValidation() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp(); openSyntheticInbox(app, fixture: fixture)
+        XCTAssertEqual(try inboxSQL("SELECT COUNT(*) FROM studio_monitors;"), "0")
+        openMonitorReview(app); app.buttons["Close"].click()
+        XCTAssertEqual(try inboxSQL("SELECT COUNT(*) FROM studio_monitors;"), "0")
+        openMonitorReview(app)
+        app.checkBoxes["monitor-enabled"].click()
+        replaceText(app.textFields["monitor-interval"], with: "59")
+        XCTAssertFalse(app.buttons["monitor-save"].isEnabled)
+        replaceText(app.textFields["monitor-interval"], with: "60")
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-monitor-review"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["monitor-save"].click()
+        XCTAssertTrue(app.buttons["monitor-save"].waitForNonExistence(timeout: 15))
+        waitMonitorState(app, "Monitoring: On · every 60 seconds · revision 1")
+        XCTAssertEqual(try inboxSQL("SELECT enabled || ':' || interval_s || ':' || revision FROM studio_monitors;"), "1:60:1")
+        openMonitorReview(app); app.checkBoxes["monitor-enabled"].click(); app.buttons["monitor-save"].click()
+        XCTAssertTrue(app.buttons["monitor-save"].waitForNonExistence(timeout: 15))
+        waitMonitorState(app, "Monitoring: Off · every 60 seconds · revision 2")
+        app.typeKey("q", modifierFlags: .command); XCTAssertTrue(app.wait(for: .notRunning, timeout: 10))
+        let reopened = launchApp(); showLibraryDetail(reopened)
+        let toggle = reopened.buttons["library-index-toggle"]; reveal(toggle, in: reopened); toggle.click()
+        waitMonitorState(reopened, "Monitoring: Off · every 60 seconds · revision 2")
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
+    func testNativeMonitorLostAcknowledgementRecoversExactRequestAfterRestart() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp(additionalArguments: ["--test-drop-monitor-ack"])
+        openSyntheticInbox(app, fixture: fixture); openMonitorReview(app)
+        app.checkBoxes["monitor-enabled"].click()
+        replaceText(app.textFields["monitor-interval"], with: "60")
+        app.buttons["monitor-save"].click()
+        XCTAssertTrue(app.staticTexts["monitor-error"].waitForExistence(timeout: 15))
+        let journalURL = URL(fileURLWithPath: syntheticDataPath).appendingPathComponent("native-workflow-v1.json")
+        let before = try JSONSerialization.jsonObject(with: Data(contentsOf: journalURL)) as! [String: Any]
+        let pending = before["pendingMonitor"] as! [String: Any]
+        let request = pending["request"] as! [String: Any]
+        let requestID = request["requestId"] as! String
+        XCTAssertEqual(try inboxSQL("SELECT enabled || ':' || interval_s || ':' || revision FROM studio_monitors;"), "1:60:1")
+        app.buttons["Close"].click()
+        app.typeKey("q", modifierFlags: .command); XCTAssertTrue(app.wait(for: .notRunning, timeout: 10))
+        let reopened = launchApp(); showLibraryDetail(reopened)
+        let retry = reopened.buttons["monitor-retry"]; reveal(retry, in: reopened)
+        XCTAssertTrue(reopened.staticTexts["monitor-pending"].exists)
+        let shot = XCTAttachment(screenshot: reopened.windows.firstMatch.screenshot())
+        shot.name = "native-monitor-pending-recovery"; shot.lifetime = .keepAlways; add(shot)
+        retry.click()
+        XCTAssertTrue(reopened.staticTexts["monitor-pending"].waitForNonExistence(timeout: 15))
+        XCTAssertEqual(try inboxSQL("SELECT COUNT(*) FROM studio_receipts WHERE request_id='\(requestID)';"), "1")
+        XCTAssertEqual(try inboxSQL("SELECT enabled || ':' || interval_s || ':' || revision FROM studio_monitors;"), "1:60:1")
+        let after = try JSONSerialization.jsonObject(with: Data(contentsOf: journalURL)) as! [String: Any]
+        XCTAssertNil(after["pendingMonitor"])
+        let toggle = reopened.buttons["library-index-toggle"]; reveal(toggle, in: reopened); toggle.click()
+        waitMonitorState(reopened, "Monitoring: On · every 60 seconds · revision 1")
+        openMonitorReview(reopened); reopened.checkBoxes["monitor-enabled"].click(); reopened.buttons["monitor-save"].click()
+        XCTAssertTrue(reopened.buttons["monitor-save"].waitForNonExistence(timeout: 15))
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
+    func testNativeMonitorStaleConfigurationRequiresDiscardAndRefresh() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp(); openSyntheticInbox(app, fixture: fixture); openMonitorReview(app)
+        _ = try inboxSQL("INSERT INTO studio_monitors(root_id,enabled,interval_s,revision,next_scan,last_job,error) SELECT id,0,300,1,0,NULL,'' FROM library_roots;")
+        app.checkBoxes["monitor-enabled"].click()
+        app.buttons["monitor-save"].click()
+        XCTAssertTrue(app.staticTexts["monitor-error"].waitForExistence(timeout: 15))
+        XCTAssertEqual(try inboxSQL("SELECT enabled || ':' || revision FROM studio_monitors;"), "0:1")
+        app.buttons["Close"].click()
+        let discard = app.buttons["monitor-retry"]; reveal(discard, in: app)
+        XCTAssertEqual(discard.label, "Discard rejected monitoring"); discard.click()
+        XCTAssertTrue(app.staticTexts["monitor-pending"].waitForNonExistence(timeout: 15))
+        waitMonitorState(app, "Monitoring: Off · every 300 seconds · revision 1")
+        openMonitorReview(app); app.checkBoxes["monitor-enabled"].click(); app.buttons["monitor-save"].click()
+        XCTAssertTrue(app.buttons["monitor-save"].waitForNonExistence(timeout: 15))
+        waitMonitorState(app, "Monitoring: On · every 300 seconds · revision 2")
+        openMonitorReview(app); app.checkBoxes["monitor-enabled"].click(); app.buttons["monitor-save"].click()
+        XCTAssertTrue(app.buttons["monitor-save"].waitForNonExistence(timeout: 15))
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
     func testNativeInboxReviewRequiresSaveAndPreservesMedia() throws {
         let (fixture, original) = try generatedFixture()
         let app = launchApp(); openSyntheticInbox(app, fixture: fixture)
