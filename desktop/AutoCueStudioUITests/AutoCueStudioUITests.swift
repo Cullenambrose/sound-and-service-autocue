@@ -750,6 +750,103 @@ final class AutoCueStudioUITests: XCTestCase {
     }
 
     @MainActor
+    private func openSyntheticInbox(_ app: XCUIApplication, fixture: URL) {
+        let field = app.textFields["library-folder-path"]
+        replaceText(field, with: fixture.deletingLastPathComponent().path)
+        XCTAssertEqual(field.value as? String, fixture.deletingLastPathComponent().path)
+        app.buttons["library-start-scan"].click()
+        XCTAssertTrue(app.staticTexts["scan-status-completed"].waitForExistence(timeout: 30))
+        showLibraryDetail(app)
+        let toggle = app.buttons["library-index-toggle"]; reveal(toggle, in: app); toggle.click()
+        XCTAssertTrue(app.staticTexts["index-loaded-count"].waitForExistence(timeout: 15))
+    }
+
+    @MainActor
+    private func openInboxStatusReview(_ app: XCUIApplication) {
+        let review = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "index-review-")).firstMatch
+        reveal(review, in: app); review.click()
+        XCTAssertTrue(app.buttons["inbox-review-save"].waitForExistence(timeout: 5))
+    }
+
+    private func inboxSQL(_ statement: String) throws -> String {
+        let data = try outputOf("/usr/bin/sqlite3", [URL(fileURLWithPath: syntheticDataPath).appendingPathComponent("library.sqlite3").path, statement])
+        return String(data: data, encoding: .utf8)!.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor
+    func testNativeInboxReviewRequiresSaveAndPreservesMedia() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp(); openSyntheticInbox(app, fixture: fixture)
+        openInboxStatusReview(app)
+        app.buttons["Close"].click()
+        XCTAssertEqual(try inboxSQL("SELECT status || ':' || revision FROM studio_inbox;"), "new:1")
+        for (status, display, revision) in [("reviewed", "Reviewed", 2), ("ignored", "Ignored", 3), ("new", "New", 4)] {
+            openInboxStatusReview(app)
+            app.popUpButtons["inbox-review-status"].click(); app.menuItems[display].click()
+            app.buttons["inbox-review-save"].click()
+            let save = app.buttons["inbox-review-save"]
+            XCTAssertTrue(save.waitForNonExistence(timeout: 15))
+            XCTAssertEqual(try inboxSQL("SELECT status || ':' || revision FROM studio_inbox;"), "\(status):\(revision)")
+            let published = NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", "Inbox: \(status) · revision \(revision) ·", "Inbox: \(status) · revision \(revision) ·")
+            XCTAssertTrue(app.staticTexts.matching(published).firstMatch.waitForExistence(timeout: 15))
+        }
+        XCTAssertEqual(try inboxSQL("SELECT COUNT(*) FROM studio_receipts WHERE body_json LIKE '%base_revision%';"), "3")
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
+    func testNativeInboxReviewLostAcknowledgementReconcilesAfterRestart() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp(additionalArguments: ["--test-drop-inbox-ack"])
+        openSyntheticInbox(app, fixture: fixture); openInboxStatusReview(app)
+        app.buttons["inbox-review-save"].click()
+        XCTAssertTrue(app.staticTexts["inbox-review-error"].waitForExistence(timeout: 15))
+        let journalURL = URL(fileURLWithPath: syntheticDataPath).appendingPathComponent("native-workflow-v1.json")
+        let before = try JSONSerialization.jsonObject(with: Data(contentsOf: journalURL)) as! [String: Any]
+        let pending = before["pendingInboxReview"] as! [String: Any]
+        let retained = pending["request"] as! [String: Any]
+        let requestID = retained["requestId"] as! String
+        XCTAssertEqual(try inboxSQL("SELECT status || ':' || revision FROM studio_inbox;"), "reviewed:2")
+        app.buttons["Close"].click()
+        app.typeKey("q", modifierFlags: .command); XCTAssertTrue(app.wait(for: .notRunning, timeout: 10))
+        let reopened = launchApp(); showLibraryDetail(reopened)
+        let retry = reopened.buttons["inbox-review-retry"]; reveal(retry, in: reopened)
+        XCTAssertTrue(reopened.staticTexts["inbox-review-pending"].exists)
+        retry.click()
+        XCTAssertTrue(reopened.staticTexts["inbox-review-pending"].waitForNonExistence(timeout: 15))
+        let after = try JSONSerialization.jsonObject(with: Data(contentsOf: journalURL)) as! [String: Any]
+        XCTAssertNil(after["pendingInboxReview"])
+        XCTAssertEqual(try inboxSQL("SELECT COUNT(*) FROM studio_receipts WHERE request_id='\(requestID)';"), "1")
+        XCTAssertEqual(try inboxSQL("SELECT status || ':' || revision FROM studio_inbox;"), "reviewed:2")
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+        let shot = XCTAttachment(screenshot: reopened.windows.firstMatch.screenshot())
+        shot.name = "native-inbox-recovery"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor
+    func testNativeInboxReviewRejectsStaleRevisionUntilDiscardAndRefresh() throws {
+        let (fixture, original) = try generatedFixture()
+        let app = launchApp(); openSyntheticInbox(app, fixture: fixture); openInboxStatusReview(app)
+        _ = try inboxSQL("UPDATE studio_inbox SET revision=revision+1;")
+        app.buttons["inbox-review-save"].click()
+        XCTAssertTrue(app.staticTexts["inbox-review-error"].waitForExistence(timeout: 15))
+        XCTAssertEqual(try inboxSQL("SELECT status || ':' || revision FROM studio_inbox;"), "new:2")
+        app.buttons["Close"].click()
+        let discard = app.buttons["inbox-review-retry"]; reveal(discard, in: app)
+        XCTAssertEqual(discard.label, "Discard rejected inbox status"); discard.click()
+        XCTAssertTrue(app.staticTexts["inbox-review-pending"].waitForNonExistence(timeout: 10))
+        let refreshed = NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", "Inbox: new · revision 2 ·", "Inbox: new · revision 2 ·")
+        XCTAssertTrue(app.staticTexts.matching(refreshed).firstMatch.waitForExistence(timeout: 15))
+        openInboxStatusReview(app)
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = "native-inbox-status-review"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["inbox-review-save"].click()
+        XCTAssertTrue(app.buttons["inbox-review-save"].waitForNonExistence(timeout: 15))
+        XCTAssertEqual(try inboxSQL("SELECT status || ':' || revision FROM studio_inbox;"), "reviewed:3")
+        XCTAssertEqual(try Data(contentsOf: fixture), original)
+    }
+
+    @MainActor
     func testScanHistoryExpandsOlderJobsAndCollapsesAgain() throws {
         let (fixture, original) = try generatedFixture()
         let app = launchApp()

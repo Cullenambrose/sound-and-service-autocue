@@ -30,6 +30,27 @@ class NativePlaylistVerificationTests(unittest.TestCase):
         verifier = source[source.index("enum NativePlaylistZIP {"):source.index("struct NativePlanApprovalView:")]
         harness = '''
 let arguments = CommandLine.arguments
+if arguments.count > 3 && arguments[1] == "--inbox-request" {
+    do {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let request = try decoder.decode(NativeInboxReviewRequest.self, from: Data(arguments[2].utf8))
+        if arguments.count > 4 {
+            let receipt = try decoder.decode(NativeInboxReviewReceipt.self, from: Data(arguments[4].utf8))
+            try receipt.validate(request, dataset: arguments[3])
+        }
+        FileHandle.standardOutput.write(try request.data(dataset: arguments[3])); exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
+if arguments.count > 3 && arguments[1] == "--inbox-journal" {
+    do {
+        let journal = try JSONDecoder().decode(NativeWorkflowJournal.self, from: Data(arguments[2].utf8))
+        try journal.validatePendingOperations(dataset: arguments[3])
+        let restored = try JSONDecoder().decode(NativeWorkflowJournal.self, from: JSONEncoder().encode(journal))
+        try restored.validatePendingOperations(dataset: arguments[3])
+        if let pending = restored.pendingInboxReview { FileHandle.standardOutput.write(try pending.request.data(dataset: arguments[3])) }
+        else { print("no pending inbox status") }; exit(0)
+    } catch { print(error.localizedDescription); exit(1) }
+}
 if arguments.count > 3 && arguments[1] == "--scan-history" {
     do {
         let jobs = try JSONDecoder().decode([ScanJob].self, from: Data(arguments[2].utf8))
@@ -417,6 +438,56 @@ do {
         for view in ["unavailable", "duplicates", "errors"]:
             self.assertEqual(self.index_view(fixture, view), [{"id": "other", "title": "Other"}])
         self.assertEqual(self.index_view(fixture, query="untagged.wav"), [{"id": "untagged", "title": "untagged.wav"}])
+
+    def inbox_request(self):
+        return {"request_id": "retained-identity", "dataset_id": "dataset", "file_id": "exact-file", "base_revision": 7, "status": "reviewed"}
+
+    def run_inbox_request(self, request, receipt=None, dataset="dataset"):
+        args = [str(self.binary), "--inbox-request", json.dumps(request), dataset]
+        if receipt is not None:
+            args.append(json.dumps(receipt))
+        return subprocess.run(args, capture_output=True, text=True)
+
+    def test_inbox_review_wire_contract_and_exact_receipt_fields(self):
+        request = self.inbox_request()
+        receipt = {"ok": True, "request_id": request["request_id"], "dataset_id": "dataset", "file_id": "exact-file", "status": "reviewed", "revision": 8}
+        result = self.run_inbox_request(request, receipt)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout), request)
+        for key, wrong in [("ok", False), ("request_id", "different"), ("dataset_id", "different"), ("file_id", "different"), ("status", "ignored"), ("revision", 7), ("revision", 9)]:
+            self.assertNotEqual(self.run_inbox_request(request, {**receipt, key: wrong}).returncode, 0)
+
+    def test_inbox_review_rejects_invalid_identity_status_and_revision(self):
+        request = self.inbox_request()
+        for key, wrong in [("request_id", ""), ("dataset_id", "other"), ("file_id", ""), ("base_revision", 0), ("base_revision", -1), ("base_revision", 9223372036854775807), ("base_revision", True), ("status", "approved")]:
+            self.assertNotEqual(self.run_inbox_request({**request, key: wrong}).returncode, 0)
+        for status in ["new", "reviewed", "ignored"]:
+            self.assertEqual(self.run_inbox_request({**request, "status": status}).returncode, 0)
+
+    def test_inbox_review_journal_preserves_exact_request_on_restart(self):
+        request = self.inbox_request()
+        retained = {"requestId": request["request_id"], "datasetId": "dataset", "fileId": "exact-file", "baseRevision": 7, "status": "reviewed"}
+        journal = {"schemaVersion": 1, "datasetId": "dataset", "saved": [], "pendingInboxReview": {"request": retained, "title": "_Exact Title", "relativePath": "temporary.wav", "rejected": False}}
+        result = subprocess.run([str(self.binary), "--inbox-journal", json.dumps(journal), "dataset"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout), request)
+        for field, wrong in [("datasetId", "other"), ("schemaVersion", 2)]:
+            bad = subprocess.run([str(self.binary), "--inbox-journal", json.dumps({**journal, field: wrong}), "dataset"], capture_output=True, text=True)
+            self.assertNotEqual(bad.returncode, 0)
+
+    def test_inbox_review_journal_rejects_overlapping_durable_mutations(self):
+        request = {"requestId": "review", "datasetId": "dataset", "fileId": "exact-file", "baseRevision": 1, "status": "reviewed"}
+        approval = {"proposal": {"proposalId": "proposal", "datasetId": "dataset", "name": "Draft", "libraryRevision": "revision", "tracks": [], "expiresAt": 0}, "requestId": "approval", "requestData": "e30=", "rejected": False}
+        journal = {"schemaVersion": 1, "datasetId": "dataset", "saved": [], "pending": approval, "pendingInboxReview": {"request": request, "title": "Title", "relativePath": "test.wav", "rejected": False}}
+        result = subprocess.run([str(self.binary), "--inbox-journal", json.dumps(journal), "dataset"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overlapping", result.stdout)
+
+    def test_inbox_review_reads_existing_journal_without_new_optional_field(self):
+        journal = {"schemaVersion": 1, "datasetId": "dataset", "saved": []}
+        result = subprocess.run([str(self.binary), "--inbox-journal", json.dumps(journal), "dataset"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("no pending inbox status", result.stdout)
 
     def scan_history(self, statuses, expanded=False):
         rows = [{"id": str(i), "path": "/temporary/fixture", "status": state, "scanned": 0, "errors": 0} for i, state in enumerate(statuses)]

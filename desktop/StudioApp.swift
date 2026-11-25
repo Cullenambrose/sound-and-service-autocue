@@ -132,6 +132,46 @@ struct NativeLibraryInbox: Decodable {
         }
     }
 }
+struct NativeInboxReviewRequest: Codable, Equatable {
+    let requestId: String
+    let datasetId: String
+    let fileId: String
+    let baseRevision: Int
+    let status: String
+    func validate(dataset: String) throws {
+        guard datasetId == dataset, !dataset.isEmpty, !requestId.isEmpty, !fileId.isEmpty,
+              baseRevision > 0, baseRevision < Int.max, ["new", "reviewed", "ignored"].contains(status) else {
+            throw nativeWorkflowError("Inbox review identity or revision is invalid. No status was sent.")
+        }
+    }
+    func data(dataset: String) throws -> Data {
+        try validate(dataset: dataset)
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase; encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+struct NativePendingInboxReview: Codable {
+    let request: NativeInboxReviewRequest
+    let title: String
+    let relativePath: String
+    var rejected = false
+}
+struct NativeInboxReviewReceipt: Decodable {
+    let ok: Bool
+    let requestId: String
+    let datasetId: String
+    let fileId: String
+    let status: String
+    let revision: Int
+    func validate(_ request: NativeInboxReviewRequest, dataset: String) throws {
+        try request.validate(dataset: dataset)
+        guard ok, requestId == request.requestId, datasetId == request.datasetId,
+              fileId == request.fileId, status == request.status, revision == request.baseRevision + 1 else {
+            throw nativeWorkflowError("Inbox status receipt did not match the retained request. Retry exact recovery.")
+        }
+    }
+}
+
 struct NativeScanCancellation: Decodable {
     struct Job: Decodable { let id: String; let status: String }
     let ok: Bool
@@ -265,7 +305,15 @@ struct NativeWorkflowJournal: Codable {
     let datasetId: String
     var pending: NativeApprovalOperation?
     var pendingEdit: NativePendingEdit?
+    var pendingInboxReview: NativePendingInboxReview?
     var saved: [NativeSavedCrate] = []
+    func validatePendingOperations(dataset: String) throws {
+        guard schemaVersion == 1, datasetId == dataset,
+              [pending != nil, pendingEdit != nil, pendingInboxReview != nil].filter({ $0 }).count <= 1 else {
+            throw nativeWorkflowError("Recovery journal belongs to another dataset/version or contains overlapping mutations.")
+        }
+        if let pendingInboxReview { try pendingInboxReview.request.validate(dataset: dataset) }
+    }
 }
 
 struct NativeExportCrate: Codable, Equatable {
@@ -840,6 +888,7 @@ final class BackendController: NSObject, ObservableObject, WKNavigationDelegate,
     @Published private(set) var nativeExportRevision = 0
     private var simulatedAcknowledgementLoss = false
     private var simulatedEditAcknowledgementLoss = false
+    private var simulatedInboxAcknowledgementLoss = false
     @Published private(set) var nativeWorkspaceRevision = 0
 
     func makeWebView() -> WKWebView {
@@ -1618,6 +1667,7 @@ struct CratesDetailEditor: View {
                          detail: "Edit current app-owned crates, reconcile interrupted operations, and verify exports before the gig.")
         NativeApprovalRecoveryView(controller: controller)
         NativeEditRecoveryView(controller: controller)
+        NativeInboxReviewRecoveryView(controller: controller)
         NativeSavedPlansView(controller: controller)
         NativeExportHistoryView(controller: controller)
         NativeCrateManager(controller: controller)
@@ -1668,6 +1718,9 @@ struct LibraryDetailEditor: View {
             isScanning: $drafts.isScanning,
             openDetailedWorkspace: nil
         )
+        NativeApprovalRecoveryView(controller: controller)
+        NativeEditRecoveryView(controller: controller)
+        NativeInboxReviewRecoveryView(controller: controller)
         NativeLibraryIndexView(controller: controller)
         CatalogSearchView(controller: controller)
         NativeDetailBoundaryNote(
@@ -2156,6 +2209,7 @@ struct PlannerBuilderCard: View {
             if let proposal { NativePlanApprovalView(controller: controller, proposal: proposal) }
             NativeApprovalRecoveryView(controller: controller)
             NativeEditRecoveryView(controller: controller)
+            NativeInboxReviewRecoveryView(controller: controller)
             NativeSavedPlansView(controller: controller)
         }
         .onChange(of: eventJSON) { _ in invalidate() }
@@ -2805,7 +2859,7 @@ struct CatalogSearchView: View {
 }
 
 struct NativeLibraryIndexView: View {
-    let controller: BackendController
+    @ObservedObject var controller: BackendController
     @State private var expanded = false
     @State private var roots: [NativeIndexedRoot] = []
     @State private var inbox: NativeLibraryInbox?
@@ -2817,6 +2871,7 @@ struct NativeLibraryIndexView: View {
     @State private var loading = false
     @State private var message = ""
     @State private var checkedAt: Date?
+    @State private var reviewFile: NativeInboxFile?
     private var visible: [NativeInboxFile] { inbox?.visibleItems(view: filter, query: query, rootId: selectedRoot) ?? [] }
 
     var body: some View {
@@ -2824,7 +2879,7 @@ struct NativeLibraryIndexView: View {
             Button(expanded ? "Hide indexed folders and ingestion records" : "Review indexed folders and ingestion records") { expanded.toggle() }
                 .accessibilityIdentifier("library-index-toggle")
             if expanded {
-                Text("Folder identity is checked on refresh. File availability, metadata and same-hash groups below are published index evidence, not a fresh source-byte verification. No files, tags or review states are changed here.")
+                Text("Folder identity is checked on refresh. File availability, metadata and same-hash groups below are published index evidence, not a fresh source-byte verification. Viewing evidence changes no files or tags. Inbox status changes require a separate explicit review.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Refresh index evidence") { attempt += 1 }.disabled(loading).accessibilityIdentifier("index-refresh")
                 if loading { ProgressView("Loading index evidence…") }
@@ -2854,7 +2909,8 @@ struct NativeLibraryIndexView: View {
                 if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.red).textSelection(.enabled).accessibilityIdentifier("index-error") }
             }
         }
-        .task(id: "\(expanded)-\(attempt)") {
+        .sheet(item: $reviewFile) { file in NativeInboxReviewConfirmation(controller: controller, file: file) }
+        .task(id: "\(expanded)-\(attempt)-\(controller.nativeWorkspaceRevision)") {
             guard expanded else { return }
             let current = UUID(); readId = current; loading = true; message = ""
             defer { if readId == current { loading = false } }
@@ -2888,9 +2944,125 @@ struct NativeLibraryIndexView: View {
             if !file.missingMetadata.isEmpty { Text("Missing indexed metadata: \(file.missingMetadata.joined(separator: ", "))").font(.caption).foregroundStyle(.secondary) }
             if !file.error.isEmpty { Text(file.error).font(.caption).foregroundStyle(.orange) }
             if file.exactHashGroupCount > 1 { Text("Indexed same-hash group: \(file.exactHashGroupCount) files. This is not a deletion recommendation.").font(.caption).foregroundStyle(.secondary) }
+            Button("Review inbox status…") { reviewFile = file }
+                .accessibilityIdentifier("index-review-\(file.fileId)")
+                .disabled(controller.approvalBusy || controller.hasPendingNativeOperation || controller.workflowJournal == nil)
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct NativeInboxReviewConfirmation: View {
+    @ObservedObject var controller: BackendController
+    let file: NativeInboxFile
+    @Environment(\.dismiss) private var dismiss
+    @State private var status = "reviewed"
+    @State private var message = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Review inbox status").font(.title2.weight(.semibold))
+            Text(file.title).font(.headline)
+            Text(file.relativePath).font(.caption).textSelection(.enabled)
+            Text("Exact file: \(file.fileId) · inbox revision \(file.revision) · current status: \(file.status)")
+                .font(.caption).textSelection(.enabled)
+            Text("This records app-owned inbox triage only. Reviewed does not certify tags, cleanliness, musical quality or event suitability. Ignored does not hide a file from catalog search, exclude it from planning, or delete it. A later scan that changes its indexed evidence returns it to New.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Picker("New inbox status", selection: $status) {
+                Text("New").tag("new"); Text("Reviewed").tag("reviewed"); Text("Ignored").tag("ignored")
+            }.accessibilityIdentifier("inbox-review-status")
+            HStack {
+                Button("Close") { dismiss() }.disabled(controller.approvalBusy)
+                Button("Save inbox status") {
+                    message = ""
+                    Task {
+                        do { try await controller.saveNativeInboxReview(file, status: status); dismiss() }
+                        catch { message = error.localizedDescription }
+                    }
+                }.buttonStyle(.borderedProminent).tint(BoothBrand.teal)
+                    .accessibilityIdentifier("inbox-review-save")
+                    .disabled(status == file.status || controller.approvalBusy || controller.hasPendingNativeOperation || controller.workflowJournal == nil)
+            }
+            if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.red).accessibilityIdentifier("inbox-review-error") }
+        }.padding(24).frame(width: 540)
+    }
+}
+
+struct NativeInboxReviewRecoveryView: View {
+    @ObservedObject var controller: BackendController
+    @State private var message = ""
+    var body: some View {
+        if let pending = controller.workflowJournal?.pendingInboxReview {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(pending.rejected ? "Inbox status rejected" : "Inbox status needs reconciliation")
+                    .font(.headline).accessibilityIdentifier("inbox-review-pending")
+                Text("\(pending.title) · \(pending.request.status) · request \(pending.request.requestId)").font(.caption).textSelection(.enabled)
+                Text(pending.rejected ? "Discard this rejected request, refresh the evidence and review again." : "The exact status request is retained on this Mac. Retry it to retrieve the same receipt before making another durable change.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(pending.rejected ? "Discard rejected inbox status" : "Retry exact inbox status") {
+                    message = ""
+                    Task {
+                        do {
+                            if pending.rejected { try controller.discardRejectedNativeInboxReview() }
+                            else { try await controller.retryNativeInboxReview() }
+                        } catch { message = error.localizedDescription }
+                    }
+                }.accessibilityIdentifier("inbox-review-retry").disabled(controller.approvalBusy)
+                if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.red) }
+            }
+        }
+    }
+}
+
+extension BackendController {
+    func saveNativeInboxReview(_ file: NativeInboxFile, status: String) async throws {
+        guard !approvalBusy, !hasPendingNativeOperation, var journal = workflowJournal, status != file.status else {
+            throw nativeWorkflowError("Resolve recovery or choose a changed inbox status before saving.")
+        }
+        let request = NativeInboxReviewRequest(requestId: UUID().uuidString.lowercased(), datasetId: datasetID,
+                                             fileId: file.fileId, baseRevision: file.revision, status: status)
+        try request.validate(dataset: datasetID)
+        journal.pendingInboxReview = NativePendingInboxReview(request: request, title: file.title, relativePath: file.relativePath)
+        try persistWorkflowJournal(journal)
+        try await retryNativeInboxReview()
+    }
+    func retryNativeInboxReview() async throws {
+        guard !approvalBusy, let pending = workflowJournal?.pendingInboxReview, !pending.rejected else {
+            throw nativeWorkflowError("There is no retryable inbox status change.")
+        }
+        approvalBusy = true
+        defer { approvalBusy = false }
+        do {
+            let raw = try await nativeBytes("api/studio/inbox/review", bodyData: pending.request.data(dataset: datasetID))
+            let receipt = try Self.decodeNative(NativeInboxReviewReceipt.self, raw)
+            try receipt.validate(pending.request, dataset: datasetID)
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("--ui-testing"), args.contains("--synthetic-data"), args.contains("--test-drop-inbox-ack"), !simulatedInboxAcknowledgementLoss {
+                simulatedInboxAcknowledgementLoss = true
+                throw nativeWorkflowError("Inbox response interrupted. Close this review and retry the retained request from recovery.")
+            }
+            guard var journal = workflowJournal, journal.pendingInboxReview?.request == pending.request else {
+                throw nativeWorkflowError("Inbox recovery changed unexpectedly. Reopen before continuing.")
+            }
+            journal.pendingInboxReview = nil
+            try persistWorkflowJournal(journal)
+            nativeWorkspaceRevision += 1
+        } catch {
+            let failure = error as NSError
+            if failure.domain == "BOOTHBUDDY", [400, 409].contains(failure.code), var journal = workflowJournal {
+                journal.pendingInboxReview?.rejected = true
+                try persistWorkflowJournal(journal)
+            }
+            throw error
+        }
+    }
+    func discardRejectedNativeInboxReview() throws {
+        guard !approvalBusy, var journal = workflowJournal, journal.pendingInboxReview?.rejected == true else {
+            throw nativeWorkflowError("An uncertain inbox status must be reconciled, not discarded.")
+        }
+        journal.pendingInboxReview = nil
+        try persistWorkflowJournal(journal)
+        nativeWorkspaceRevision += 1
     }
 }
 
@@ -3097,7 +3269,7 @@ extension BackendController {
                     }
                 }
             } else { journal = NativeWorkflowJournal(datasetId: datasetID) }
-            guard journal.pending == nil || journal.pendingEdit == nil else { throw nativeWorkflowError("Recovery journal contains overlapping mutations.") }
+            try journal.validatePendingOperations(dataset: datasetID)
             if let pending = journal.pendingEdit {
                 let expected = try editRequest(pending.preview, undo: pending.undo, requestId: pending.requestId)
                 guard let supplied = try JSONSerialization.jsonObject(with: pending.requestData) as? [String: Any],
@@ -3727,7 +3899,7 @@ struct NativeExportHistoryView: View {
 }
 
 extension BackendController {
-    var hasPendingNativeOperation: Bool { workflowJournal?.pending != nil || workflowJournal?.pendingEdit != nil }
+    var hasPendingNativeOperation: Bool { workflowJournal?.pending != nil || workflowJournal?.pendingEdit != nil || workflowJournal?.pendingInboxReview != nil }
 
     func nativeCrates() async throws -> [CrateSummary] {
         let state = try await nativeRequest("api/studio/state")
